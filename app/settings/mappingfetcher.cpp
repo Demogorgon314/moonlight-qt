@@ -2,6 +2,7 @@
 #include "path.h"
 
 #include <QNetworkReply>
+#include "SDL_compat.h"
 
 MappingFetcher::MappingFetcher(QObject *parent) :
     QObject(parent)
