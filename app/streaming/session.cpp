@@ -290,6 +290,9 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             SDL_Window* window, int videoFormat, int width, int height,
                             int frameRate, bool enableVsync, bool enableFramePacing, bool enableVideoEnhancement, bool ignoreAspectRatio, bool testOnly, IVideoDecoder*& chosenDecoder)
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::chooseDecoder() starting - format: 0x%x, %dx%d, %d FPS", 
+                videoFormat, width, height, frameRate);
+    
     DECODER_PARAMETERS params;
 
     // We should never have vsync enabled for test-mode.
@@ -318,6 +321,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     if (chosenDecoder->initialize(&params)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "SLVideo video decoder chosen");
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::chooseDecoder() completed successfully - SLVideo");
         return true;
     }
     else {
@@ -333,6 +337,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     if (chosenDecoder->initialize(&params)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "FFmpeg-based video decoder chosen");
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::chooseDecoder() completed successfully - FFmpeg");
         return true;
     }
     else {
@@ -348,6 +353,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
 #endif
 
     // If we reach this, we didn't initialize any decoders successfully
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::chooseDecoder() failed - no decoder available");
     return false;
 }
 
@@ -512,6 +518,8 @@ Session::getDecoderAvailability(SDL_Window* window,
 
 bool Session::populateDecoderProperties(SDL_Window* window)
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::populateDecoderProperties() starting");
+    
     IVideoDecoder* decoder;
 
     if (!chooseDecoder(m_Preferences->videoDecoderSelection,
@@ -563,6 +571,8 @@ bool Session::populateDecoderProperties(SDL_Window* window)
 
     delete decoder;
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::populateDecoderProperties() completed");
+    
     return true;
 }
 
@@ -593,6 +603,8 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
 
 bool Session::initialize()
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::initialize() starting");
+    
 #ifdef Q_OS_DARWIN
     if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
         // If we have a notch and the user specified one of the two native display modes
@@ -962,6 +974,8 @@ bool Session::initialize()
     // 启动带宽计算
     BandwidthCalculator::instance()->start();
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::initialize() completed");
+    
     return true;
 }
 
@@ -973,6 +987,8 @@ void Session::emitLaunchWarning(QString text)
 
 bool Session::validateLaunch(SDL_Window* testWindow)
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::validateLaunch() starting");
+    
     if (!m_Computer->isSupportedServerVersion) {
         emit displayLaunchError(tr("The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.").arg(m_Computer->name));
         return false;
@@ -1237,6 +1253,8 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         return false;
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::validateLaunch() completed");
+    
     return true;
 }
 
@@ -1785,6 +1803,8 @@ void Session::exec(QWindow* qtWindow)
 
 void Session::execInternal()
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::execInternal() starting");
+    
     // Complete initialization in this deferred context to avoid
     // calling expensive functions in the constructor (during the
     // process of loading the StreamSegue).
@@ -1805,7 +1825,9 @@ void Session::execInternal()
 
     // Initialize the gamepad code with our preferences
     // NB: m_InputHandler must be initialize before starting the connection.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Creating SdlInputHandler...");
     m_InputHandler = new SdlInputHandler(*m_Preferences, m_StreamConfig.width, m_StreamConfig.height);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SdlInputHandler created");
 
     AsyncConnectionStartThread asyncConnThread(this);
     if (!m_ThreadedExec) {
