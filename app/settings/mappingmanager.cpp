@@ -68,10 +68,16 @@ void MappingManager::save()
 
 void MappingManager::applyMappings()
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "MappingManager::applyMappings() started");
+    
     QByteArray mappingData = Path::readDataFile("gamecontrollerdb.txt");
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "gamecontrollerdb.txt read completed, size: %d bytes", mappingData.size());
+    
     if (!mappingData.isEmpty()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Starting SDL_GameControllerAddMappingsFromRW...");
         int newMappings = SDL_GameControllerAddMappingsFromRW(
                     SDL_RWFromConstMem(mappingData.constData(), mappingData.size()), 1);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SDL_GameControllerAddMappingsFromRW completed");
 
         if (newMappings > 0) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -98,6 +104,7 @@ void MappingManager::applyMappings()
                      "Unable to load gamepad mapping file");
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Starting to apply %d user mappings", m_Mappings.size());
     QList<SdlGamepadMapping> mappings = m_Mappings.values();
     for (const SdlGamepadMapping& mapping : mappings) {
         QString sdlMappingString = mapping.getSdlMappingString();
@@ -113,6 +120,7 @@ void MappingManager::applyMappings()
                         qPrintable(sdlMappingString));
         }
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "MappingManager::applyMappings() completed");
 }
 
 void MappingManager::addMapping(QString mappingString)

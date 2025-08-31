@@ -148,27 +148,35 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, streamIgnoreDevices.toUtf8());
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, streamIgnoreDevicesExcept.toUtf8());
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SdlInputHandler initialization sequence starting");
+    
     // We must initialize joystick explicitly before gamecontroller in order
     // to ensure we receive gamecontroller attach events for gamepads where
     // SDL doesn't have a built-in mapping. By starting joystick first, we
     // can allow mapping manager to update the mappings before GC attach
     // events are generated.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Initializing SDL_INIT_JOYSTICK subsystem");
     SDL_assert(!SDL_WasInit(SDL_INIT_JOYSTICK));
     if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_JOYSTICK) failed: %s",
                      SDL_GetError());
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SDL_INIT_JOYSTICK initialization completed");
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Starting gamepad mapping and controller initialization");
+    
     MappingManager mappingManager;
     mappingManager.applyMappings();
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Flushing gamepad events");
     // Flush gamepad arrival and departure events which may be queued before
     // starting the gamecontroller subsystem again. This prevents us from
     // receiving duplicate arrival and departure events for the same gamepad.
     SDL_FlushEvent(SDL_CONTROLLERDEVICEADDED);
     SDL_FlushEvent(SDL_CONTROLLERDEVICEREMOVED);
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Initializing SDL_INIT_GAMECONTROLLER subsystem");
     // We need to reinit this each time, since you only get
     // an initial set of gamepad arrival events once per init.
     SDL_assert(!SDL_WasInit(SDL_INIT_GAMECONTROLLER));
@@ -177,6 +185,7 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
                      "SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
                      SDL_GetError());
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SDL_INIT_GAMECONTROLLER initialization completed");
 
 #if !SDL_VERSION_ATLEAST(2, 0, 9)
     SDL_assert(!SDL_WasInit(SDL_INIT_HAPTIC));

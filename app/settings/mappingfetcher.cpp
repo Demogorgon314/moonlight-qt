@@ -20,6 +20,8 @@ MappingFetcher::MappingFetcher(QObject *parent) :
 
 void MappingFetcher::start()
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "MappingFetcher::start() initiated");
+    
     if (!m_Nam) {
         Q_ASSERT(m_Nam);
         return;
@@ -63,11 +65,13 @@ void MappingFetcher::start()
 #endif
 
     // We'll get a callback when this is finished
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "MappingFetcher network request started");
     m_Nam->get(request);
 }
 
 void MappingFetcher::handleMappingListFetched(QNetworkReply* reply)
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "MappingFetcher network request completed");
     Q_ASSERT(reply->isFinished());
 
     // Delete the QNetworkAccessManager to free resources and
