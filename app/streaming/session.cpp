@@ -940,12 +940,15 @@ bool Session::initialize()
         ret = populateDecoderProperties(testWindow);
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::SDL_DestroyWindow() starting");
     SDL_DestroyWindow(testWindow);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::SDL_DestroyWindow() completed");
 
     if (!ret) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return false;
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::initialize() before configurationWarnings");
 
     if (m_Preferences->configurationWarnings) {
         // Display launch warnings in Qt only after destroying SDL's window.
@@ -970,6 +973,7 @@ bool Session::initialize()
             }
         }
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Session::initialize() before bandwidth start");
 
     // 启动带宽计算
     BandwidthCalculator::instance()->start();
