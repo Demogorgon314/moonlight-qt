@@ -30,6 +30,10 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
+    - name: Download dependencies
+      shell: pwsh
+      run: ./setup-deps.ps1
+
     - name: Install Qt
       uses: jurplel/install-qt-action@v3
       with:
