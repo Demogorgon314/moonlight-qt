@@ -19,6 +19,9 @@ INSTALLER_FOLDER=$BUILD_ROOT/installer-$BUILD_CONFIG
 
 VERSION=$(python3 "$SOURCE_ROOT/scripts/derive-version.py" --source-root "$SOURCE_ROOT" --field artifact)
 
+echo Updating dependencies
+python3 $SOURCE_ROOT/setup-deps.py
+
 echo Cleaning output directories
 rm -rf $BUILD_FOLDER
 rm -rf $DEPLOY_FOLDER
