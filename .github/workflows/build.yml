@@ -344,11 +344,12 @@ jobs:
         sudo ldconfig
         cd ..
 
-    - name: Install linuxdeployqt
+    - name: Install linuxdeploy
       run: |
-        mkdir $HOME/bin
-        wget -O $HOME/bin/linuxdeployqt https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage
-        chmod a+x $HOME/bin/linuxdeployqt
+        mkdir -p $HOME/bin
+        wget -O $HOME/bin/linuxdeploy-x86_64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+        wget -O $HOME/bin/linuxdeploy-plugin-qt-x86_64.AppImage https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+        chmod a+x $HOME/bin/linuxdeploy*.AppImage
 
     - name: Setup FUSE for AppImage
       run: |
@@ -384,7 +385,7 @@ jobs:
         # export PATH=/usr/lib/qt5/bin:$PATH
         # export QT_QPA_PLATFORM_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins
         
-        # Add linuxdeployqt to PATH
+        # Add linuxdeploy to PATH
         export PATH=$PATH:$HOME/bin
         
         echo "Building AppImage with CI-optimized settings..."
