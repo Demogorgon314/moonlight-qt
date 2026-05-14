@@ -6,9 +6,12 @@
 #include <QPair>
 #include <QQueue>
 #include <QString>
+#include <QStringList>
 #include <cstdint>
 
 class NvComputer;
+class QImage;
+class QMimeData;
 class QNetworkAccessManager;
 class QNetworkReply;
 class QSslError;
@@ -95,6 +98,23 @@ private:
     void recordHash(uint64_t hash);
 
     static uint64_t hashBytes(const QByteArray& bytes);
+
+    bool encodeImageAsPng(const QImage& image,
+                          QByteArray& outPng,
+                          const char* sourceDescription) const;
+    bool extractClipboardPng(const QMimeData* mime,
+                             QByteArray& outPng,
+                             QString* outSourceDescription = nullptr) const;
+    bool tryExtractImageBytes(const QMimeData* mime,
+                              const QStringList& preferredFormats,
+                              QByteArray& outPng,
+                              QString* outSourceDescription) const;
+    bool tryExtractImageFromUrls(const QMimeData* mime,
+                                 QByteArray& outPng,
+                                 QString* outSourceDescription) const;
+    bool tryExtractImageFromHtml(const QMimeData* mime,
+                                 QByteArray& outPng,
+                                 QString* outSourceDescription) const;
 
     // Out-of-band blob helpers. Both run on the GUI thread; the
     // QNetworkAccessManager event-loop callbacks land back on the GUI thread.

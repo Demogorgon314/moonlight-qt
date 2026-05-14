@@ -13,6 +13,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
 #include <QSslConfiguration>
 #include <QSslError>
 #include <QUrl>
@@ -23,6 +24,14 @@
 #include <SDL.h>
 
 #include <Limelight.h>
+
+namespace {
+bool isImageLikeMimeFormat(const QString& format)
+{
+    return format.startsWith(QStringLiteral("image/"), Qt::CaseInsensitive)
+            || format.compare(QStringLiteral("application/x-qt-image"), Qt::CaseInsensitive) == 0;
+}
+}
 
 ClipboardSync::ClipboardSync(NvComputer* computer, QObject* parent)
     : QObject(parent),
@@ -190,6 +199,254 @@ void ClipboardSync::applyInboundPng(const QByteArray& payload)
     cb->setImage(image);
 }
 
+bool ClipboardSync::encodeImageAsPng(const QImage& image,
+                                     QByteArray& outPng,
+                                     const char* sourceDescription) const
+{
+    const qint64 pixels = static_cast<qint64>(image.width()) * image.height();
+    if (pixels <= 0 || pixels > MAX_IMAGE_PIXELS) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "ClipboardSync: image too large from %s (%dx%d), dropping",
+                    sourceDescription,
+                    image.width(),
+                    image.height());
+        return false;
+    }
+
+    outPng.clear();
+    outPng.reserve(64 * 1024);
+    QBuffer buf(&outPng);
+    buf.open(QIODevice::WriteOnly);
+    if (!image.save(&buf, "PNG") || outPng.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "ClipboardSync: PNG encode failed for %s (%dx%d)",
+                    sourceDescription,
+                    image.width(),
+                    image.height());
+        outPng.clear();
+        return false;
+    }
+
+    return true;
+}
+
+bool ClipboardSync::tryExtractImageBytes(const QMimeData* mime,
+                                         const QStringList& preferredFormats,
+                                         QByteArray& outPng,
+                                         QString* outSourceDescription) const
+{
+    if (mime == nullptr) {
+        return false;
+    }
+
+    QStringList candidateFormats = preferredFormats;
+    for (const QString& format : mime->formats()) {
+        if (!isImageLikeMimeFormat(format) || candidateFormats.contains(format, Qt::CaseInsensitive)) {
+            continue;
+        }
+        candidateFormats.append(format);
+    }
+
+    for (const QString& format : candidateFormats) {
+        QByteArray bytes = mime->data(format);
+        if (bytes.isEmpty()) {
+            continue;
+        }
+
+        QImage image;
+        if (!image.loadFromData(bytes)) {
+            continue;
+        }
+
+        if (format.compare(QStringLiteral("image/png"), Qt::CaseInsensitive) == 0) {
+            const qint64 pixels = static_cast<qint64>(image.width()) * image.height();
+            if (pixels <= 0 || pixels > MAX_IMAGE_PIXELS) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "ClipboardSync: image too large from mime %s (%dx%d), dropping",
+                            format.toUtf8().constData(),
+                            image.width(),
+                            image.height());
+                return false;
+            }
+            outPng = bytes;
+        }
+        else if (!encodeImageAsPng(image, outPng, format.toUtf8().constData())) {
+            continue;
+        }
+
+        if (outSourceDescription != nullptr) {
+            *outSourceDescription = format;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool ClipboardSync::tryExtractImageFromUrls(const QMimeData* mime,
+                                            QByteArray& outPng,
+                                            QString* outSourceDescription) const
+{
+    if (mime == nullptr || !mime->hasUrls()) {
+        return false;
+    }
+
+    const QList<QUrl> urls = mime->urls();
+    for (const QUrl& url : urls) {
+        if (!url.isLocalFile()) {
+            continue;
+        }
+
+        QImage image(url.toLocalFile());
+        if (image.isNull()) {
+            continue;
+        }
+
+        if (!encodeImageAsPng(image, outPng, "local file url")) {
+            continue;
+        }
+
+        if (outSourceDescription != nullptr) {
+            *outSourceDescription = QStringLiteral("url:%1").arg(url.toLocalFile());
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool ClipboardSync::tryExtractImageFromHtml(const QMimeData* mime,
+                                            QByteArray& outPng,
+                                            QString* outSourceDescription) const
+{
+    if (mime == nullptr || !mime->hasHtml()) {
+        return false;
+    }
+
+    const QString html = mime->html();
+    if (html.isEmpty()) {
+        return false;
+    }
+
+    static const QRegularExpression imgSrcRegex(
+        QStringLiteral("<img[^>]+src\\s*=\\s*['\"]([^'\"]+)['\"]"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression dataUrlRegex(
+        QStringLiteral("^data:(image/[^;,]+)?;base64,(.+)$"),
+        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+
+    QRegularExpressionMatchIterator it = imgSrcRegex.globalMatch(html);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        const QString src = match.captured(1).trimmed();
+        if (src.isEmpty()) {
+            continue;
+        }
+
+        const QRegularExpressionMatch dataUrlMatch = dataUrlRegex.match(src);
+        if (dataUrlMatch.hasMatch()) {
+            QByteArray bytes = QByteArray::fromBase64(dataUrlMatch.captured(2).toUtf8());
+            if (bytes.isEmpty()) {
+                continue;
+            }
+
+            QImage image;
+            if (!image.loadFromData(bytes)) {
+                continue;
+            }
+
+            if (dataUrlMatch.captured(1).compare(QStringLiteral("image/png"), Qt::CaseInsensitive) == 0) {
+                const qint64 pixels = static_cast<qint64>(image.width()) * image.height();
+                if (pixels <= 0 || pixels > MAX_IMAGE_PIXELS) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "ClipboardSync: image too large from html data URL (%dx%d), dropping",
+                                image.width(),
+                                image.height());
+                    return false;
+                }
+                outPng = bytes;
+            }
+            else if (!encodeImageAsPng(image, outPng, "html data url")) {
+                continue;
+            }
+
+            if (outSourceDescription != nullptr) {
+                *outSourceDescription = QStringLiteral("html:data-url");
+            }
+            return true;
+        }
+
+        const QUrl url(src);
+        if (!url.isLocalFile()) {
+            continue;
+        }
+
+        QImage image(url.toLocalFile());
+        if (image.isNull()) {
+            continue;
+        }
+
+        if (!encodeImageAsPng(image, outPng, "html local file")) {
+            continue;
+        }
+
+        if (outSourceDescription != nullptr) {
+            *outSourceDescription = QStringLiteral("html:%1").arg(url.toLocalFile());
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool ClipboardSync::extractClipboardPng(const QMimeData* mime,
+                                        QByteArray& outPng,
+                                        QString* outSourceDescription) const
+{
+    outPng.clear();
+    if (outSourceDescription != nullptr) {
+        outSourceDescription->clear();
+    }
+
+    if (mime == nullptr) {
+        return false;
+    }
+
+    if (mime->hasImage()) {
+        QImage image = qvariant_cast<QImage>(mime->imageData());
+        if (!image.isNull() && encodeImageAsPng(image, outPng, "mime imageData")) {
+            if (outSourceDescription != nullptr) {
+                *outSourceDescription = QStringLiteral("imageData");
+            }
+            return true;
+        }
+    }
+
+    const QStringList preferredFormats {
+        QStringLiteral("image/png"),
+        QStringLiteral("image/tiff"),
+        QStringLiteral("image/jpeg"),
+        QStringLiteral("image/jpg"),
+        QStringLiteral("image/bmp"),
+        QStringLiteral("image/webp"),
+        QStringLiteral("application/x-qt-image")
+    };
+
+    if (tryExtractImageBytes(mime, preferredFormats, outPng, outSourceDescription)) {
+        return true;
+    }
+
+    if (tryExtractImageFromUrls(mime, outPng, outSourceDescription)) {
+        return true;
+    }
+
+    if (tryExtractImageFromHtml(mime, outPng, outSourceDescription)) {
+        return true;
+    }
+
+    return false;
+}
+
 void ClipboardSync::onLocalClipboardChanged()
 {
     if (!m_Active) {
@@ -210,65 +467,68 @@ void ClipboardSync::onLocalClipboardChanged()
 
     // Image takes precedence — some applications attach a fallback text label
     // (file path, alt text) alongside the bitmap; we want the picture, not the
-    // path. Matches moonlight-android's ClipboardSyncManager ordering.
-    if (mime != nullptr && mime->hasImage()) {
-        QImage image = qvariant_cast<QImage>(mime->imageData());
-        if (!image.isNull()) {
-            const qint64 pixels = static_cast<qint64>(image.width()) * image.height();
-            if (pixels <= 0 || pixels > MAX_IMAGE_PIXELS) {
+    // path. To match HarmonyOS' record iteration behavior more closely, try
+    // multiple extraction paths rather than only mime->imageData().
+    QByteArray png;
+    QString imageSourceDescription;
+    if (extractClipboardPng(mime, png, &imageSourceDescription)) {
+        if (png.size() > MAX_PAYLOAD) {
+            // Out-of-band path. Record the underlying PNG hash before
+            // upload so the echo we'll see when the host loops the REF
+            // back (and we fetch the same bytes) is suppressed.
+            if (png.size() > MAX_BLOB_BYTES) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "ClipboardSync: image too large (%dx%d), dropping",
-                            image.width(), image.height());
+                            "ClipboardSync: PNG payload %lld B from %s exceeds %lld B blob cap, dropping",
+                            static_cast<long long>(png.size()),
+                            imageSourceDescription.toUtf8().constData(),
+                            static_cast<long long>(MAX_BLOB_BYTES));
                 return;
             }
-
-            QByteArray png;
-            png.reserve(64 * 1024);
-            QBuffer buf(&png);
-            buf.open(QIODevice::WriteOnly);
-            if (!image.save(&buf, "PNG") || png.isEmpty()) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "ClipboardSync: PNG encode failed (%dx%d)",
-                            image.width(), image.height());
-                return;
-            }
-
-            if (png.size() > MAX_PAYLOAD) {
-                // Out-of-band path. Record the underlying PNG hash before
-                // upload so the echo we'll see when the host loops the REF
-                // back (and we fetch the same bytes) is suppressed.
-                if (png.size() > MAX_BLOB_BYTES) {
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "ClipboardSync: PNG payload %lld B exceeds %lld B blob cap, dropping",
-                                static_cast<long long>(png.size()),
-                                static_cast<long long>(MAX_BLOB_BYTES));
-                    return;
-                }
-                uint64_t hash = hashBytes(png);
-                if (seenRecently(hash)) {
-                    return;
-                }
-                recordHash(hash);
-                uploadAndSendRef(png, QStringLiteral("image/png"));
-                return;
-            }
-
             uint64_t hash = hashBytes(png);
             if (seenRecently(hash)) {
                 return;
             }
             recordHash(hash);
+            uploadAndSendRef(png, QStringLiteral("image/png"));
+            return;
+        }
 
-            QByteArray frame;
-            if (encodeFrame(KIND_PNG, png, frame)) {
-                int rc = LiSendClipboardData(frame.constData(), frame.size());
-                if (rc != 0) {
-                    SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
-                                 "ClipboardSync: LiSendClipboardData(PNG, %d bytes) -> %d",
-                                 static_cast<int>(frame.size()), rc);
+        uint64_t hash = hashBytes(png);
+        if (seenRecently(hash)) {
+            return;
+        }
+        recordHash(hash);
+
+        QByteArray frame;
+        if (encodeFrame(KIND_PNG, png, frame)) {
+            int rc = LiSendClipboardData(frame.constData(), frame.size());
+            if (rc != 0) {
+                SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                             "ClipboardSync: LiSendClipboardData(PNG, %d bytes from %s) -> %d",
+                             static_cast<int>(frame.size()),
+                             imageSourceDescription.toUtf8().constData(),
+                             rc);
+            }
+        }
+        return;
+    }
+
+    if (mime != nullptr) {
+        bool hasImageLikeHints = mime->hasImage() || mime->hasUrls() || mime->hasHtml();
+        if (!hasImageLikeHints) {
+            for (const QString& format : mime->formats()) {
+                if (isImageLikeMimeFormat(format)) {
+                    hasImageLikeHints = true;
+                    break;
                 }
             }
-            return;
+        }
+
+        if (hasImageLikeHints) {
+            const QString formatsSummary = mime->formats().join(QStringLiteral(", "));
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                         "ClipboardSync: no transferable image found in clipboard formats [%s]",
+                         formatsSummary.toUtf8().constData());
         }
     }
 
