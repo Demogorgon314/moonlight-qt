@@ -1865,6 +1865,111 @@ public:
     Session* m_Session;
 };
 
+namespace {
+
+struct HostConnectionInfoSnapshot
+{
+    QString address;
+    QString appVersion;
+    QString gfeVersion;
+    int currentGameId = 0;
+    int serverCodecModeSupport = 0;
+};
+
+struct PreparedServerInformation
+{
+    QByteArray address;
+    QByteArray appVersion;
+    QByteArray gfeVersion;
+    QByteArray rtspSessionUrl;
+    SERVER_INFORMATION info;
+};
+
+HostConnectionInfoSnapshot captureHostConnectionInfoSnapshot(NvComputer* computer)
+{
+    HostConnectionInfoSnapshot snapshot;
+
+    QReadLocker lock(&computer->lock);
+    snapshot.address = computer->activeAddress.address();
+    snapshot.appVersion = computer->appVersion;
+    snapshot.gfeVersion = computer->gfeVersion;
+    snapshot.currentGameId = computer->currentGameId;
+    snapshot.serverCodecModeSupport = computer->serverCodecModeSupport;
+
+    return snapshot;
+}
+
+void updateHostConnectionInfoFromServerInfo(const QString& serverInfo,
+                                            NvComputer* computer,
+                                            HostConnectionInfoSnapshot* snapshot,
+                                            bool resumingSession)
+{
+    QString refreshedCodecSupport = NvHTTP::getXmlString(serverInfo, "ServerCodecModeSupport");
+    QString refreshedAppVersion = NvHTTP::getXmlString(serverInfo, "appversion");
+    QString refreshedGfeVersion = NvHTTP::getXmlString(serverInfo, "GfeVersion");
+
+    if (!refreshedCodecSupport.isEmpty()) {
+        int refreshedServerCodecModeSupport = refreshedCodecSupport.toInt();
+
+        if (refreshedServerCodecModeSupport != snapshot->serverCodecModeSupport) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Host codec mode support changed after %s: %d -> %d",
+                        resumingSession ? "resume" : "launch",
+                        snapshot->serverCodecModeSupport,
+                        refreshedServerCodecModeSupport);
+        }
+
+        snapshot->serverCodecModeSupport = refreshedServerCodecModeSupport;
+    }
+
+    if (!refreshedAppVersion.isEmpty()) {
+        snapshot->appVersion = refreshedAppVersion;
+    }
+
+    if (!refreshedGfeVersion.isEmpty()) {
+        snapshot->gfeVersion = refreshedGfeVersion;
+    }
+
+    snapshot->currentGameId = NvHTTP::getCurrentGame(serverInfo);
+
+    QWriteLocker lock(&computer->lock);
+    computer->serverCodecModeSupport = snapshot->serverCodecModeSupport;
+    computer->currentGameId = snapshot->currentGameId;
+
+    if (!snapshot->appVersion.isEmpty()) {
+        computer->appVersion = snapshot->appVersion;
+    }
+
+    if (!snapshot->gfeVersion.isEmpty()) {
+        computer->gfeVersion = snapshot->gfeVersion;
+    }
+}
+
+void prepareServerInformation(const HostConnectionInfoSnapshot& snapshot,
+                              const QString& rtspSessionUrl,
+                              PreparedServerInformation* prepared)
+{
+    LiInitializeServerInformation(&prepared->info);
+
+    prepared->address = snapshot.address.toUtf8();
+    prepared->appVersion = snapshot.appVersion.toUtf8();
+    prepared->info.address = prepared->address.constData();
+    prepared->info.serverInfoAppVersion = prepared->appVersion.constData();
+    prepared->info.serverCodecModeSupport = snapshot.serverCodecModeSupport;
+
+    if (!snapshot.gfeVersion.isEmpty()) {
+        prepared->gfeVersion = snapshot.gfeVersion.toUtf8();
+        prepared->info.serverInfoGfeVersion = prepared->gfeVersion.constData();
+    }
+
+    if (!rtspSessionUrl.isEmpty()) {
+        prepared->rtspSessionUrl = rtspSessionUrl.toUtf8();
+        prepared->info.rtspSessionUrl = prepared->rtspSessionUrl.constData();
+    }
+}
+
+} // namespace
+
 // Called in a non-main thread
 bool Session::startConnectionAsync()
 {
@@ -1896,6 +2001,9 @@ bool Session::startConnectionAsync()
         enableGameOptimizations = m_Preferences->gameOptimizations;
     }
 
+    HostConnectionInfoSnapshot hostConnectionInfo = captureHostConnectionInfoSnapshot(m_Computer);
+    const bool resumingSession = hostConnectionInfo.currentGameId != 0;
+
     QString rtspSessionUrl;
 
     // Query display HDR brightness capabilities
@@ -1918,7 +2026,7 @@ bool Session::startConnectionAsync()
             minBrightness,
             maxAverageBrightness
         );
-        http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
+        http.startApp(resumingSession ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
                       enableGameOptimizations,
@@ -1929,6 +2037,23 @@ bool Session::startConnectionAsync()
                       m_Preferences->customScreenMode,
                       m_Preferences->customVddScreenMode,
                       remoteStreamConfig);
+
+        try {
+            updateHostConnectionInfoFromServerInfo(http.getServerInfo(NvHTTP::NVLL_NONE),
+                                                   m_Computer,
+                                                   &hostConnectionInfo,
+                                                   resumingSession);
+        } catch (const GfeHttpResponseException& e) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Failed to refresh server info after %s: %s",
+                        resumingSession ? "resume" : "launch",
+                        qPrintable(e.toQString()));
+        } catch (const QtNetworkReplyException& e) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Failed to refresh server info after %s: %s",
+                        resumingSession ? "resume" : "launch",
+                        qPrintable(e.toQString()));
+        }
     } catch (const GfeHttpResponseException& e) {
         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
         return false;
@@ -1937,29 +2062,8 @@ bool Session::startConnectionAsync()
         return false;
     }
 
-    QByteArray hostnameStr = m_Computer->activeAddress.address().toUtf8();
-    QByteArray siAppVersion = m_Computer->appVersion.toUtf8();
-
-    SERVER_INFORMATION hostInfo;
-    hostInfo.address = hostnameStr.data();
-    hostInfo.serverInfoAppVersion = siAppVersion.data();
-    hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
-
-    // Older GFE versions didn't have this field
-    QByteArray siGfeVersion;
-    if (!m_Computer->gfeVersion.isEmpty()) {
-        siGfeVersion = m_Computer->gfeVersion.toUtf8();
-    }
-    if (!siGfeVersion.isEmpty()) {
-        hostInfo.serverInfoGfeVersion = siGfeVersion.data();
-    }
-
-    // Older GFE and Sunshine versions didn't have this field
-    QByteArray rtspSessionUrlStr;
-    if (!rtspSessionUrl.isEmpty()) {
-        rtspSessionUrlStr = rtspSessionUrl.toUtf8();
-        hostInfo.rtspSessionUrl = rtspSessionUrlStr.data();
-    }
+    PreparedServerInformation preparedHostInfo;
+    prepareServerInformation(hostConnectionInfo, rtspSessionUrl, &preparedHostInfo);
 
     if (m_Preferences->packetSize != 0) {
         // Override default packet size and remote streaming detection
@@ -2013,7 +2117,7 @@ bool Session::startConnectionAsync()
                                                                          false);
     }
 
-    int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
+    int err = LiStartConnection(&preparedHostInfo.info, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);
     if (err != 0) {
