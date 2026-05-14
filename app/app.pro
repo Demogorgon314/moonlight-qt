@@ -176,7 +176,7 @@ macx {
         CONFIG += discord-rpc
     }
 
-    LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework Metal -framework MetalFx -framework QuartzCore
+    LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework UniformTypeIdentifiers -framework Metal -framework MetalFx -framework QuartzCore
 
     # For libsoundio
     LIBS += -framework CoreAudio -framework AudioUnit
@@ -280,7 +280,9 @@ HEADERS += \
 !config_SL: SOURCES += streaming/micstream.cpp
 !config_SL: HEADERS += streaming/micstream.h
 !config_SL: HEADERS += streaming/macpermissions.h
+macx: HEADERS += streaming/clipboard_mac.h
 !config_SL:macx: SOURCES += streaming/macpermissions.mm
+macx: SOURCES += streaming/clipboard_mac.mm
 !config_SL:!macx: SOURCES += streaming/macpermissions_stub.cpp
 
 # Platform-specific renderers and decoders

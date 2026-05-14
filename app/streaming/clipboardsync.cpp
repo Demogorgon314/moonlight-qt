@@ -16,6 +16,7 @@
 #include <QRegularExpression>
 #include <QSslConfiguration>
 #include <QSslError>
+#include <QTimer>
 #include <QUrl>
 #include <QtEndian>
 
@@ -24,6 +25,10 @@
 #include <SDL.h>
 
 #include <Limelight.h>
+
+#ifdef Q_OS_MACOS
+#include "clipboard_mac.h"
+#endif
 
 namespace {
 bool isImageLikeMimeFormat(const QString& format)
@@ -62,6 +67,17 @@ void ClipboardSync::start()
             this, &ClipboardSync::onLocalClipboardChanged,
             Qt::UniqueConnection);
 
+#ifdef Q_OS_MACOS
+    m_LastMacClipboardChangeCount = MacClipboard::changeCount();
+    if (m_MacClipboardPollTimer == nullptr) {
+        m_MacClipboardPollTimer = new QTimer(this);
+        connect(m_MacClipboardPollTimer, &QTimer::timeout,
+                this, &ClipboardSync::onMacClipboardPollTimeout,
+                Qt::UniqueConnection);
+    }
+    m_MacClipboardPollTimer->start(MAC_CLIPBOARD_POLL_INTERVAL_MS);
+#endif
+
     m_Active = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "ClipboardSync: started (text + PNG, bidirectional)");
@@ -78,6 +94,13 @@ void ClipboardSync::stop()
         disconnect(cb, &QClipboard::dataChanged,
                    this, &ClipboardSync::onLocalClipboardChanged);
     }
+
+#ifdef Q_OS_MACOS
+    if (m_MacClipboardPollTimer != nullptr) {
+        m_MacClipboardPollTimer->stop();
+    }
+    m_LastMacClipboardChangeCount = -1;
+#endif
 
     m_EchoCache.clear();
     m_SuppressNextChange = false;
@@ -196,6 +219,17 @@ void ClipboardSync::applyInboundPng(const QByteArray& payload)
     uint64_t hash = hashBytes(payload);
     recordHash(hash);
     m_SuppressNextChange = true;
+
+#ifdef Q_OS_MACOS
+    QString writeDescription;
+    if (MacClipboard::writeImageFromPng(payload, &writeDescription)) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                     "ClipboardSync: wrote inbound PNG to macOS pasteboard as %s",
+                     writeDescription.toUtf8().constData());
+        return;
+    }
+#endif
+
     cb->setImage(image);
 }
 
@@ -228,6 +262,53 @@ bool ClipboardSync::encodeImageAsPng(const QImage& image,
     }
 
     return true;
+}
+
+void ClipboardSync::sendClipboardPng(const QByteArray& png,
+                                     const QString& sourceDescription)
+{
+    const QByteArray sourceUtf8 = sourceDescription.isEmpty()
+            ? QByteArrayLiteral("unknown source")
+            : sourceDescription.toUtf8();
+
+    if (png.size() > MAX_PAYLOAD) {
+        // Out-of-band path. Record the underlying PNG hash before
+        // upload so the echo we'll see when the host loops the REF
+        // back (and we fetch the same bytes) is suppressed.
+        if (png.size() > MAX_BLOB_BYTES) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "ClipboardSync: PNG payload %lld B from %s exceeds %lld B blob cap, dropping",
+                        static_cast<long long>(png.size()),
+                        sourceUtf8.constData(),
+                        static_cast<long long>(MAX_BLOB_BYTES));
+            return;
+        }
+        uint64_t hash = hashBytes(png);
+        if (seenRecently(hash)) {
+            return;
+        }
+        recordHash(hash);
+        uploadAndSendRef(png, QStringLiteral("image/png"));
+        return;
+    }
+
+    uint64_t hash = hashBytes(png);
+    if (seenRecently(hash)) {
+        return;
+    }
+    recordHash(hash);
+
+    QByteArray frame;
+    if (encodeFrame(KIND_PNG, png, frame)) {
+        int rc = LiSendClipboardData(frame.constData(), frame.size());
+        if (rc != 0) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                         "ClipboardSync: LiSendClipboardData(PNG, %d bytes from %s) -> %d",
+                         static_cast<int>(frame.size()),
+                         sourceUtf8.constData(),
+                         rc);
+        }
+    }
 }
 
 bool ClipboardSync::tryExtractImageBytes(const QMimeData* mime,
@@ -454,6 +535,9 @@ void ClipboardSync::onLocalClipboardChanged()
     }
 
     if (m_SuppressNextChange) {
+#ifdef Q_OS_MACOS
+        m_LastMacClipboardChangeCount = MacClipboard::changeCount();
+#endif
         m_SuppressNextChange = false;
         return;
     }
@@ -462,6 +546,28 @@ void ClipboardSync::onLocalClipboardChanged()
     if (cb == nullptr) {
         return;
     }
+
+#ifdef Q_OS_MACOS
+    m_LastMacClipboardChangeCount = MacClipboard::changeCount();
+
+    QByteArray nativePng;
+    QString nativeSourceDescription;
+    QString nativeFormatsSummary;
+    bool nativeHadImageLikeData = false;
+    if (MacClipboard::readImageAsPng(nativePng,
+                                     &nativeSourceDescription,
+                                     &nativeFormatsSummary,
+                                     &nativeHadImageLikeData)) {
+        sendClipboardPng(nativePng, nativeSourceDescription);
+        return;
+    }
+
+    if (nativeHadImageLikeData && !nativeFormatsSummary.isEmpty()) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                     "ClipboardSync: macOS pasteboard image extraction failed for formats [%s]",
+                     nativeFormatsSummary.toUtf8().constData());
+    }
+#endif
 
     const QMimeData* mime = cb->mimeData();
 
@@ -472,44 +578,7 @@ void ClipboardSync::onLocalClipboardChanged()
     QByteArray png;
     QString imageSourceDescription;
     if (extractClipboardPng(mime, png, &imageSourceDescription)) {
-        if (png.size() > MAX_PAYLOAD) {
-            // Out-of-band path. Record the underlying PNG hash before
-            // upload so the echo we'll see when the host loops the REF
-            // back (and we fetch the same bytes) is suppressed.
-            if (png.size() > MAX_BLOB_BYTES) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "ClipboardSync: PNG payload %lld B from %s exceeds %lld B blob cap, dropping",
-                            static_cast<long long>(png.size()),
-                            imageSourceDescription.toUtf8().constData(),
-                            static_cast<long long>(MAX_BLOB_BYTES));
-                return;
-            }
-            uint64_t hash = hashBytes(png);
-            if (seenRecently(hash)) {
-                return;
-            }
-            recordHash(hash);
-            uploadAndSendRef(png, QStringLiteral("image/png"));
-            return;
-        }
-
-        uint64_t hash = hashBytes(png);
-        if (seenRecently(hash)) {
-            return;
-        }
-        recordHash(hash);
-
-        QByteArray frame;
-        if (encodeFrame(KIND_PNG, png, frame)) {
-            int rc = LiSendClipboardData(frame.constData(), frame.size());
-            if (rc != 0) {
-                SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
-                             "ClipboardSync: LiSendClipboardData(PNG, %d bytes from %s) -> %d",
-                             static_cast<int>(frame.size()),
-                             imageSourceDescription.toUtf8().constData(),
-                             rc);
-            }
-        }
+        sendClipboardPng(png, imageSourceDescription);
         return;
     }
 
@@ -563,6 +632,23 @@ void ClipboardSync::onLocalClipboardChanged()
                      static_cast<int>(frame.size()), rc);
     }
 }
+
+#ifdef Q_OS_MACOS
+void ClipboardSync::onMacClipboardPollTimeout()
+{
+    if (!m_Active) {
+        return;
+    }
+
+    int currentChangeCount = MacClipboard::changeCount();
+    if (currentChangeCount < 0 || currentChangeCount == m_LastMacClipboardChangeCount) {
+        return;
+    }
+
+    m_LastMacClipboardChangeCount = currentChangeCount;
+    onLocalClipboardChanged();
+}
+#endif
 
 bool ClipboardSync::encodeFrame(uint8_t kind, const QByteArray& payload, QByteArray& outFrame) const
 {
