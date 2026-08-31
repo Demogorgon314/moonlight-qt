@@ -91,10 +91,12 @@ void setError(QString* error, const QString& value)
 
 } // namespace
 
-MoonlightProtocolAdapter::MoonlightProtocolAdapter(StreamingPreferences* preferences,
-                                                   QObject* parent)
+MoonlightProtocolAdapter::MoonlightProtocolAdapter(
+        StreamingPreferences* preferences,
+        const QSharedPointer<QMdnsEngine::Server>& mdnsServer,
+        QObject* parent)
     : ProtocolAdapter(parent),
-      m_Manager(std::make_unique<ComputerManager>(preferences))
+      m_Manager(std::make_unique<ComputerManager>(preferences, mdnsServer))
 {
     connect(m_Manager.get(), &ComputerManager::computerStateChanged,
             this, &MoonlightProtocolAdapter::handleComputerChanged);

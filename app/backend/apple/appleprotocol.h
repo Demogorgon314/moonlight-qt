@@ -43,6 +43,9 @@ public:
     bool isValid() const;
     QByteArray encrypt(const QByteArray& message, QString* error = nullptr);
     QByteArray decrypt(const QByteArray& ciphertext, QString* error = nullptr);
+    QByteArray encryptInput(const QByteArray& header,
+                            const QByteArray& plaintextBlock,
+                            QString* error = nullptr) const;
 
 private:
     QByteArray m_Key;
@@ -51,4 +54,3 @@ private:
     quint32 m_SendCounter = 0;
     quint32 m_ReceiveCounter = 0;
 };
-

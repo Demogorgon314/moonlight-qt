@@ -28,7 +28,9 @@ class AppleProtocolAdapter final : public ProtocolAdapter
     Q_OBJECT
 
 public:
-    explicit AppleProtocolAdapter(QObject* parent = nullptr);
+    explicit AppleProtocolAdapter(
+            const QSharedPointer<QMdnsEngine::Server>& mdnsServer,
+            QObject* parent = nullptr);
     ~AppleProtocolAdapter() override;
 
     ProtocolKind protocol() const override { return ProtocolKind::AppleScreenSharing; }

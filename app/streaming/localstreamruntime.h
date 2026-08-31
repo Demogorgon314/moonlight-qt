@@ -28,7 +28,7 @@ struct LocalStreamRuntimeConfig
 class LocalStreamRuntime
 {
 public:
-    LocalStreamRuntime() = default;
+    LocalStreamRuntime();
     ~LocalStreamRuntime();
 
     LocalStreamRuntime(const LocalStreamRuntime&) = delete;

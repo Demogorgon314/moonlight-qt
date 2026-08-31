@@ -1,7 +1,10 @@
 #include "backend/apple/appleauthenticator.h"
 #include "backend/apple/appleconnectionstore.h"
 #include "backend/apple/applefeaturegate.h"
+#include "backend/apple/applemediaprotocol.h"
+#include "backend/apple/applemediatransport.h"
 #include "backend/apple/appleprotocol.h"
+#include "backend/apple/applevideodecoder.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -9,6 +12,8 @@
 #include <QScopeGuard>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QThread>
+#include <QUdpSocket>
 
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
@@ -471,6 +476,387 @@ void testControlNegotiationAndEncryptedWrite()
             "encrypted control writes must remain ordered on the negotiated record stream");
 }
 
+void testHighPerformanceMediaOfferAndAnswer()
+{
+    QString error;
+    const QUuid callId(QStringLiteral("00112233-4455-6677-8899-aabbccddeeff"));
+    const QByteArray offer = AppleMediaWire::createOffer(
+            7,
+            0x11223344,
+            123456789,
+            callId,
+            false,
+            QStringLiteral("Windows test"),
+            &error);
+    require(error.isEmpty() && offer.startsWith("bplist00") &&
+            offer.contains("avcMediaStreamNegotiatorMediaBlob") &&
+            offer.contains("00112233-4455-6677-8899-AABBCCDDEEFF"),
+            "video offer must be a deterministic binary plist with the Apple media blob");
+
+    AppleMediaOffers offers;
+    offers.audio = QByteArray::fromHex("a1a2a3");
+    offers.video = QByteArray::fromHex("b1b2");
+    AppleMediaKeys keys{
+        QByteArray(46, char(0x11)),
+        QByteArray(46, char(0x22)),
+        QByteArray(46, char(0x33)),
+        QByteArray(46, char(0x44)),
+    };
+    const QByteArray configuration = AppleMediaWire::configuration(
+            offers, keys, callId, &error);
+    require(configuration.size() == 0xd8 + 3 + 2 + 4 &&
+            static_cast<quint8>(configuration.at(0)) == 0x1c &&
+            AppleWire::readUInt16(configuration, 2) == configuration.size() - 4 &&
+            AppleWire::readUInt32(configuration, 6) == 0x05 &&
+            configuration.mid(0x24, 46) == keys.audioViewer &&
+            configuration.mid(0x52, 46) == keys.audioServer &&
+            configuration.mid(0x80, 3) == offers.audio &&
+            configuration.mid(0x83, 46) == keys.videoViewer &&
+            configuration.mid(0xb1, 46) == keys.videoServer &&
+            configuration.endsWith(offers.video),
+            "media configuration must preserve the captured key and offer layout");
+
+    const QByteArray answer = QByteArray::fromBase64(
+            "AHByZWZpeGJwbGlzdDAw0QECXxAhYXZjTWVkaWFTdHJlYW1OZWdvdGlhdG9yTWVkaWFCbG9iTxASeJzT4lBo4NfYwWHAAgAK9AH+CAsvAAAAAAAAAQEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAER0YWls");
+    AppleCanvas canvas;
+    require(AppleMediaWire::parseCanvas(answer, &canvas) &&
+            canvas == AppleCanvas{1920, 1080, 4},
+            "embedded binary-plist media answer must expose the single-screen tile canvas");
+
+    QByteArray portAnswer(0x19, '\0');
+    writeUInt16(portAnswer, 2, 1);
+    writeUInt16(portAnswer, 4, 3);
+    writeUInt16(portAnswer, 0x0a, 5900);
+    writeUInt16(portAnswer, 0x10, 6001);
+    writeUInt16(portAnswer, 0x12, 1);
+    AppleMediaPorts ports;
+    require(AppleMediaWire::parsePorts(portAnswer, &ports) &&
+            ports.audio == 5900 && ports.video == 6001,
+            "explicit server media ports must replace the optimistic UDP destinations");
+}
+
+void testSrtpAndRecoveryFeedbackVectors()
+{
+    QByteArray keyBlob(46, Qt::Uninitialized);
+    for (int index = 0; index < keyBlob.size(); ++index) {
+        keyBlob[index] = static_cast<char>(index);
+    }
+    QString error;
+    AppleSrtpDecryptor decryptor(keyBlob, &error);
+    AppleRtpPacket packet;
+    require(decryptor.isValid() && decryptor.decrypt(
+                    QByteArray::fromHex(
+                            "80e0000000000000112233448e12afed4336c640f79680aab77904"),
+                    &packet,
+                    &error) &&
+            packet.payload == QByteArrayLiteral("hello") &&
+            packet.sequenceNumber == 0 && packet.timestamp == 0 &&
+            packet.synchronizationSource == 0x11223344 &&
+            packet.payloadType == 96 && packet.marker,
+            "SRTP AES-CTR/HMAC processing must match the independent reference vector");
+
+    AppleRtpPacket extended;
+    extended.header = QByteArray::fromHex(
+            "916012340102030411223344aabbccdd9301000100251682");
+    const auto framePacketInfo = extended.framePacketInfo();
+    require(framePacketInfo.has_value() &&
+            *framePacketInfo == AppleRtpPacket::FramePacketInfo{0x25, 0x1682},
+            "Apple MCI Info ID 6 must expose packet count and sender frame sequence");
+
+    AppleSrtcpEncryptor encryptor(keyBlob, &error);
+    const QByteArray plain = QByteArray::fromHex(
+            "80c900011122334481cd00041122334455667788000a0005001e0000");
+    require(encryptor.protect(plain, &error) == QByteArray::fromHex(
+                "80c9000111223344ea6540af06680fabb3ce005aa192a9c2d9138ea18000000005039c4d56c23bf9e2ba"),
+            "SRTCP encryption and authentication must match the independent reference vector");
+
+    const QByteArray nack = AppleMediaWire::genericNack(
+            0x11223344, 0x55667788, {10, 11, 15, 30});
+    require(nack == QByteArray::fromHex(
+                "81cd00041122334455667788000a0011001e0000"),
+            "generic NACK feedback must compact nearby sequence losses into the RTCP bitmask");
+
+    const QByteArray fir = AppleMediaWire::fullIntraRequest(
+            0x11223344, 0x55667788, 9);
+    require(fir == QByteArray::fromHex(
+                "84ce000411223344000000005566778809000000"),
+            "key-frame recovery must use the native standalone FIR packet");
+    require((AppleMediaWire::receiverReport(0x11223344) + nack) ==
+                QByteArray::fromHex(
+                    "80c900011122334481cd00041122334455667788000a0011001e0000"),
+            "packet-loss recovery must compound the receiver report and generic NACK");
+
+    const QList<QByteArray> tileRefresh = AppleMediaWire::fullIntraRequests(
+            0x11223344, {0x10101010, 0x20202020, 0x30303030, 0x40404040}, 0xfe);
+    require(tileRefresh.size() == 4 &&
+            tileRefresh.at(0) == QByteArray::fromHex(
+                    "84ce0004112233440000000010101010fe000000") &&
+            tileRefresh.at(1) == QByteArray::fromHex(
+                    "84ce0004112233440000000020202020ff000000") &&
+            tileRefresh.at(2) == QByteArray::fromHex(
+                    "84ce000411223344000000003030303000000000") &&
+            tileRefresh.at(3) == QByteArray::fromHex(
+                    "84ce000411223344000000004040404001000000"),
+            "refresh recovery must request every tile source and wrap its FIR sequence");
+
+    require(AppleMediaWire::rateControl(
+                    0x11223344, 0x12345678, 60001, 0xabc, 0x1234, 0x5678) ==
+                QByteArray::fromHex(
+                    "80cc0007112233445243544c850000043456000000001234567800000abcea61"),
+            "periodic RCTL feedback must match Apple's fixed-LAN wire format");
+}
+
+void testHevcAssemblyAndLossTracking()
+{
+    AppleHevcAssembler assembler;
+    auto packet = [](quint32 source,
+                     quint32 timestamp,
+                     quint16 sequence,
+                     bool marker,
+                     const QByteArray& payload) {
+        AppleRtpPacket value;
+        value.synchronizationSource = source;
+        value.timestamp = timestamp;
+        value.sequenceNumber = sequence;
+        value.marker = marker;
+        value.payload = payload;
+        return value;
+    };
+    AppleHevcAccessUnit unit;
+    require(assembler.process(packet(100, 10, 1, true,
+                                     QByteArray::fromHex("4001000142")), 10, &unit) &&
+            unit.nalUnits == QList<QByteArray>{QByteArray::fromHex("400142")},
+            "single-NAL RTP payloads must strip the private DONL field");
+    require(assembler.process(packet(100, 20, 2, true,
+                                     QByteArray::fromHex("4201000143")), 20, &unit) &&
+            assembler.process(packet(100, 30, 3, true,
+                                     QByteArray::fromHex("4401000144")), 30, &unit) &&
+            assembler.parameterSets().isComplete(),
+            "VPS, SPS, and PPS must be harvested before decoder creation");
+
+    require(!assembler.process(packet(101, 40, 10, false,
+                                      QByteArray::fromHex("6201810001aa")), 40, &unit) &&
+            assembler.process(packet(101, 40, 11, true,
+                                     QByteArray::fromHex("6201410001bb")), 41, &unit) &&
+            unit.nalUnits == QList<QByteArray>{QByteArray::fromHex("0201aabb")},
+            "HEVC fragmentation units must reassemble only after a contiguous marker-terminated frame");
+
+    require(assembler.primarySources(2) == QList<quint32>({100, 101}) &&
+            assembler.completedSources().contains(100) &&
+            assembler.completedSources().contains(101),
+            "single-screen tile sources must be selected as one contiguous SSRC group");
+
+    assembler.process(packet(101, 50, 13, true,
+                             QByteArray::fromHex("0201000145")), 50, &unit);
+    const auto nacks = assembler.takeNacks(50);
+    require(nacks.value(101).contains(12),
+            "sequence gaps must produce bounded NACK recovery feedback");
+}
+
+void testHevcGlobalDecodingOrderAdmission()
+{
+    auto unit = [](quint32 source, std::optional<quint16> order) {
+        AppleHevcAccessUnit value;
+        value.synchronizationSource = source;
+        value.decodingOrderNumber = order;
+        return value;
+    };
+
+    AppleHevcDecodingOrderQueue admission;
+    const QList<AppleHevcAccessUnit> initial = admission.enqueue({
+        unit(400, 0), unit(100, 0xfffe), unit(200, 0xffff),
+    });
+    require(initial.size() == 3 &&
+            initial.at(0).synchronizationSource == 100 &&
+            initial.at(1).synchronizationSource == 200 &&
+            initial.at(2).synchronizationSource == 400,
+            "initial multi-tile DON admission must preserve circular decoding order");
+
+    const QList<AppleHevcAccessUnit> continued = admission.enqueue({
+        unit(100, 0xffff), unit(300, 1), unit(500, std::nullopt),
+    });
+    require(continued.size() == 2 &&
+            continued.at(0).synchronizationSource == 500 &&
+            continued.at(1).synchronizationSource == 300,
+            "global DON admission must reject a late tile while accepting forward and unnumbered subframes");
+
+    admission.reset();
+    require(admission.enqueue({unit(100, 10)}).size() == 1 &&
+            admission.enqueue({unit(200, 9)}).isEmpty() &&
+            admission.enqueue({unit(300, 12)}).size() == 1,
+            "DON admission must be shared across tile SSRCs and allow forward gaps");
+}
+
+void testEncryptedInputWireBoundary()
+{
+    const AppleInputEncryptionRequest pointer = AppleMediaWire::pointerEvent(
+            0x03, 640, 480, 1, 0x01020304);
+    require(pointer.isValid() && pointer.header == QByteArray::fromHex("1003") &&
+            pointer.plaintextBlock == QByteArray::fromHex(
+                    "00000000000001020304ff03028001e0"),
+            "pointer input must preserve buttons, click count, timestamp, and canvas coordinates");
+
+    const AppleInputEncryptionRequest key = AppleMediaWire::keyEvent(
+            true, 0xff0d, 9, 0, 40);
+    require(key.isValid() && key.header == QByteArray::fromHex("1001") &&
+            key.plaintextBlock == QByteArray::fromHex(
+                    "ff010000ff0d00000009000000000028"),
+            "key input must preserve X11 keysym and native scan code fields");
+
+    AppleEncryptedRecordLayer records(
+            QByteArray::fromHex("00112233445566778899aabbccddeeff"),
+            QByteArray::fromHex("ffeeddccbbaa99887766554433221100"));
+    const QByteArray inputMessage = records.encryptInput(
+            key.header, key.plaintextBlock);
+    require(inputMessage.size() == 18 && inputMessage.startsWith(key.header) &&
+            inputMessage.mid(2) != key.plaintextBlock,
+            "the inner input block must use the record content key without consuming record order");
+}
+
+void testHevcDecoderBackendFallback()
+{
+    QString error;
+    AppleHevcDecoder preferred(true);
+    require(preferred.open(&error),
+            "the preferred HEVC decoder must open with D3D11VA or software fallback");
+    require(preferred.backend() == AppleHevcDecoder::Backend::D3D11va ||
+            (preferred.backend() == AppleHevcDecoder::Backend::Software &&
+             preferred.hardwareFallbackOccurred()),
+            "hardware decoder failure must be explicit when software fallback is selected");
+    std::fprintf(stderr, "preferred HEVC decoder backend: %s\n",
+                 preferred.backend() == AppleHevcDecoder::Backend::D3D11va
+                         ? "D3D11VA" : "software fallback");
+
+    AppleHevcDecoder software(false);
+    error.clear();
+    require(software.open(&error) &&
+            software.backend() == AppleHevcDecoder::Backend::Software &&
+            !software.hardwareFallbackOccurred(),
+            "the software HEVC decoder must remain independently usable");
+}
+
+void testScaledTileBoundariesRemainContiguous()
+{
+    const AppleCanvas canvas{3840, 2160, 4};
+    const QList<int> boundaries = AppleMediaLayout::verticalTileBoundaries(
+            canvas, {540, 540, 540, 540}, 1001);
+    require(boundaries == QList<int>({0, 250, 501, 751, 1001}),
+            "fractionally scaled tiles must share rounded boundaries without a one-pixel seam");
+    int coveredPixels = 0;
+    for (int tile = 0; tile < canvas.tileCount; ++tile) {
+        require(boundaries.at(tile + 1) >= boundaries.at(tile),
+                "scaled tile boundaries must remain monotonic");
+        coveredPixels += boundaries.at(tile + 1) - boundaries.at(tile);
+    }
+    require(coveredPixels == 1001,
+            "scaled tile rows must cover the exact presentation height");
+}
+
+void testDecodedNv12TileValidation()
+{
+    AppleDecodedTile tile;
+    tile.tileIndex = 1;
+    tile.width = 1920;
+    tile.height = 540;
+    tile.stride = 1920;
+    tile.chromaStride = 1920;
+    tile.chromaOffset = tile.stride * tile.height;
+    tile.pixels.resize(tile.chromaOffset + tile.chromaStride * tile.height / 2);
+    require(tile.isValid(),
+            "a complete NV12 tile must be accepted by the presentation boundary");
+    tile.pixels.chop(1);
+    require(!tile.isValid(),
+            "a truncated NV12 chroma plane must be rejected before SDL upload");
+}
+
+void testDecodedTilesPublishAsAtomicSenderFrames()
+{
+    AppleDecodedFrameBatcher batcher;
+    auto accessUnit = [](quint16 sequence) {
+        AppleHevcAccessUnit unit;
+        unit.frameSequenceNumber = sequence;
+        return unit;
+    };
+    auto tile = [](int tileIndex, quint16 sequence) {
+        AppleDecodedTile frame;
+        frame.tileIndex = tileIndex;
+        frame.frameSequenceNumber = sequence;
+        return frame;
+    };
+
+    batcher.recordSubmission(accessUnit(100), 0);
+    batcher.recordSubmission(accessUnit(100), 3);
+    batcher.recordDecodedFrames({tile(3, 100), tile(0, 100)});
+    require(batcher.takeReadyBatches().isEmpty(),
+            "a sender frame must remain pending until its sequence is closed");
+
+    batcher.recordSubmission(accessUnit(101), 1);
+    const QList<QList<AppleDecodedTile>> first = batcher.takeReadyBatches();
+    require(first.size() == 1 && first.first().size() == 2 &&
+            first.first().at(0).tileIndex == 0 &&
+            first.first().at(1).tileIndex == 3,
+            "all decoded tiles in one sender frame must publish atomically in submission order");
+
+    batcher.recordDecodedFrames({tile(1, 101)});
+    batcher.recordSubmission(accessUnit(102), 2);
+    const QList<QList<AppleDecodedTile>> second = batcher.takeReadyBatches();
+    require(second.size() == 1 && second.first().size() == 1 &&
+            second.first().first().frameSequenceNumber == 101,
+            "sparse tile frames must publish without waiting for every canvas tile");
+}
+
+quint16 findFourAvailableUdpPorts()
+{
+    for (quint16 basePort = 40000; basePort < 65000; basePort += 4) {
+        QUdpSocket sockets[4];
+        bool available = true;
+        for (quint16 offset = 0; offset < 4; ++offset) {
+            if (!sockets[offset].bind(QHostAddress::LocalHost,
+                                      static_cast<quint16>(basePort + offset),
+                                      QUdpSocket::DontShareAddress)) {
+                available = false;
+                break;
+            }
+        }
+        if (available) {
+            return basePort;
+        }
+    }
+    return 0;
+}
+
+void testUdpPunchIgnoresClosedOptimisticPortReset()
+{
+#ifdef Q_OS_WIN
+    const quint16 basePort = findFourAvailableUdpPorts();
+    require(basePort != 0, "four consecutive UDP ports must be available for the reset test");
+
+    AppleMediaTransport media;
+    QString error;
+    require(media.open(QHostAddress::LocalHost, basePort, &error),
+            "media transport must bind its optimistic local UDP ports");
+
+    QByteArray initialPunch;
+    std::atomic_bool cancelled = false;
+    require(media.receiveVideo(&initialPunch, 250, &cancelled, &error),
+            "the initial loopback video punch must be drained before the reset test");
+    media.drainControl();
+
+    media.configureRemotePorts(AppleMediaPorts{
+            static_cast<quint16>(basePort + 2),
+            static_cast<quint16>(basePort + 3)});
+    QThread::msleep(110);
+    media.punchIfDue();
+
+    for (int attempt = 0; attempt < 5 && error.isEmpty(); ++attempt) {
+        QByteArray datagram;
+        media.receiveVideo(&datagram, 100, &cancelled, &error);
+    }
+    require(error.isEmpty(),
+            "an ICMP reset from an unopened optimistic UDP port must not abort media negotiation");
+#endif
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -490,6 +876,26 @@ int main(int argc, char* argv[])
     testAuthenticatedRecordRecoveryAndOrdering();
     std::fprintf(stderr, "testControlNegotiationAndEncryptedWrite\n");
     testControlNegotiationAndEncryptedWrite();
-    std::fprintf(stderr, "Apple Screen Sharing stage 2 protocol tests passed\n");
+    std::fprintf(stderr, "testHighPerformanceMediaOfferAndAnswer\n");
+    testHighPerformanceMediaOfferAndAnswer();
+    std::fprintf(stderr, "testSrtpAndRecoveryFeedbackVectors\n");
+    testSrtpAndRecoveryFeedbackVectors();
+    std::fprintf(stderr, "testHevcAssemblyAndLossTracking\n");
+    testHevcAssemblyAndLossTracking();
+    std::fprintf(stderr, "testHevcGlobalDecodingOrderAdmission\n");
+    testHevcGlobalDecodingOrderAdmission();
+    std::fprintf(stderr, "testEncryptedInputWireBoundary\n");
+    testEncryptedInputWireBoundary();
+    std::fprintf(stderr, "testHevcDecoderBackendFallback\n");
+    testHevcDecoderBackendFallback();
+    std::fprintf(stderr, "testScaledTileBoundariesRemainContiguous\n");
+    testScaledTileBoundariesRemainContiguous();
+    std::fprintf(stderr, "testDecodedNv12TileValidation\n");
+    testDecodedNv12TileValidation();
+    std::fprintf(stderr, "testDecodedTilesPublishAsAtomicSenderFrames\n");
+    testDecodedTilesPublishAsAtomicSenderFrames();
+    std::fprintf(stderr, "testUdpPunchIgnoresClosedOptimisticPortReset\n");
+    testUdpPunchIgnoresClosedOptimisticPortReset();
+    std::fprintf(stderr, "Apple Screen Sharing stage 3 protocol tests passed\n");
     return 0;
 }

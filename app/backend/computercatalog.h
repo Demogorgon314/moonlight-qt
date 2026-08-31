@@ -3,6 +3,7 @@
 #include "protocol/protocoltypes.h"
 
 #include <QObject>
+#include <QSharedPointer>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -16,6 +17,10 @@ class NvComputer;
 class ResolvedLaunchPlan;
 class StreamSession;
 class StreamingPreferences;
+
+namespace QMdnsEngine {
+class Server;
+}
 
 class ComputerCatalog final : public QObject
 {
@@ -90,6 +95,7 @@ signals:
 
 private:
     class ProtocolAdapter* adapterFor(const ConnectionIdentity& identity) const;
+    QSharedPointer<QMdnsEngine::Server> m_MdnsServer;
     MoonlightProtocolAdapter* m_Moonlight;
     AppleProtocolAdapter* m_Apple = nullptr;
     std::vector<std::unique_ptr<class ProtocolAdapter>> m_Adapters;

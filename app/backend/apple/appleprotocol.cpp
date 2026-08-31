@@ -515,3 +515,17 @@ QByteArray AppleEncryptedRecordLayer::decrypt(const QByteArray& ciphertext, QStr
     setError(error, QCoreApplication::translate("AppleProtocol", "The encrypted Screen Sharing message failed authentication."));
     return {};
 }
+
+QByteArray AppleEncryptedRecordLayer::encryptInput(
+        const QByteArray& header,
+        const QByteArray& plaintextBlock,
+        QString* error) const
+{
+    if (!isValid() || header.size() != 2 || plaintextBlock.size() != AesBlockSize) {
+        setError(error, QCoreApplication::translate(
+                "AppleProtocol", "The remote input event is invalid."));
+        return {};
+    }
+    const QByteArray encrypted = cryptEcb(plaintextBlock, m_Key, true, error);
+    return encrypted.size() == AesBlockSize ? header + encrypted : QByteArray();
+}

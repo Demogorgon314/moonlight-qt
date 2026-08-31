@@ -5,6 +5,8 @@
 #include "protocol/resolvedlaunchplan.h"
 #include "streaming/streamsession.h"
 
+#include <qmdnsengine/server.h>
+
 #ifdef MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
 #include "apple/applefeaturegate.h"
 #include "apple/appleprotocoladapter.h"
@@ -14,7 +16,8 @@
 
 ComputerCatalog::ComputerCatalog(StreamingPreferences* preferences, QObject* parent)
     : QObject(parent),
-      m_Moonlight(new MoonlightProtocolAdapter(preferences))
+      m_MdnsServer(new QMdnsEngine::Server()),
+      m_Moonlight(new MoonlightProtocolAdapter(preferences, m_MdnsServer))
 {
     m_Adapters.emplace_back(m_Moonlight);
 
@@ -29,7 +32,7 @@ ComputerCatalog::ComputerCatalog(StreamingPreferences* preferences, QObject* par
 
 #ifdef MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
     if (AppleFeatureGate::isRuntimeEnabled()) {
-        m_Apple = new AppleProtocolAdapter();
+        m_Apple = new AppleProtocolAdapter(m_MdnsServer);
         m_Adapters.emplace_back(m_Apple);
         connect(m_Apple, &ProtocolAdapter::connectionChanged,
                 this, &ComputerCatalog::connectionChanged);

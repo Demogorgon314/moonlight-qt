@@ -11,6 +11,7 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDebug>
 #include <QMetaObject>
 #include <QPointer>
 #include <QRunnable>
@@ -42,7 +43,7 @@ public:
         : ResolvedLaunchPlan(
                   ConnectionIdentity(ProtocolKind::AppleScreenSharing, connection.id),
                   connection.endpoint.displayAddress(),
-                  QStringLiteral("apple-high-performance-control"),
+                  QStringLiteral("apple-high-performance"),
                   connection.revision),
           connection(std::move(connection))
     {
@@ -181,8 +182,11 @@ private:
 
 } // namespace
 
-AppleProtocolAdapter::AppleProtocolAdapter(QObject* parent)
-    : ProtocolAdapter(parent)
+AppleProtocolAdapter::AppleProtocolAdapter(
+        const QSharedPointer<QMdnsEngine::Server>& mdnsServer,
+        QObject* parent)
+    : ProtocolAdapter(parent),
+      m_Server(mdnsServer)
 {
 }
 
@@ -238,7 +242,6 @@ void AppleProtocolAdapter::startDiscovery()
     if (!isAvailable() || ++m_DiscoveryReferences > 1) {
         return;
     }
-    m_Server.reset(new QMdnsEngine::Server());
     m_Browser = new QMdnsEngine::Browser(m_Server.data(), "_rfb._tcp.local.", nullptr, this);
     connect(m_Browser, &QMdnsEngine::Browser::serviceAdded,
             this, &AppleProtocolAdapter::handleServiceAddedOrUpdated);
@@ -261,7 +264,6 @@ void AppleProtocolAdapter::stopDiscoveryAsync()
     m_Resolvers.clear();
     const QList<AppleDiscoveredConnection> removed = m_Discovered.values();
     m_Discovered.clear();
-    m_Server.reset();
     for (const AppleDiscoveredConnection& connection : removed) {
         emit connectionChanged(ConnectionIdentity(
                 ProtocolKind::AppleScreenSharing, connection.id).toString());
@@ -576,6 +578,8 @@ void AppleProtocolAdapter::completeAuthentication(QString connectionId,
 void AppleProtocolAdapter::handleServiceAddedOrUpdated(
         const QMdnsEngine::Service& service)
 {
+    qInfo() << "Discovered Apple Screen Sharing service:"
+            << service.name() << service.hostname() << service.port();
     AppleDiscoveredConnection discovery;
     discovery.displayName = QString::fromUtf8(service.name());
     discovery.endpoint.host = QString::fromUtf8(service.hostname());

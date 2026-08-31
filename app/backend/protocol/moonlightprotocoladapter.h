@@ -3,11 +3,16 @@
 #include "protocoladapter.h"
 
 #include <QHash>
+#include <QSharedPointer>
 
 #include <memory>
 
 class ComputerManager;
 class NvComputer;
+
+namespace QMdnsEngine {
+class Server;
+}
 
 class MoonlightProtocolAdapter final : public ProtocolAdapter
 {
@@ -15,6 +20,7 @@ class MoonlightProtocolAdapter final : public ProtocolAdapter
 
 public:
     explicit MoonlightProtocolAdapter(StreamingPreferences* preferences,
+                                      const QSharedPointer<QMdnsEngine::Server>& mdnsServer,
                                       QObject* parent = nullptr);
     ~MoonlightProtocolAdapter() override;
 
@@ -63,4 +69,3 @@ private:
     std::unique_ptr<ComputerManager> m_Manager;
     mutable QHash<ConnectionIdentity, quint64> m_Revisions;
 };
-

@@ -217,7 +217,9 @@ class ComputerManager : public QObject
     friend class DelayedFlushThread;
 
 public:
-    explicit ComputerManager(StreamingPreferences* prefs);
+    explicit ComputerManager(
+            StreamingPreferences* prefs,
+            const QSharedPointer<QMdnsEngine::Server>& mdnsServer);
 
     virtual ~ComputerManager();
 

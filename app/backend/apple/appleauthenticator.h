@@ -12,6 +12,7 @@
 #include <memory>
 
 class QTcpSocket;
+class QHostAddress;
 
 class AppleByteTransport
 {
@@ -51,8 +52,14 @@ public:
     void protocolDelay(int milliseconds, std::atomic_bool* cancelled) override;
     void close() override;
 
+    void setWaitCallback(std::function<void()> callback);
+    QHostAddress peerAddress() const;
+    bool hasPendingData();
+    bool isConnected() const;
+
 private:
     std::unique_ptr<QTcpSocket> m_Socket;
+    std::function<void()> m_WaitCallback;
 };
 
 struct AppleHostIdentity
@@ -110,6 +117,11 @@ public:
                           QByteArray* message,
                           std::atomic_bool* cancelled,
                           QString* error);
+    bool sendEncryptedInput(AppleByteTransport& transport,
+                            const QByteArray& header,
+                            const QByteArray& plaintextBlock,
+                            std::atomic_bool* cancelled,
+                            QString* error);
 
 private:
     bool readRekey(AppleByteTransport& transport,
@@ -120,4 +132,3 @@ private:
 
     AppleEncryptedRecordLayer m_Records;
 };
-

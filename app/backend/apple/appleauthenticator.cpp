@@ -161,6 +161,9 @@ bool AppleTcpTransport::connectTo(const AppleConnectionEndpoint& endpoint,
     QElapsedTimer timer;
     timer.start();
     while (!cancelled(cancelledFlag) && timer.elapsed() < IoTimeoutMs) {
+        if (m_WaitCallback) {
+            m_WaitCallback();
+        }
         if (m_Socket->waitForConnected(200)) {
             return true;
         }
@@ -188,6 +191,9 @@ bool AppleTcpTransport::writeAll(const QByteArray& data,
     QElapsedTimer timer;
     timer.start();
     while (offset < data.size() && !cancelled(cancelledFlag) && timer.elapsed() < IoTimeoutMs) {
+        if (m_WaitCallback) {
+            m_WaitCallback();
+        }
         const qint64 written = m_Socket->write(data.constData() + offset, data.size() - offset);
         if (written < 0) {
             break;
@@ -221,6 +227,9 @@ bool AppleTcpTransport::readExactly(int length,
     QElapsedTimer timer;
     timer.start();
     while (result.size() < length && !cancelled(cancelledFlag) && timer.elapsed() < IoTimeoutMs) {
+        if (m_WaitCallback) {
+            m_WaitCallback();
+        }
         if (m_Socket->bytesAvailable() == 0 && !m_Socket->waitForReadyRead(200)) {
             if (m_Socket->state() != QAbstractSocket::ConnectedState) {
                 break;
@@ -259,6 +268,26 @@ void AppleTcpTransport::close()
         m_Socket->abort();
         m_Socket.reset();
     }
+}
+
+void AppleTcpTransport::setWaitCallback(std::function<void()> callback)
+{
+    m_WaitCallback = std::move(callback);
+}
+
+QHostAddress AppleTcpTransport::peerAddress() const
+{
+    return m_Socket ? m_Socket->peerAddress() : QHostAddress();
+}
+
+bool AppleTcpTransport::hasPendingData()
+{
+    return m_Socket && (m_Socket->bytesAvailable() > 0 || m_Socket->waitForReadyRead(0));
+}
+
+bool AppleTcpTransport::isConnected() const
+{
+    return m_Socket && m_Socket->state() == QAbstractSocket::ConnectedState;
 }
 
 bool AppleAuthenticator::probe(AppleByteTransport& transport,
@@ -515,6 +544,18 @@ bool AppleControlChannel::receiveEncrypted(AppleByteTransport& transport,
         *message = plaintext;
     }
     return true;
+}
+
+bool AppleControlChannel::sendEncryptedInput(
+        AppleByteTransport& transport,
+        const QByteArray& header,
+        const QByteArray& plaintextBlock,
+        std::atomic_bool* cancelledFlag,
+        QString* error)
+{
+    const QByteArray input = m_Records.encryptInput(header, plaintextBlock, error);
+    return !input.isEmpty() && sendEncrypted(
+            transport, input, cancelledFlag, error);
 }
 
 bool AppleControlChannel::readRekey(AppleByteTransport& transport,

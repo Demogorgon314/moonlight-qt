@@ -7,6 +7,8 @@
 
 #include <QScreen>
 
+LocalStreamRuntime::LocalStreamRuntime() = default;
+
 LocalStreamRuntime::~LocalStreamRuntime()
 {
     clearPcmOutput();

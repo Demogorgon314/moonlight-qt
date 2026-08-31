@@ -160,9 +160,12 @@ private:
     NvComputer* m_Computer;
 };
 
-ComputerManager::ComputerManager(StreamingPreferences* prefs)
+ComputerManager::ComputerManager(
+        StreamingPreferences* prefs,
+        const QSharedPointer<QMdnsEngine::Server>& mdnsServer)
     : m_Prefs(prefs),
       m_PollingRef(0),
+      m_MdnsServer(mdnsServer),
       m_MdnsBrowser(nullptr),
       m_CompatFetcher(nullptr),
       m_NeedsDelayedFlush(false)
@@ -370,7 +373,6 @@ void ComputerManager::startPolling()
 
     if (m_Prefs->enableMdns) {
         // Start an MDNS query for GameStream hosts
-        m_MdnsServer.reset(new QMdnsEngine::Server());
         m_MdnsBrowser = new QMdnsEngine::Browser(m_MdnsServer.data(), "_nvstream._tcp.local.");
         connect(m_MdnsBrowser, &QMdnsEngine::Browser::serviceAdded,
                 this, [this](const QMdnsEngine::Service& service) {
@@ -723,8 +725,6 @@ void ComputerManager::stopPollingAsync()
     // Delete the browser and server to stop discovery and refresh polling
     delete m_MdnsBrowser;
     m_MdnsBrowser = nullptr;
-    m_MdnsServer.reset();
-
     // Interrupt all threads, but don't wait for them to terminate
     for (ComputerPollingEntry* entry : std::as_const(m_PollEntries)) {
         entry->interrupt();
