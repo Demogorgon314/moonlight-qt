@@ -22,6 +22,7 @@
 #include <QRunnable>
 #include <QSettings>
 #include <QStringList>
+#include <QThread>
 #include <QThreadPool>
 #include <QTimer>
 
@@ -40,6 +41,8 @@ constexpr qint64 RateControlIntervalMs = 50;
 constexpr qint64 KeyFrameRetryIntervalMs = 1500;
 constexpr qint64 DecoderStallMs = 5000;
 constexpr qint64 PerformanceReportIntervalMs = 1000;
+constexpr int PerformanceOverlayLineCount = 6;
+constexpr int PerformanceOverlayReservedCharacters = 96;
 constexpr quint32 FixedLanBandwidthKilobitsPerSecond = 60001;
 
 struct IntervalStatistics
@@ -688,6 +691,33 @@ private:
     bool m_PreferHardware;
 };
 
+class ApplePresentationThread final : public QThread
+{
+public:
+    explicit ApplePresentationThread(AppleScreenSharingSession* session)
+        : m_Session(session)
+    {
+        setObjectName(QStringLiteral("Apple D3D11 presentation"));
+    }
+
+protected:
+    void run() override
+    {
+        // Keep presentation independent from Qt's main event loop. Native
+        // window moves, resizes, and unrelated UI work can temporarily suspend
+        // main-thread timers, while Swift's display-link path continues in a
+        // common run-loop mode. The one-millisecond poll also bounds a
+        // DXGI_PRESENT_DO_NOT_WAIT retry without adding a frame of buffering.
+        while (!isInterruptionRequested()) {
+            m_Session->renderLatestFrames();
+            QThread::usleep(1000);
+        }
+    }
+
+private:
+    AppleScreenSharingSession* const m_Session;
+};
+
 AppleScreenSharingSession::AppleScreenSharingSession(
         AppleSavedConnection connection,
         QObject* parent)
@@ -819,12 +849,14 @@ void AppleScreenSharingSession::mediaReady(
     }
 
     updatePerformanceOverlayTexture();
+    m_PresentationThread = std::make_unique<ApplePresentationThread>(this);
+    m_PresentationThread->start(QThread::HighPriority);
+    qInfo() << "Apple High Performance presentation scheduler=dedicated-high-priority";
 
     m_EventTimer = new QTimer(this);
     m_EventTimer->setTimerType(Qt::PreciseTimer);
-    // DXGI presentation is non-blocking so the shared D3D11VA device never
-    // waits for vblank. Poll frequently enough to retry a busy swap chain while
-    // still yielding to the Qt event loop between attempts.
+    // SDL input and window events remain on the GUI thread. Video presentation
+    // is isolated above so a native modal window loop cannot freeze playback.
     m_EventTimer->setInterval(1);
     connect(m_EventTimer, &QTimer::timeout,
             this, &AppleScreenSharingSession::pollSdlEvents);
@@ -849,8 +881,12 @@ void AppleScreenSharingSession::mediaReady(
 void AppleScreenSharingSession::updatePerformanceStatistics(
         const QString& summary)
 {
-    m_PerformanceMediaSummary = summary;
-    updatePerformanceOverlayTexture();
+    {
+        QMutexLocker locker(&m_PerformanceMutex);
+        m_PerformanceMediaSummary = summary;
+    }
+    m_PerformanceOverlayUpdateNeeded.store(true);
+    m_PresentationNeeded.store(true);
 }
 
 void AppleScreenSharingSession::updatePerformanceOverlayTexture()
@@ -858,17 +894,29 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     if (m_D3D11Renderer == nullptr) {
         return;
     }
+    QElapsedTimer updateTimer;
+    updateTimer.start();
 
-    QStringList lines;
-    if (!m_PerformanceMediaSummary.isEmpty()) {
-        lines.append(m_PerformanceMediaSummary.split('\n', Qt::SkipEmptyParts));
+    QString mediaSummary;
+    QString presentationSummary;
+    {
+        QMutexLocker locker(&m_PerformanceMutex);
+        mediaSummary = m_PerformanceMediaSummary;
+        presentationSummary = m_PerformancePresentationSummary;
     }
-    if (!m_PerformancePresentationSummary.isEmpty()) {
-        lines.append(m_PerformancePresentationSummary.split(
+    QStringList lines;
+    if (!mediaSummary.isEmpty()) {
+        lines.append(mediaSummary.split('\n', Qt::SkipEmptyParts));
+    }
+    if (!presentationSummary.isEmpty()) {
+        lines.append(presentationSummary.split(
                 '\n', Qt::SkipEmptyParts));
     }
     if (lines.isEmpty()) {
         lines.append(QStringLiteral("APPLE HIGH PERFORMANCE   Measuring..."));
+    }
+    while (lines.size() < PerformanceOverlayLineCount) {
+        lines.append(QString());
     }
 
     int outputWidth = 0;
@@ -889,12 +937,18 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     for (const QString& line : std::as_const(lines)) {
         widestLine = qMax(widestLine, metrics.horizontalAdvance(line));
     }
+    const int reservedContentWidth = metrics.horizontalAdvance(
+            QString(PerformanceOverlayReservedCharacters, QLatin1Char('M')));
+    const int requestedImageWidth = qMax(widestLine, reservedContentWidth) +
+            horizontalPadding * 2;
     const int imageWidth = qBound(
-            1, widestLine + horizontalPadding * 2, qMax(1, outputWidth - 32));
+            1,
+            qMax(requestedImageWidth, m_PerformanceOverlaySize.first),
+            qMax(1, outputWidth - 32));
     const int imageHeight = qMin(
             outputHeight,
-            verticalPadding * 2 + metrics.height() * lines.size() +
-                    lineSpacing * qMax(0, lines.size() - 1));
+            verticalPadding * 2 + metrics.height() * PerformanceOverlayLineCount +
+                    lineSpacing * (PerformanceOverlayLineCount - 1));
     QImage image(imageWidth, imageHeight, QImage::Format_ARGB32_Premultiplied);
     image.fill(Qt::transparent);
     QPainter painter(&image);
@@ -922,8 +976,12 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
                 << overlayError;
     }
     else {
-        m_PresentationNeeded = true;
+        m_PerformanceOverlaySize = {image.width(), image.height()};
+        m_PresentationNeeded.store(true);
     }
+    m_MaxOverlayUpdateMilliseconds = qMax(
+            m_MaxOverlayUpdateMilliseconds,
+            updateTimer.nsecsElapsed() / 1000000.0);
 }
 
 void AppleScreenSharingSession::pollSdlEvents()
@@ -979,7 +1037,7 @@ void AppleScreenSharingSession::pollSdlEvents()
             case SDL_WINDOWEVENT_SHOWN:
             case SDL_WINDOWEVENT_RESTORED:
             case SDL_WINDOWEVENT_SIZE_CHANGED:
-                m_PresentationNeeded = true;
+                m_PresentationNeeded.store(true);
                 break;
             default:
                 break;
@@ -989,7 +1047,6 @@ void AppleScreenSharingSession::pollSdlEvents()
             break;
         }
     }
-    renderLatestFrames();
 }
 
 void AppleScreenSharingSession::queuePointer(
@@ -1070,6 +1127,18 @@ void AppleScreenSharingSession::renderLatestFrames()
     if (m_D3D11Renderer == nullptr || !m_Canvas.isUsable()) {
         return;
     }
+    const quint64 renderLoopAtNanoseconds = steadyNanoseconds();
+    if (m_LastRenderLoopAtNanoseconds != 0 &&
+            renderLoopAtNanoseconds >= m_LastRenderLoopAtNanoseconds) {
+        m_MaxRenderLoopGapMilliseconds = qMax(
+                m_MaxRenderLoopGapMilliseconds,
+                (renderLoopAtNanoseconds - m_LastRenderLoopAtNanoseconds) /
+                        1000000.0);
+    }
+    m_LastRenderLoopAtNanoseconds = renderLoopAtNanoseconds;
+    if (m_PerformanceOverlayUpdateNeeded.exchange(false)) {
+        updatePerformanceOverlayTexture();
+    }
     QHash<int, AppleDecodedTile> frames;
     quint64 pendingFrameBatches = 0;
     {
@@ -1103,7 +1172,7 @@ void AppleScreenSharingSession::renderLatestFrames()
             m_TileHeights.insert(frame.tileIndex, frame.height);
             m_AwaitingDecodeSubmissions.insert(
                     frame.tileIndex, frame.decodeSubmittedAtNanoseconds);
-            m_PresentationNeeded = true;
+            m_PresentationNeeded.store(true);
             continue;
         }
         qWarning().nospace()
@@ -1111,7 +1180,9 @@ void AppleScreenSharingSession::renderLatestFrames()
                 << frame.tileIndex;
     }
 
-    if (!m_PresentationNeeded) {
+    // Clear the request before rendering so a frame or window event arriving
+    // during the render remains set for the next iteration.
+    if (!m_PresentationNeeded.exchange(false)) {
         return;
     }
 
@@ -1154,19 +1225,17 @@ void AppleScreenSharingSession::renderLatestFrames()
     m_RenderCallDurations.append(renderTimer.nsecsElapsed() / 1000000.0);
     if (renderResult == AppleD3D11Renderer::RenderResult::Busy) {
         ++m_PresentationBusyCount;
-        m_PresentationNeeded = true;
+        m_PresentationNeeded.store(true);
         return;
     }
     if (renderResult == AppleD3D11Renderer::RenderResult::Failed) {
         qWarning().nospace()
                 << "Apple High Performance 4:4:4 render failed: "
                 << renderError;
-        m_PresentationNeeded = false;
         m_AwaitingPresentationBatches = 0;
         m_AwaitingDecodeSubmissions.clear();
         return;
     }
-    m_PresentationNeeded = false;
     ++m_PresentationCount;
     m_PresentedTileUpdates += static_cast<quint64>(
             m_AwaitingDecodeSubmissions.size());
@@ -1208,7 +1277,7 @@ void AppleScreenSharingSession::renderLatestFrames()
                 calculateIntervalStatistics(m_SubmitToDisplayLatencies);
         const IntervalStatistics renderCalls =
                 calculateIntervalStatistics(m_RenderCallDurations);
-        m_PerformancePresentationSummary = QStringLiteral(
+        const QString presentationSummary = QStringLiteral(
                 "DISPLAY %1 FPS   VSYNC %2 Hz   TILE UPDATES %3/s   COALESCED %4\n"
                 "FRAME TIME %5 ms avg   %6 p95   JITTER %7 ms\n"
                 "SUBMIT TO DISPLAY %8 ms avg   %9 p95\n"
@@ -1225,6 +1294,10 @@ void AppleScreenSharingSession::renderLatestFrames()
                 .arg(renderCalls.average, 0, 'f', 2)
                 .arg(renderCalls.percentile95, 0, 'f', 2)
                 .arg(m_PresentationBusyCount);
+        {
+            QMutexLocker locker(&m_PerformanceMutex);
+            m_PerformancePresentationSummary = presentationSummary;
+        }
         qInfo().nospace()
                 << "Apple High Performance presentation: "
                 << QString::number(m_PresentationCount / seconds, 'f', 1)
@@ -1243,8 +1316,12 @@ void AppleScreenSharingSession::renderLatestFrames()
                 << " ms, present-call avg/p95="
                 << QString::number(renderCalls.average, 'f', 2) << "/"
                 << QString::number(renderCalls.percentile95, 'f', 2)
-                << " ms, busy=" << m_PresentationBusyCount;
-        updatePerformanceOverlayTexture();
+                << " ms, busy=" << m_PresentationBusyCount
+                << ", render-loop max="
+                << QString::number(m_MaxRenderLoopGapMilliseconds, 'f', 2)
+                << " ms, overlay-update max="
+                << QString::number(m_MaxOverlayUpdateMilliseconds, 'f', 2)
+                << " ms";
         m_PresentationWindowStartedAt = presentationNow;
         m_PresentationCount = 0;
         m_PresentedTileUpdates = 0;
@@ -1254,6 +1331,9 @@ void AppleScreenSharingSession::renderLatestFrames()
         m_DisplayFrameIntervals.clear();
         m_SubmitToDisplayLatencies.clear();
         m_RenderCallDurations.clear();
+        m_MaxRenderLoopGapMilliseconds = 0.0;
+        m_MaxOverlayUpdateMilliseconds = 0.0;
+        updatePerformanceOverlayTexture();
     }
 }
 
@@ -1264,12 +1344,21 @@ void AppleScreenSharingSession::destroyPresentation()
         m_EventTimer->deleteLater();
         m_EventTimer = nullptr;
     }
+    if (m_PresentationThread != nullptr) {
+        m_PresentationThread->requestInterruption();
+        m_PresentationThread->wait();
+        m_PresentationThread.reset();
+    }
     m_Textures.clear();
     m_TextureSizes.clear();
     m_TextureFormats.clear();
     m_AwaitingPresentationBatches = 0;
     m_AwaitingDecodeSubmissions.clear();
-    m_PresentationNeeded = true;
+    m_PerformanceOverlayUpdateNeeded.store(false);
+    m_PresentationNeeded.store(true);
+    m_LastRenderLoopAtNanoseconds = 0;
+    m_MaxRenderLoopGapMilliseconds = 0.0;
+    m_MaxOverlayUpdateMilliseconds = 0.0;
     m_D3D11Renderer.reset();
     m_PerformanceOverlayTexture = nullptr;
     m_PerformanceOverlaySize = {};

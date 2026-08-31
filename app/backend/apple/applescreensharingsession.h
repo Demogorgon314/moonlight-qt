@@ -17,6 +17,7 @@
 class LocalStreamRuntime;
 class QTimer;
 class AppleHighPerformanceSessionTask;
+class ApplePresentationThread;
 class AppleD3D11Renderer;
 struct SDL_Renderer;
 struct SDL_Texture;
@@ -40,6 +41,7 @@ protected:
 
 private:
     friend class AppleHighPerformanceSessionTask;
+    friend class ApplePresentationThread;
 
     void queueDecodedFrames(QList<AppleDecodedTile> frames);
     QList<AppleInputEncryptionRequest> takePendingInputs();
@@ -63,6 +65,7 @@ private:
     QPointer<QQuickWindow> m_QtWindow;
     std::unique_ptr<LocalStreamRuntime> m_Runtime;
     QTimer* m_EventTimer = nullptr;
+    std::unique_ptr<ApplePresentationThread> m_PresentationThread;
     SDL_Renderer* m_Renderer = nullptr;
     std::unique_ptr<AppleD3D11Renderer> m_D3D11Renderer;
     QHash<int, SDL_Texture*> m_Textures;
@@ -78,6 +81,7 @@ private:
     mutable QMutex m_FrameMutex;
     QList<AppleInputEncryptionRequest> m_PendingInputs;
     QMutex m_InputMutex;
+    QMutex m_PerformanceMutex;
     AppleCanvas m_Canvas;
     quint8 m_MouseButtons = 0;
     int m_LastMouseX = 0;
@@ -90,11 +94,15 @@ private:
     quint64 m_DroppedFrameBatches = 0;
     quint64 m_PresentationBusyCount = 0;
     quint64 m_LastDisplayedFrameAt = 0;
+    quint64 m_LastRenderLoopAtNanoseconds = 0;
+    double m_MaxRenderLoopGapMilliseconds = 0.0;
+    double m_MaxOverlayUpdateMilliseconds = 0.0;
     QVector<double> m_DisplayFrameIntervals;
     QVector<double> m_SubmitToDisplayLatencies;
     QVector<double> m_RenderCallDurations;
     QString m_PerformanceMediaSummary;
     QString m_PerformancePresentationSummary;
-    bool m_PresentationNeeded = true;
+    std::atomic_bool m_PerformanceOverlayUpdateNeeded{false};
+    std::atomic_bool m_PresentationNeeded{true};
     bool m_MediaReady = false;
 };

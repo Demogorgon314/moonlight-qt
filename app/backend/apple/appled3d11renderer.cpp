@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <utility>
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -633,10 +634,6 @@ bool AppleD3D11Renderer::uploadOverlay(const QImage& image, QString* error)
     if (implementation.overlayWidth != image.width() ||
             implementation.overlayHeight != image.height() ||
             implementation.overlayTexture == nullptr) {
-        implementation.overlayTexture.Reset();
-        implementation.overlayResourceView.Reset();
-        implementation.overlayWidth = image.width();
-        implementation.overlayHeight = image.height();
         D3D11_TEXTURE2D_DESC description = {};
         description.Width = image.width();
         description.Height = image.height();
@@ -644,26 +641,45 @@ bool AppleD3D11Renderer::uploadOverlay(const QImage& image, QString* error)
         description.ArraySize = 1;
         description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         description.SampleDesc.Count = 1;
-        description.Usage = D3D11_USAGE_DEFAULT;
+        // The overlay changes once per statistics sample while the previous
+        // frame may still be in flight. A dynamic texture lets WRITE_DISCARD
+        // rename its storage instead of synchronizing with the GPU reader.
+        description.Usage = D3D11_USAGE_DYNAMIC;
         description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ComPtr<ID3D11Texture2D> overlayTexture;
+        ComPtr<ID3D11ShaderResourceView> overlayResourceView;
         HRESULT result = implementation.device->CreateTexture2D(
-                &description, nullptr, &implementation.overlayTexture);
+                &description, nullptr, &overlayTexture);
         if (SUCCEEDED(result)) {
             result = implementation.device->CreateShaderResourceView(
-                    implementation.overlayTexture.Get(), nullptr,
-                    &implementation.overlayResourceView);
+                    overlayTexture.Get(), nullptr, &overlayResourceView);
         }
         if (FAILED(result)) {
             setError(error, d3dError(QStringLiteral("Create overlay texture"),
                                      result));
-            implementation.overlayTexture.Reset();
-            implementation.overlayResourceView.Reset();
             return false;
         }
+        implementation.overlayTexture = std::move(overlayTexture);
+        implementation.overlayResourceView = std::move(overlayResourceView);
+        implementation.overlayWidth = image.width();
+        implementation.overlayHeight = image.height();
     }
-    implementation.context->UpdateSubresource(
-            implementation.overlayTexture.Get(), 0, nullptr,
-            image.constBits(), image.bytesPerLine(), 0);
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    const HRESULT mapResult = implementation.context->Map(
+            implementation.overlayTexture.Get(), 0,
+            D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(mapResult)) {
+        setError(error, d3dError(QStringLiteral("Map overlay texture"),
+                                 mapResult));
+        return false;
+    }
+    const int rowBytes = image.width() * 4;
+    for (int row = 0; row < image.height(); ++row) {
+        std::memcpy(static_cast<quint8*>(mapped.pData) + row * mapped.RowPitch,
+                    image.constScanLine(row), rowBytes);
+    }
+    implementation.context->Unmap(implementation.overlayTexture.Get(), 0);
     return true;
 }
 
