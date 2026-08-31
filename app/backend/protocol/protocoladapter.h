@@ -45,6 +45,19 @@ public:
     virtual void wakeConnection(const ConnectionIdentity& identity) = 0;
     virtual void quitRunningActivity(const ConnectionIdentity& identity) = 0;
 
+    virtual QString saveConnection(const ConnectionIdentity&, QString* error)
+    {
+        if (error != nullptr) {
+            *error = tr("This connection is already saved.");
+        }
+        return {};
+    }
+    virtual void requestAuthentication(const ConnectionIdentity&) {}
+    virtual void confirmHostTrust(const ConnectionIdentity&, bool) {}
+    virtual void submitCredentials(const ConnectionIdentity&,
+                                   const QString&,
+                                   const QString&) {}
+
     virtual QVariantList connectionEndpoints(const ConnectionIdentity& identity) const = 0;
     virtual bool hasMultipleEndpoints(const ConnectionIdentity& identity) const = 0;
     virtual bool selectEndpoint(const ConnectionIdentity& identity,
@@ -63,5 +76,11 @@ signals:
     void pairingCompleted(QString connectionId, QString error);
     void connectionAddCompleted(QVariant success, QVariant detectedPortBlocking);
     void quitActivityCompleted(QVariant error);
+    void connectionSaved(QString sourceConnectionId, QString savedConnectionId, QString error);
+    void hostTrustRequired(QString connectionId,
+                           QString displayName,
+                           QString fingerprint,
+                           bool identityChanged);
+    void credentialsRequired(QString connectionId, QString preferredUsername);
+    void authenticationCompleted(QString connectionId, QString error);
 };
-

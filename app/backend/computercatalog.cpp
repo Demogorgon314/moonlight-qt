@@ -7,6 +7,7 @@
 
 #ifdef MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
 #include "apple/applefeaturegate.h"
+#include "apple/appleprotocoladapter.h"
 #endif
 
 #include <QDebug>
@@ -25,6 +26,25 @@ ComputerCatalog::ComputerCatalog(StreamingPreferences* preferences, QObject* par
             this, &ComputerCatalog::computerAddCompleted);
     connect(m_Moonlight, &ProtocolAdapter::quitActivityCompleted,
             this, &ComputerCatalog::quitAppCompleted);
+
+#ifdef MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
+    if (AppleFeatureGate::isRuntimeEnabled()) {
+        m_Apple = new AppleProtocolAdapter();
+        m_Adapters.emplace_back(m_Apple);
+        connect(m_Apple, &ProtocolAdapter::connectionChanged,
+                this, &ComputerCatalog::connectionChanged);
+        connect(m_Apple, &ProtocolAdapter::connectionAddCompleted,
+                this, &ComputerCatalog::computerAddCompleted);
+        connect(m_Apple, &ProtocolAdapter::connectionSaved,
+                this, &ComputerCatalog::connectionSaved);
+        connect(m_Apple, &ProtocolAdapter::hostTrustRequired,
+                this, &ComputerCatalog::hostTrustRequired);
+        connect(m_Apple, &ProtocolAdapter::credentialsRequired,
+                this, &ComputerCatalog::credentialsRequired);
+        connect(m_Apple, &ProtocolAdapter::authenticationCompleted,
+                this, &ComputerCatalog::authenticationCompleted);
+    }
+#endif
 }
 
 ComputerCatalog::~ComputerCatalog() = default;
@@ -86,8 +106,23 @@ void ComputerCatalog::stopPollingAsync()
 
 void ComputerCatalog::addNewHostManually(QString address)
 {
-    // Stage 1 preserves the existing add-host behavior. Apple registration is
-    // intentionally absent, so manual additions are unambiguously Moonlight.
+    const bool appleIntent = address.trimmed().startsWith(
+            QStringLiteral("vnc://"), Qt::CaseInsensitive);
+    if (appleIntent) {
+#ifdef MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
+        if (m_Apple != nullptr) {
+            m_Apple->addManualConnection(address);
+        }
+        else {
+            emit computerAddCompleted(false, false);
+        }
+#else
+        emit computerAddCompleted(false, false);
+#endif
+        return;
+    }
+    // Bare host input preserves Moonlight's existing behavior. A vnc:// scheme is
+    // explicit user intent and never falls through to the Moonlight adapter.
     m_Moonlight->addManualConnection(address);
 }
 
@@ -136,6 +171,49 @@ void ComputerCatalog::wakeConnection(const QString& connectionId)
 void ComputerCatalog::quitRunningActivity(const QString& connectionId)
 {
     ROUTE_CONNECTION_OPERATION(quitRunningActivity)
+}
+
+QString ComputerCatalog::saveConnection(const QString& connectionId, QString* error)
+{
+    bool valid = false;
+    const ConnectionIdentity identity = ConnectionIdentity::fromString(connectionId, &valid);
+    ProtocolAdapter* adapter = valid ? adapterFor(identity) : nullptr;
+    if (adapter == nullptr) {
+        if (error != nullptr) {
+            *error = tr("The selected connection is no longer available.");
+        }
+        return {};
+    }
+    return adapter->saveConnection(identity, error);
+}
+
+void ComputerCatalog::requestAuthentication(const QString& connectionId)
+{
+    bool valid = false;
+    const ConnectionIdentity identity = ConnectionIdentity::fromString(connectionId, &valid);
+    if (ProtocolAdapter* adapter = valid ? adapterFor(identity) : nullptr) {
+        adapter->requestAuthentication(identity);
+    }
+}
+
+void ComputerCatalog::confirmHostTrust(const QString& connectionId, bool accepted)
+{
+    bool valid = false;
+    const ConnectionIdentity identity = ConnectionIdentity::fromString(connectionId, &valid);
+    if (ProtocolAdapter* adapter = valid ? adapterFor(identity) : nullptr) {
+        adapter->confirmHostTrust(identity, accepted);
+    }
+}
+
+void ComputerCatalog::submitCredentials(const QString& connectionId,
+                                        const QString& username,
+                                        const QString& password)
+{
+    bool valid = false;
+    const ConnectionIdentity identity = ConnectionIdentity::fromString(connectionId, &valid);
+    if (ProtocolAdapter* adapter = valid ? adapterFor(identity) : nullptr) {
+        adapter->submitCredentials(identity, username, password);
+    }
 }
 
 #undef ROUTE_CONNECTION_OPERATION

@@ -10,6 +10,8 @@ bool AppleFeatureGate::isRuntimeEnabled()
     }
 
     QSettings settings;
-    return settings.value(QStringLiteral("appleScreenSharing/runtimeEnabled"), false).toBool();
+    // Reaching this code already means the Apple implementation was explicitly
+    // compiled into the product. Make that build usable without requiring a
+    // hidden environment variable, while preserving explicit runtime-off values.
+    return settings.value(QStringLiteral("appleScreenSharing/runtimeEnabled"), true).toBool();
 }
-

@@ -58,6 +58,8 @@ enum ConnectionCapability
     CanBrowseActivities = 1 << 4,
     CanQuitActivity = 1 << 5,
     CanSelectEndpoint = 1 << 6,
+    CanSaveConnection = 1 << 7,
+    CanAuthenticateConnection = 1 << 8,
 };
 Q_DECLARE_FLAGS(ConnectionCapabilities, ConnectionCapability)
 Q_DECLARE_OPERATORS_FOR_FLAGS(ConnectionCapabilities)
@@ -74,6 +76,10 @@ struct CatalogConnectionView
     bool wakeable = false;
     bool statusUnknown = true;
     bool serverSupported = true;
+    bool persistent = true;
+    bool trusted = false;
+    bool directLaunch = false;
+    QString authenticationKind = QStringLiteral("pin");
     ConnectionCapabilities capabilities;
 };
 

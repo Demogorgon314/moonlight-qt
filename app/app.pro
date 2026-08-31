@@ -3,8 +3,8 @@ QT += core quick network quickcontrols2 svg gui-private
 CONFIG += c++17
 
 # Apple Screen Sharing is isolated behind both a Windows x64 compile option and
-# a runtime gate. Stage 1 intentionally compiles only the gate: no Apple adapter
-# is registered or exposed to users yet.
+# a runtime gate. With either gate off, no Apple adapter, discovery, connection,
+# or credential access is registered.
 MOONLIGHT_APPLE_SCREEN_SHARING_BUILD = $$(MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING)
 win32:contains(QT_ARCH, x86_64):equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 1) {
     CONFIG += apple-screen-sharing
@@ -12,8 +12,24 @@ win32:contains(QT_ARCH, x86_64):equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 1) 
 
 apple-screen-sharing {
     DEFINES += MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
-    SOURCES += backend/apple/applefeaturegate.cpp
-    HEADERS += backend/apple/applefeaturegate.h
+    LIBS += -ladvapi32
+    SOURCES += \
+        backend/apple/applefeaturegate.cpp \
+        backend/apple/appleconnectionstore.cpp \
+        backend/apple/applecredentialstore.cpp \
+        backend/apple/appleprotocol.cpp \
+        backend/apple/appleauthenticator.cpp \
+        backend/apple/appleprotocoladapter.cpp \
+        backend/apple/applescreensharingsession.cpp
+    HEADERS += \
+        backend/apple/applefeaturegate.h \
+        backend/apple/appleconnectionstore.h \
+        backend/apple/applecredentialstore.h \
+        backend/apple/appleprotocol.h \
+        backend/apple/appleauthenticator.h \
+        backend/apple/appleprotocoladapter.h \
+        backend/apple/applescreensharingsession.h
+    DISTFILES += backend/apple/LICENSE.ScreenSharingProtocol
 }
 
 unix:!macx {

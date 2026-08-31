@@ -10,6 +10,7 @@
 #include <vector>
 
 class ComputerManager;
+class AppleProtocolAdapter;
 class MoonlightProtocolAdapter;
 class NvComputer;
 class ResolvedLaunchPlan;
@@ -39,6 +40,12 @@ public:
     void renameConnection(const QString& connectionId, const QString& name);
     void wakeConnection(const QString& connectionId);
     void quitRunningActivity(const QString& connectionId);
+    QString saveConnection(const QString& connectionId, QString* error = nullptr);
+    void requestAuthentication(const QString& connectionId);
+    void confirmHostTrust(const QString& connectionId, bool accepted);
+    void submitCredentials(const QString& connectionId,
+                           const QString& username,
+                           const QString& password);
 
     QVariantList connectionEndpoints(const QString& connectionId) const;
     bool hasMultipleEndpoints(const QString& connectionId) const;
@@ -73,9 +80,17 @@ signals:
     void pairingCompleted(QString connectionId, QString error);
     void computerAddCompleted(QVariant success, QVariant detectedPortBlocking);
     void quitAppCompleted(QVariant error);
+    void connectionSaved(QString sourceConnectionId, QString savedConnectionId, QString error);
+    void hostTrustRequired(QString connectionId,
+                           QString displayName,
+                           QString fingerprint,
+                           bool identityChanged);
+    void credentialsRequired(QString connectionId, QString preferredUsername);
+    void authenticationCompleted(QString connectionId, QString error);
 
 private:
     class ProtocolAdapter* adapterFor(const ConnectionIdentity& identity) const;
     MoonlightProtocolAdapter* m_Moonlight;
+    AppleProtocolAdapter* m_Apple = nullptr;
     std::vector<std::unique_ptr<class ProtocolAdapter>> m_Adapters;
 };

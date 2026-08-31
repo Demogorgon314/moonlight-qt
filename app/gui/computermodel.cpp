@@ -21,6 +21,12 @@ void ComputerModel::initialize(ComputerCatalog* catalog)
             this, &ComputerModel::handleConnectionChanged);
     connect(m_Catalog, &ComputerCatalog::pairingCompleted,
             this, &ComputerModel::handlePairingCompleted);
+    connect(m_Catalog, &ComputerCatalog::hostTrustRequired,
+            this, &ComputerModel::hostTrustRequired);
+    connect(m_Catalog, &ComputerCatalog::credentialsRequired,
+            this, &ComputerModel::credentialsRequired);
+    connect(m_Catalog, &ComputerCatalog::authenticationCompleted,
+            this, &ComputerModel::authenticationCompleted);
     refreshConnections();
 }
 
@@ -42,6 +48,10 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
     case StatusUnknownRole: return connection.statusUnknown;
     case ServerSupportedRole: return connection.serverSupported;
     case DetailsRole: return connection.details;
+    case PersistentRole: return connection.persistent;
+    case TrustedRole: return connection.trusted;
+    case DirectLaunchRole: return connection.directLaunch;
+    case AuthenticationKindRole: return connection.authenticationKind;
     default: return QVariant();
     }
 }
@@ -64,6 +74,10 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
         {StatusUnknownRole, "statusUnknown"},
         {ServerSupportedRole, "serverSupported"},
         {DetailsRole, "details"},
+        {PersistentRole, "persistent"},
+        {TrustedRole, "trusted"},
+        {DirectLaunchRole, "directLaunch"},
+        {AuthenticationKindRole, "authenticationKind"},
     };
 }
 
@@ -153,6 +167,70 @@ StreamSession* ComputerModel::createSessionForCurrentGame(QString connectionId)
         qWarning() << "Unable to create session for running activity:" << error;
     }
     return session;
+}
+
+StreamSession* ComputerModel::createDirectSession(QString connectionId)
+{
+    bool found = false;
+    const CatalogConnectionView connection = m_Catalog != nullptr
+            ? m_Catalog->connection(connectionId, &found)
+            : CatalogConnectionView();
+    if (!found || !connection.directLaunch || !connection.paired) {
+        emit operationFailed(tr("This connection is not ready to start."));
+        return nullptr;
+    }
+
+    QString error;
+    StreamSession* session = m_Catalog->createSession(connectionId,
+                                                      QString(),
+                                                      QString(),
+                                                      nullptr,
+                                                      &error);
+    if (session == nullptr) {
+        emit operationFailed(error.isEmpty()
+                ? tr("Unable to create the connection session.")
+                : error);
+    }
+    return session;
+}
+
+QString ComputerModel::saveConnection(QString connectionId)
+{
+    if (m_Catalog == nullptr) {
+        emit operationFailed(tr("The connection catalog is not available."));
+        return {};
+    }
+    QString error;
+    const QString savedId = m_Catalog->saveConnection(connectionId, &error);
+    if (savedId.isEmpty()) {
+        emit operationFailed(error.isEmpty()
+                ? tr("Unable to save the selected connection.")
+                : error);
+    }
+    return savedId;
+}
+
+void ComputerModel::requestAuthentication(QString connectionId)
+{
+    if (m_Catalog != nullptr) {
+        m_Catalog->requestAuthentication(connectionId);
+    }
+}
+
+void ComputerModel::confirmHostTrust(QString connectionId, bool accepted)
+{
+    if (m_Catalog != nullptr) {
+        m_Catalog->confirmHostTrust(connectionId, accepted);
+    }
+}
+
+void ComputerModel::submitCredentials(QString connectionId,
+                                      QString username,
+                                      QString password)
+{
+    if (m_Catalog != nullptr) {
+        m_Catalog->submitCredentials(connectionId, username, password);
+    }
 }
 
 QVariantList ComputerModel::getConnectionAddressesForComputer(QString connectionId) const

@@ -117,12 +117,96 @@ CenteredGridView {
         }
     }
 
+    property string pendingAppleConnectionId: ""
+    property string pendingAppleName: ""
+
+    function showOperationError(error)
+    {
+        errorDialog.text = error
+        errorDialog.helpText = ""
+        errorDialog.open()
+    }
+
+    function startDirectSession(connectionId, connectionName)
+    {
+        var component = Qt.createComponent("StreamSegue.qml")
+        if (component.status !== Component.Ready) {
+            showOperationError(component.errorString())
+            return
+        }
+
+        var session = computerModel.createDirectSession(connectionId)
+        if (!session) {
+            return
+        }
+
+        var segue = component.createObject(stackView, {
+            "session": session,
+            "appName": connectionName
+        })
+        if (!segue) {
+            showOperationError(component.errorString())
+            return
+        }
+        stackView.push(segue)
+    }
+
+    function authenticateApple(connectionId, connectionName, persistent)
+    {
+        var savedId = connectionId
+        if (!persistent) {
+            savedId = computerModel.saveConnection(connectionId)
+            if (savedId === "") {
+                return
+            }
+        }
+        pendingAppleConnectionId = savedId
+        pendingAppleName = connectionName
+        computerModel.requestAuthentication(savedId)
+    }
+
+    function appleHostTrustRequired(connectionId, displayName, fingerprint, identityChanged)
+    {
+        pendingAppleConnectionId = connectionId
+        pendingAppleName = displayName
+        hostTrustDialog.connectionId = connectionId
+        hostTrustDialog.displayName = displayName
+        hostTrustDialog.fingerprint = fingerprint
+        hostTrustDialog.identityChanged = identityChanged
+        hostTrustDialog.open()
+    }
+
+    function appleCredentialsRequired(connectionId, preferredUsername)
+    {
+        credentialsDialog.connectionId = connectionId
+        credentialsDialog.preferredUsername = preferredUsername
+        credentialsDialog.open()
+    }
+
+    function appleAuthenticationCompleted(connectionId, error)
+    {
+        if (error !== "") {
+            showOperationError(error)
+            return
+        }
+        if (connectionId === pendingAppleConnectionId) {
+            var connectionName = pendingAppleName
+            pendingAppleConnectionId = ""
+            pendingAppleName = ""
+            startDirectSession(connectionId, connectionName)
+        }
+    }
+
     function createModel()
     {
         var model = Qt.createQmlObject('import ComputerModel 1.0; ComputerModel {}', parent, '')
         model.initialize(ComputerManager)
         model.pairingCompleted.connect(pairingComplete)
         model.connectionTestCompleted.connect(testConnectionDialog.connectionTestComplete)
+        model.hostTrustRequired.connect(appleHostTrustRequired)
+        model.credentialsRequired.connect(appleCredentialsRequired)
+        model.authenticationCompleted.connect(appleAuthenticationCompleted)
+        model.operationFailed.connect(showOperationError)
         return model
     }
 
@@ -407,7 +491,26 @@ CenteredGridView {
                     onTriggered: {
                         openAppView(model.connectionId, model.name, true)
                     }
-                    visible: model.online && model.paired
+                    visible: model.online && model.paired && !model.directLaunch
+                }
+                NavigableMenuItem {
+                    text: model.paired ? qsTr("Connect Screen Sharing")
+                                       : (model.persistent ? qsTr("Authenticate Screen Sharing")
+                                                           : qsTr("Save and Authenticate"))
+                    onTriggered: {
+                        if (model.paired) {
+                            startDirectSession(model.connectionId, model.name)
+                        }
+                        else {
+                            authenticateApple(model.connectionId, model.name, model.persistent)
+                        }
+                    }
+                    visible: model.directLaunch
+                }
+                NavigableMenuItem {
+                    text: qsTr("Re-authenticate Screen Sharing")
+                    onTriggered: authenticateApple(model.connectionId, model.name, true)
+                    visible: model.directLaunch && model.persistent && model.paired
                 }
                 NavigableMenuItem {
                     text: qsTr("Select Connection IP")
@@ -425,6 +528,7 @@ CenteredGridView {
                         computerModel.testConnectionForComputer(model.connectionId)
                         testConnectionDialog.open()
                     }
+                    visible: !model.directLaunch
                 }
 
                 NavigableMenuItem {
@@ -434,6 +538,7 @@ CenteredGridView {
                         renamePcDialog.originalName = model.name
                         renamePcDialog.open()
                     }
+                    visible: model.persistent
                 }
                 NavigableMenuItem {
                     text: qsTr("Delete PC")
@@ -442,6 +547,7 @@ CenteredGridView {
                         deletePcDialog.pcName = model.name
                         deletePcDialog.open()
                     }
+                    visible: model.persistent
                 }
                 NavigableMenuItem {
                     text: qsTr("View Details")
@@ -455,7 +561,15 @@ CenteredGridView {
 
         onClicked: {
             if (model.online) {
-                if (!model.serverSupported) {
+                if (model.directLaunch) {
+                    if (model.paired) {
+                        startDirectSession(model.connectionId, model.name)
+                    }
+                    else {
+                        authenticateApple(model.connectionId, model.name, model.persistent)
+                    }
+                }
+                else if (!model.serverSupported) {
                     errorDialog.text = Brand.text(qsTr("The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.")).arg(model.name)
                     errorDialog.helpText = ""
                     errorDialog.open()
@@ -500,9 +614,14 @@ CenteredGridView {
         }
 
         Keys.onDeletePressed: {
-            deletePcDialog.connectionId = model.connectionId
-            deletePcDialog.pcName = model.name
-            deletePcDialog.open()
+            if (model.persistent) {
+                deletePcDialog.connectionId = model.connectionId
+                deletePcDialog.pcName = model.name
+                deletePcDialog.open()
+            }
+            else {
+                openContextMenu(false)
+            }
         }
     }
 
@@ -525,6 +644,79 @@ CenteredGridView {
         standardButtons: DialogButtonBox.Cancel
         onRejected: {
             // FIXME: We should interrupt pairing here
+        }
+    }
+
+    NavigableMessageDialog {
+        id: hostTrustDialog
+        property string connectionId: ""
+        property string displayName: ""
+        property string fingerprint: ""
+        property bool identityChanged: false
+        closePolicy: Popup.CloseOnEscape
+        text: (identityChanged
+                   ? qsTr("The saved host identity for %1 has changed. Only continue if you expected this change.").arg(displayName)
+                   : qsTr("Verify the identity of %1 before sending any account credentials.").arg(displayName)) +
+              "\n\n" + qsTr("SHA-256 host fingerprint:") + "\n" + fingerprint
+        standardButtons: DialogButtonBox.Ok | DialogButtonBox.Cancel
+        onAccepted: computerModel.confirmHostTrust(connectionId, true)
+        onRejected: computerModel.confirmHostTrust(connectionId, false)
+    }
+
+    NavigableDialog {
+        id: credentialsDialog
+        property string connectionId: ""
+        property string preferredUsername: ""
+        title: qsTr("Apple Screen Sharing Account")
+        standardButtons: DialogButtonBox.Ok | DialogButtonBox.Cancel
+
+        onOpened: {
+            usernameText.text = preferredUsername
+            if (usernameText.text === "") {
+                usernameText.forceActiveFocus()
+            }
+            else {
+                passwordText.forceActiveFocus()
+            }
+        }
+        onAccepted: {
+            computerModel.submitCredentials(connectionId,
+                                             usernameText.text,
+                                             passwordText.text)
+        }
+        onClosed: {
+            // The password leaves QML immediately after submission and is never logged
+            // or persisted by the UI layer.
+            passwordText.clear()
+            preferredUsername = ""
+        }
+
+        ColumnLayout {
+            spacing: Theme.spaceMd
+
+            Text {
+                text: qsTr("Enter an account that is allowed to use Screen Sharing on the remote Mac.")
+                color: Theme.text
+                font.family: Theme.fontSans
+                font.pointSize: Theme.fontBody
+                wrapMode: Text.Wrap
+                Layout.preferredWidth: 460
+            }
+
+            HardTextField {
+                id: usernameText
+                placeholderText: qsTr("Account name")
+                Layout.fillWidth: true
+            }
+
+            HardTextField {
+                id: passwordText
+                placeholderText: qsTr("Password")
+                echoMode: TextInput.Password
+                Layout.fillWidth: true
+                Keys.onReturnPressed: credentialsDialog.accept()
+                Keys.onEnterPressed: credentialsDialog.accept()
+            }
         }
     }
 

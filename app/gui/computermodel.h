@@ -22,6 +22,10 @@ class ComputerModel : public QAbstractListModel
         StatusUnknownRole,
         ServerSupportedRole,
         DetailsRole,
+        PersistentRole,
+        TrustedRole,
+        DirectLaunchRole,
+        AuthenticationKindRole,
     };
 
 public:
@@ -40,6 +44,13 @@ public:
     Q_INVOKABLE void wakeComputer(QString connectionId);
     Q_INVOKABLE void renameComputer(QString connectionId, QString name);
     Q_INVOKABLE StreamSession* createSessionForCurrentGame(QString connectionId);
+    Q_INVOKABLE StreamSession* createDirectSession(QString connectionId);
+    Q_INVOKABLE QString saveConnection(QString connectionId);
+    Q_INVOKABLE void requestAuthentication(QString connectionId);
+    Q_INVOKABLE void confirmHostTrust(QString connectionId, bool accepted);
+    Q_INVOKABLE void submitCredentials(QString connectionId,
+                                       QString username,
+                                       QString password);
     Q_INVOKABLE QVariantList getConnectionAddressesForComputer(QString connectionId) const;
     Q_INVOKABLE bool hasMultipleConnectionAddresses(QString connectionId) const;
     Q_INVOKABLE bool setActiveAddressForComputer(QString connectionId,
@@ -50,6 +61,13 @@ public:
 signals:
     void pairingCompleted(QVariant error);
     void connectionTestCompleted(int result, QString blockedPorts);
+    void hostTrustRequired(QString connectionId,
+                           QString displayName,
+                           QString fingerprint,
+                           bool identityChanged);
+    void credentialsRequired(QString connectionId, QString preferredUsername);
+    void authenticationCompleted(QString connectionId, QString error);
+    void operationFailed(QString error);
 
 private slots:
     void handleConnectionChanged(QString connectionId);
