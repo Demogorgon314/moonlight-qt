@@ -6,6 +6,8 @@
 #include <QList>
 #include <QString>
 
+#include <memory>
+
 struct AVBufferRef;
 struct AVCodec;
 struct AVCodecContext;
@@ -18,6 +20,24 @@ struct AppleDecodedTile
     enum class PixelFormat
     {
         Nv12,
+        Nv24,
+        Vuya,
+        D3d11Ayuv,
+    };
+
+    enum class ColorSpace
+    {
+        Unknown,
+        Bt601,
+        Bt709,
+        Bt2020,
+    };
+
+    enum class ColorRange
+    {
+        Unknown,
+        Limited,
+        Full,
     };
 
     int tileIndex = 0;
@@ -27,13 +47,32 @@ struct AppleDecodedTile
     int chromaOffset = 0;
     int chromaStride = 0;
     quint32 rtpTimestamp = 0;
+    quint64 decodeSubmittedAtNanoseconds = 0;
     std::optional<quint16> frameSequenceNumber;
     PixelFormat pixelFormat = PixelFormat::Nv12;
+    ColorSpace colorSpace = ColorSpace::Unknown;
+    ColorRange colorRange = ColorRange::Unknown;
     QByteArray pixels;
+    std::shared_ptr<AVFrame> hardwareFrame;
 
     bool isValid() const
     {
+        if (pixelFormat == PixelFormat::D3d11Ayuv) {
+            return tileIndex >= 0 && width > 0 && height > 0 &&
+                   hardwareFrame != nullptr;
+        }
+        if (pixelFormat == PixelFormat::Vuya) {
+            return tileIndex >= 0 && width > 0 && height > 0 &&
+                   stride >= width * 4 &&
+                   pixels.size() >= stride * height;
+        }
         const int chromaRows = (height + 1) / 2;
+        if (pixelFormat == PixelFormat::Nv24) {
+            return tileIndex >= 0 && width > 0 && height > 0 &&
+                   stride >= width && chromaStride >= width * 2 &&
+                   chromaOffset >= stride * height &&
+                   pixels.size() >= chromaOffset + chromaStride * height;
+        }
         return tileIndex >= 0 && width > 0 && height > 0 &&
                stride >= width && chromaStride >= width &&
                chromaOffset >= stride * height &&
@@ -94,6 +133,7 @@ public:
     bool isOpen() const { return m_Context != nullptr; }
     Backend backend() const { return m_Backend; }
     bool hardwareFallbackOccurred() const { return m_HardwareFallbackOccurred; }
+    void* nativeD3D11Device() const;
 
 private:
     bool openBackend(bool hardware, QString* error);
@@ -110,6 +150,7 @@ private:
                       const AppleHevcParameterSets& parameterSets) const;
     static int selectHardwareFormat(AVCodecContext* context,
                                     const int* formats);
+    bool prepareHardwareFramesContext(AVCodecContext* context, int format);
 
     bool m_PreferHardware = false;
     bool m_ParameterSetsSubmitted = false;

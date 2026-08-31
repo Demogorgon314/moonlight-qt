@@ -2,8 +2,14 @@
 
 #include <QCoreApplication>
 
+#include <chrono>
 #include <cstring>
 #include <utility>
+
+#ifdef Q_OS_WIN
+#include <d3d10_1.h>
+#include <d3d11.h>
+#endif
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -11,6 +17,9 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
+#ifdef Q_OS_WIN
+#include <libavutil/hwcontext_d3d11va.h>
+#endif
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 }
@@ -21,9 +30,17 @@ struct AppleDecodedFrameMetadata
 {
     int tileIndex;
     quint32 rtpTimestamp;
+    quint64 decodeSubmittedAtNanoseconds;
     quint16 frameSequenceNumber;
     quint16 hasFrameSequenceNumber;
 };
+
+quint64 steadyNanoseconds()
+{
+    return static_cast<quint64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 void setError(QString* error, const QString& value)
 {
@@ -45,6 +62,33 @@ void appendAnnexBNal(QByteArray& packet, const QByteArray& nal)
         packet.append(QByteArray::fromHex("00000001"));
         packet.append(nal);
     }
+}
+
+AppleDecodedTile::ColorSpace decodedColorSpace(const AVFrame* frame)
+{
+    switch (frame->colorspace) {
+    case AVCOL_SPC_FCC:
+    case AVCOL_SPC_BT470BG:
+    case AVCOL_SPC_SMPTE170M:
+    case AVCOL_SPC_SMPTE240M:
+        return AppleDecodedTile::ColorSpace::Bt601;
+    case AVCOL_SPC_BT2020_NCL:
+    case AVCOL_SPC_BT2020_CL:
+        return AppleDecodedTile::ColorSpace::Bt2020;
+    case AVCOL_SPC_BT709:
+    case AVCOL_SPC_UNSPECIFIED:
+    default:
+        // Apple's desktop stream is BT.709 when the bitstream omits VUI
+        // colour description fields.
+        return AppleDecodedTile::ColorSpace::Bt709;
+    }
+}
+
+AppleDecodedTile::ColorRange decodedColorRange(const AVFrame* frame)
+{
+    return frame->color_range == AVCOL_RANGE_JPEG
+            ? AppleDecodedTile::ColorRange::Full
+            : AppleDecodedTile::ColorRange::Limited;
 }
 
 } // namespace
@@ -74,10 +118,14 @@ void AppleDecodedFrameBatcher::recordSubmission(
         group.submittedTileSet.insert(tileIndex);
         group.submittedTiles.append(tileIndex);
     }
+    if (accessUnit.subframeBoundary ==
+            AppleHevcAccessUnit::SubframeBoundary::Last) {
+        group.closed = true;
+    }
 }
 
 void AppleDecodedFrameBatcher::recordDecodedFrames(
-        QList<AppleDecodedTile> frames)
+    QList<AppleDecodedTile> frames)
 {
     for (AppleDecodedTile& frame : frames) {
         if (!frame.frameSequenceNumber.has_value()) {
@@ -195,13 +243,19 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
         close();
         return false;
     }
-    m_Context->thread_count = 0;
-    m_Context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    // FFmpeg's automatic frame threading intentionally keeps several frames
+    // in flight. That throughput-oriented policy adds hundreds of milliseconds
+    // to an interactive desktop stream even when decode itself takes only a
+    // few milliseconds. D3D11VA already executes asynchronously on the GPU,
+    // and Apple's stream is low-delay, so submit one access unit at a time.
+    m_Context->thread_count = 1;
+    m_Context->thread_type = 0;
     // VideoToolbox associates each asynchronous output callback with the
     // submitted tile sample. FFmpeg may delay or reorder output, so preserve
     // the same association explicitly instead of labeling a returned frame
     // with whichever tile packet happened to be submitted most recently.
     m_Context->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+    m_Context->flags |= AV_CODEC_FLAG_LOW_DELAY;
     m_Context->flags2 |= AV_CODEC_FLAG2_FAST;
 
 #ifdef Q_OS_WIN
@@ -211,6 +265,21 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
         if (hardwareResult < 0 || m_HardwareDevice == nullptr) {
             close();
             return false;
+        }
+        AVHWDeviceContext* deviceContext =
+                reinterpret_cast<AVHWDeviceContext*>(m_HardwareDevice->data);
+        AVD3D11VADeviceContext* d3d11Context =
+                reinterpret_cast<AVD3D11VADeviceContext*>(deviceContext->hwctx);
+        ID3D10Multithread* multithread = nullptr;
+        if (d3d11Context != nullptr && d3d11Context->device_context != nullptr &&
+                SUCCEEDED(d3d11Context->device_context->QueryInterface(
+                        __uuidof(ID3D10Multithread),
+                        reinterpret_cast<void**>(&multithread)))) {
+            // Decoding runs on the media thread while the same immediate
+            // context presents AYUV surfaces on Qt's UI thread. D3D11's
+            // multithread guard preserves command ordering without a readback.
+            multithread->SetMultithreadProtected(TRUE);
+            multithread->Release();
         }
         m_Context->hw_device_ctx = av_buffer_ref(m_HardwareDevice);
         m_Context->opaque = this;
@@ -236,17 +305,86 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
     return true;
 }
 
-int AppleHevcDecoder::selectHardwareFormat(AVCodecContext*, const int* rawFormats)
+int AppleHevcDecoder::selectHardwareFormat(AVCodecContext* context,
+                                           const int* rawFormats)
 {
     const AVPixelFormat* formats = reinterpret_cast<const AVPixelFormat*>(rawFormats);
     for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
 #ifdef Q_OS_WIN
         if (*format == AV_PIX_FMT_D3D11) {
-            return *format;
+            AppleHevcDecoder* decoder =
+                    static_cast<AppleHevcDecoder*>(context->opaque);
+            if (decoder != nullptr &&
+                    decoder->prepareHardwareFramesContext(context, *format)) {
+                return *format;
+            }
+            if (decoder != nullptr) {
+                decoder->m_HardwareFallbackOccurred = true;
+                decoder->m_Backend = Backend::Software;
+            }
         }
 #endif
     }
-    return formats[0];
+    for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+#ifdef Q_OS_WIN
+        if (*format == AV_PIX_FMT_D3D11) {
+            continue;
+        }
+#endif
+        return *format;
+    }
+    return AV_PIX_FMT_NONE;
+}
+
+bool AppleHevcDecoder::prepareHardwareFramesContext(AVCodecContext* context,
+                                                     int rawFormat)
+{
+#ifdef Q_OS_WIN
+    av_buffer_unref(&context->hw_frames_ctx);
+    const AVPixelFormat format = static_cast<AVPixelFormat>(rawFormat);
+    int result = avcodec_get_hw_frames_parameters(
+            context, context->hw_device_ctx, format, &context->hw_frames_ctx);
+    if (result < 0 || context->hw_frames_ctx == nullptr) {
+        return false;
+    }
+    AVHWFramesContext* framesContext =
+            reinterpret_cast<AVHWFramesContext*>(context->hw_frames_ctx->data);
+    AVD3D11VAFramesContext* d3d11FramesContext =
+            reinterpret_cast<AVD3D11VAFramesContext*>(framesContext->hwctx);
+    // FFmpeg's default decoder pool is decode-only. The AYUV surfaces must
+    // also be shader resources so the presentation device can sample them
+    // directly instead of transferring every tile back to system memory.
+    d3d11FramesContext->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+    if (framesContext->initial_pool_size > 0) {
+        framesContext->initial_pool_size += 3;
+    }
+    result = av_hwframe_ctx_init(context->hw_frames_ctx);
+    if (result < 0) {
+        av_buffer_unref(&context->hw_frames_ctx);
+        return false;
+    }
+    return true;
+#else
+    Q_UNUSED(context);
+    Q_UNUSED(rawFormat);
+    return false;
+#endif
+}
+
+void* AppleHevcDecoder::nativeD3D11Device() const
+{
+#ifdef Q_OS_WIN
+    if (m_Backend != Backend::D3D11va || m_HardwareDevice == nullptr) {
+        return nullptr;
+    }
+    AVHWDeviceContext* deviceContext =
+            reinterpret_cast<AVHWDeviceContext*>(m_HardwareDevice->data);
+    AVD3D11VADeviceContext* d3d11Context =
+            reinterpret_cast<AVD3D11VADeviceContext*>(deviceContext->hwctx);
+    return d3d11Context != nullptr ? d3d11Context->device : nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 QByteArray AppleHevcDecoder::annexB(
@@ -334,6 +472,7 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
     const AppleDecodedFrameMetadata metadata{
         tileIndex,
         timestamp,
+        steadyNanoseconds(),
         frameSequenceNumber.value_or(0),
         static_cast<quint16>(frameSequenceNumber.has_value()),
     };
@@ -360,6 +499,7 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
         }
         int outputTileIndex = tileIndex;
         quint32 outputTimestamp = timestamp;
+        quint64 outputDecodeSubmittedAtNanoseconds = 0;
         std::optional<quint16> outputFrameSequenceNumber = frameSequenceNumber;
         if (m_Frame->opaque_ref != nullptr &&
                 m_Frame->opaque_ref->size >= sizeof(AppleDecodedFrameMetadata)) {
@@ -369,6 +509,8 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
                         sizeof(outputMetadata));
             outputTileIndex = outputMetadata.tileIndex;
             outputTimestamp = outputMetadata.rtpTimestamp;
+            outputDecodeSubmittedAtNanoseconds =
+                    outputMetadata.decodeSubmittedAtNanoseconds;
             if (outputMetadata.hasFrameSequenceNumber != 0) {
                 outputFrameSequenceNumber = outputMetadata.frameSequenceNumber;
             }
@@ -376,6 +518,8 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
         AppleDecodedTile frame = convertFrame(
                 m_Frame, outputTileIndex, outputTimestamp, error);
         frame.frameSequenceNumber = outputFrameSequenceNumber;
+        frame.decodeSubmittedAtNanoseconds =
+                outputDecodeSubmittedAtNanoseconds;
         if (frame.isValid()) {
             result.append(std::move(frame));
         }
@@ -392,6 +536,36 @@ AppleDecodedTile AppleHevcDecoder::convertFrame(
     AVFrame* source = frame;
 #ifdef Q_OS_WIN
     if (frame->format == AV_PIX_FMT_D3D11) {
+        ID3D11Texture2D* texture =
+                reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+        D3D11_TEXTURE2D_DESC textureDescription = {};
+        if (texture != nullptr) {
+            texture->GetDesc(&textureDescription);
+        }
+        if (texture != nullptr &&
+                textureDescription.Format == DXGI_FORMAT_AYUV &&
+                (textureDescription.BindFlags &
+                 D3D11_BIND_SHADER_RESOURCE) != 0) {
+            AVFrame* retainedFrame = av_frame_clone(frame);
+            if (retainedFrame == nullptr) {
+                setError(error, QCoreApplication::translate(
+                        "AppleVideoDecoder",
+                        "The D3D11VA AYUV surface could not be retained."));
+                return {};
+            }
+            AppleDecodedTile output;
+            output.tileIndex = tileIndex;
+            output.width = frame->width;
+            output.height = frame->height;
+            output.rtpTimestamp = timestamp;
+            output.pixelFormat = AppleDecodedTile::PixelFormat::D3d11Ayuv;
+            output.colorSpace = decodedColorSpace(frame);
+            output.colorRange = decodedColorRange(frame);
+            output.hardwareFrame = std::shared_ptr<AVFrame>(
+                    retainedFrame,
+                    [](AVFrame* value) { av_frame_free(&value); });
+            return output;
+        }
         av_frame_unref(m_TransferFrame);
         const int transfer = av_hwframe_transfer_data(m_TransferFrame, frame, 0);
         if (transfer < 0) {
@@ -400,6 +574,7 @@ AppleDecodedTile AppleHevcDecoder::convertFrame(
                     .arg(ffmpegError(transfer)));
             return {};
         }
+        av_frame_copy_props(m_TransferFrame, frame);
         source = m_TransferFrame;
     }
 #endif
@@ -410,18 +585,18 @@ AppleDecodedTile AppleHevcDecoder::convertFrame(
     output.tileIndex = tileIndex;
     output.width = source->width;
     output.height = source->height;
-    output.stride = source->width;
-    output.chromaStride = source->width;
-    output.chromaOffset = output.stride * output.height;
+    output.stride = source->width * 4;
+    output.chromaStride = 0;
+    output.chromaOffset = 0;
     output.rtpTimestamp = timestamp;
-    output.pixelFormat = AppleDecodedTile::PixelFormat::Nv12;
-    output.pixels.resize(output.chromaOffset +
-                         output.chromaStride * ((output.height + 1) / 2));
+    output.pixelFormat = AppleDecodedTile::PixelFormat::Vuya;
+    output.colorSpace = decodedColorSpace(source);
+    output.colorRange = decodedColorRange(source);
+    output.pixels.resize(output.stride * output.height);
 
-    // Preserve the decoder's bi-planar layout and reduce only the component
-    // depth here. SDL's D3D11 renderer performs the expensive YUV-to-RGB step
-    // on the GPU. Converting every 4K tile to BGRA on this media thread made
-    // the synchronous readback path exceed a 60 fps frame budget.
+    // Keep one luma and one chroma sample for every source pixel. VUYA is a
+    // convenient packed 4:4:4 upload format for the D3D11 shader and avoids
+    // both the former NV12 chroma loss and a costly CPU YUV-to-RGB conversion.
     m_SwsContext = sws_getCachedContext(
             m_SwsContext,
             source->width,
@@ -429,7 +604,7 @@ AppleDecodedTile AppleHevcDecoder::convertFrame(
             static_cast<AVPixelFormat>(source->format),
             source->width,
             source->height,
-            AV_PIX_FMT_NV12,
+            AV_PIX_FMT_VUYA,
             SWS_FAST_BILINEAR,
             nullptr,
             nullptr,
@@ -441,11 +616,11 @@ AppleDecodedTile AppleHevcDecoder::convertFrame(
     }
     uint8_t* destination[] = {
         reinterpret_cast<uint8_t*>(output.pixels.data()),
-        reinterpret_cast<uint8_t*>(output.pixels.data() + output.chromaOffset),
+        nullptr,
         nullptr,
         nullptr,
     };
-    int strides[] = {output.stride, output.chromaStride, 0, 0};
+    int strides[] = {output.stride, 0, 0, 0};
     const int scaled = sws_scale(m_SwsContext,
                                  source->data,
                                  source->linesize,

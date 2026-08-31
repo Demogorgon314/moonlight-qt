@@ -641,15 +641,25 @@ void testHevcAssemblyAndLossTracking()
             unit.nalUnits == QList<QByteArray>{QByteArray::fromHex("0201aabb")},
             "HEVC fragmentation units must reassemble only after a contiguous marker-terminated frame");
 
+    require(assembler.process(packet(101, 41, 12, true,
+                                     QByteArray::fromHex("02010001aa80")), 42, &unit) &&
+            unit.subframeBoundary ==
+                    AppleHevcAccessUnit::SubframeBoundary::NotLast &&
+            assembler.process(packet(101, 42, 13, true,
+                                     QByteArray::fromHex("0201000100000382")), 43, &unit) &&
+            unit.subframeBoundary ==
+                    AppleHevcAccessUnit::SubframeBoundary::Last,
+            "the negotiated FLS EOD bit must close the final tile after removing RBSP emulation prevention bytes");
+
     require(assembler.primarySources(2) == QList<quint32>({100, 101}) &&
             assembler.completedSources().contains(100) &&
             assembler.completedSources().contains(101),
             "single-screen tile sources must be selected as one contiguous SSRC group");
 
-    assembler.process(packet(101, 50, 13, true,
+    assembler.process(packet(101, 50, 15, true,
                              QByteArray::fromHex("0201000145")), 50, &unit);
     const auto nacks = assembler.takeNacks(50);
-    require(nacks.value(101).contains(12),
+    require(nacks.value(101).contains(14),
             "sequence gaps must produce bounded NACK recovery feedback");
 }
 
@@ -769,6 +779,89 @@ void testDecodedNv12TileValidation()
             "a truncated NV12 chroma plane must be rejected before SDL upload");
 }
 
+QList<QByteArray> splitAnnexB(const QByteArray& stream)
+{
+    QList<QByteArray> nalUnits;
+    auto startCodeLength = [&stream](int offset) {
+        if (offset + 3 <= stream.size() &&
+                stream.mid(offset, 3) == QByteArray::fromHex("000001")) {
+            return 3;
+        }
+        if (offset + 4 <= stream.size() &&
+                stream.mid(offset, 4) == QByteArray::fromHex("00000001")) {
+            return 4;
+        }
+        return 0;
+    };
+    int cursor = 0;
+    while (cursor < stream.size()) {
+        int prefixLength = 0;
+        while (cursor < stream.size() &&
+                (prefixLength = startCodeLength(cursor)) == 0) {
+            ++cursor;
+        }
+        if (prefixLength == 0) {
+            break;
+        }
+        const int nalStart = cursor + prefixLength;
+        int next = nalStart;
+        while (next < stream.size() && startCodeLength(next) == 0) {
+            ++next;
+        }
+        if (next > nalStart) {
+            nalUnits.append(stream.mid(nalStart, next - nalStart));
+        }
+        cursor = next;
+    }
+    return nalUnits;
+}
+
+void testAppleHevcDecoderPreservesLowLatency444Output()
+{
+    // HEVC RExt 8-bit 4:4:4 fixture: 64x64, no B-frames, SMPTE-170M,
+    // limited range, one random-access picture.
+    const QByteArray encoded = QByteArray::fromBase64(
+            "AAAAAUABDAH//wQIAAADAJ4oAAADAAAeugJAAAAAAUIBAQQIAAADAJ4oAAADAAAekAQQILLdSSZXgLUCAgYEAAADAAQAAAMA8CAAAAABRAHBcoYMAiQAAAEoAa946wIBgtv/rYj/dW1RUec=");
+    AppleHevcParameterSets parameterSets;
+    AppleHevcAccessUnit accessUnit;
+    accessUnit.timestamp = 90'000;
+    accessUnit.frameSequenceNumber = 7;
+    for (const QByteArray& nalUnit : splitAnnexB(encoded)) {
+        require(nalUnit.size() >= 2, "the embedded HEVC fixture must contain valid NAL units");
+        const int type = (static_cast<quint8>(nalUnit.at(0)) >> 1) & 0x3f;
+        if (type == 32) {
+            parameterSets.video = nalUnit;
+        }
+        else if (type == 33) {
+            parameterSets.sequence = nalUnit;
+        }
+        else if (type == 34) {
+            parameterSets.pictures.append(nalUnit);
+        }
+        else if (type < 32) {
+            accessUnit.nalUnits.append(nalUnit);
+        }
+    }
+    require(parameterSets.isComplete() && accessUnit.containsVideoSlice(),
+            "the embedded HEVC fixture must expose complete parameters and one picture");
+
+    AppleHevcDecoder decoder(false);
+    QString error;
+    require(decoder.open(&error),
+            "the low-latency software HEVC decoder must open for the 4:4:4 fixture");
+    const QList<AppleDecodedTile> frames = decoder.decode(
+            accessUnit, parameterSets, 0, &error);
+    require(frames.size() == 1,
+            "one low-delay access unit must produce its frame without frame-thread buffering");
+    const AppleDecodedTile& frame = frames.first();
+    require(frame.pixelFormat == AppleDecodedTile::PixelFormat::Vuya &&
+            frame.colorSpace == AppleDecodedTile::ColorSpace::Bt601 &&
+            frame.colorRange == AppleDecodedTile::ColorRange::Limited &&
+            frame.stride >= frame.width * 4 &&
+            frame.pixels.size() >= frame.stride * frame.height,
+            "HEVC RExt 4:4:4 chroma and its matrix/range must survive the display boundary");
+}
+
 void testDecodedTilesPublishAsAtomicSenderFrames()
 {
     AppleDecodedFrameBatcher batcher;
@@ -803,6 +896,49 @@ void testDecodedTilesPublishAsAtomicSenderFrames()
     require(second.size() == 1 && second.first().size() == 1 &&
             second.first().first().frameSequenceNumber == 101,
             "sparse tile frames must publish without waiting for every canvas tile");
+}
+
+void testDecodedTilesPublishOnFlsEndOfDataWithoutTearing()
+{
+    AppleDecodedFrameBatcher batcher;
+    auto accessUnit = [](int tileIndex, bool isLast) {
+        AppleHevcAccessUnit unit;
+        unit.synchronizationSource = static_cast<quint32>(tileIndex + 1);
+        unit.frameSequenceNumber = 500;
+        unit.subframeBoundary = isLast
+                ? AppleHevcAccessUnit::SubframeBoundary::Last
+                : AppleHevcAccessUnit::SubframeBoundary::NotLast;
+        return unit;
+    };
+    auto tile = [](int tileIndex) {
+        AppleDecodedTile frame;
+        frame.tileIndex = tileIndex;
+        frame.frameSequenceNumber = 500;
+        return frame;
+    };
+
+    batcher.recordSubmission(accessUnit(0, false), 0);
+    batcher.recordDecodedFrames({tile(0)});
+    batcher.recordSubmission(accessUnit(1, true), 1);
+    require(batcher.takeReadyBatches().isEmpty(),
+            "FLS EOD must not expose a partially decoded sender frame");
+    batcher.recordDecodedFrames({tile(1)});
+    const QList<QList<AppleDecodedTile>> batches = batcher.takeReadyBatches();
+    require(batches.size() == 1 && batches.first().size() == 2 &&
+            batches.first().at(0).tileIndex == 0 &&
+            batches.first().at(1).tileIndex == 1,
+            "FLS EOD must publish every decoded tile atomically without waiting for the next sender frame");
+
+    AppleDecodedFrameBatcher recoveringBatcher;
+    recoveringBatcher.recordSubmission(accessUnit(0, false), 0);
+    recoveringBatcher.recordDecodedFrames({tile(0)});
+    recoveringBatcher.recordSubmission(accessUnit(1, true), 1);
+    recoveringBatcher.recordDecodeFailure(500, 1);
+    const QList<QList<AppleDecodedTile>> recovered =
+            recoveringBatcher.takeReadyBatches();
+    require(recovered.size() == 1 && recovered.first().size() == 1 &&
+            recovered.first().first().tileIndex == 0,
+            "a failed final tile must be removed immediately so it cannot head-of-line block later atomic frames");
 }
 
 quint16 findFourAvailableUdpPorts()
@@ -892,8 +1028,12 @@ int main(int argc, char* argv[])
     testScaledTileBoundariesRemainContiguous();
     std::fprintf(stderr, "testDecodedNv12TileValidation\n");
     testDecodedNv12TileValidation();
+    std::fprintf(stderr, "testAppleHevcDecoderPreservesLowLatency444Output\n");
+    testAppleHevcDecoderPreservesLowLatency444Output();
     std::fprintf(stderr, "testDecodedTilesPublishAsAtomicSenderFrames\n");
     testDecodedTilesPublishAsAtomicSenderFrames();
+    std::fprintf(stderr, "testDecodedTilesPublishOnFlsEndOfDataWithoutTearing\n");
+    testDecodedTilesPublishOnFlsEndOfDataWithoutTearing();
     std::fprintf(stderr, "testUdpPunchIgnoresClosedOptimisticPortReset\n");
     testUdpPunchIgnoresClosedOptimisticPortReset();
     std::fprintf(stderr, "Apple Screen Sharing stage 3 protocol tests passed\n");

@@ -22,6 +22,9 @@ namespace {
 constexpr int AuthenticationTagLength = 10;
 constexpr quint8 HevcAggregationType = 48;
 constexpr quint8 HevcFragmentationType = 49;
+// This is the EOD field negotiated in the High Performance FLS decoder
+// details below. Apple appends the control field to the final VCL RBSP byte.
+constexpr quint8 HevcEndOfDataBit = 1;
 
 void setError(QString* error, const QString& value)
 {
@@ -1456,6 +1459,41 @@ QList<QByteArray> AppleHevcAssembler::reassemble(const QList<PendingPacket>& pac
     return units;
 }
 
+AppleHevcAccessUnit::SubframeBoundary AppleHevcAssembler::subframeBoundary(
+        const QList<QByteArray>& units)
+{
+    auto unit = std::find_if(units.crbegin(), units.crend(),
+                             [](const QByteArray& value) {
+        return !value.isEmpty() && hevcType(value) <= 31;
+    });
+    if (unit == units.crend() || unit->size() <= 2) {
+        return AppleHevcAccessUnit::SubframeBoundary::Unknown;
+    }
+
+    QByteArray rbsp;
+    rbsp.reserve(unit->size() - 2);
+    int zeroCount = 0;
+    for (int index = 2; index < unit->size(); ++index) {
+        const quint8 byte = byteAt(*unit, index);
+        if (zeroCount >= 2 && byte == 0x03) {
+            zeroCount = 0;
+            continue;
+        }
+        rbsp.append(static_cast<char>(byte));
+        zeroCount = byte == 0 ? zeroCount + 1 : 0;
+    }
+    if (rbsp.isEmpty()) {
+        return AppleHevcAccessUnit::SubframeBoundary::Unknown;
+    }
+
+    // FLS reserves the high bit as a suffix terminator. VCP clears it before
+    // reading the negotiated control fields, so mirror that behavior here.
+    const quint8 control = byteAt(rbsp, rbsp.size() - 1) & 0x7f;
+    return (control & (1U << HevcEndOfDataBit)) != 0
+            ? AppleHevcAccessUnit::SubframeBoundary::Last
+            : AppleHevcAccessUnit::SubframeBoundary::NotLast;
+}
+
 void AppleHevcAssembler::observeSequence(const AppleRtpPacket& packet,
                                          qint64 nowMilliseconds)
 {
@@ -1568,6 +1606,7 @@ bool AppleHevcAssembler::process(const AppleRtpPacket& packet,
     accessUnit->frameSequenceNumber = group.frameSequenceNumber;
     accessUnit->totalPacketsPerFrame = group.totalPacketsPerFrame;
     accessUnit->nalUnits = units;
+    accessUnit->subframeBoundary = subframeBoundary(units);
     return true;
 }
 

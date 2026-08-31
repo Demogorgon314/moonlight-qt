@@ -218,12 +218,20 @@ struct AppleHevcParameterSets
 
 struct AppleHevcAccessUnit
 {
+    enum class SubframeBoundary
+    {
+        NotLast,
+        Last,
+        Unknown,
+    };
+
     quint32 synchronizationSource = 0;
     quint32 timestamp = 0;
     std::optional<quint16> decodingOrderNumber;
     std::optional<quint16> frameSequenceNumber;
     std::optional<quint16> totalPacketsPerFrame;
     QList<QByteArray> nalUnits;
+    SubframeBoundary subframeBoundary = SubframeBoundary::Unknown;
 
     bool containsVideoSlice() const;
     bool containsRandomAccessPicture() const;
@@ -289,6 +297,8 @@ private:
     static QList<PendingPacket> sequenceOrdered(const QList<PendingPacket>& packets);
     static QList<QByteArray> reassemble(const QList<PendingPacket>& packets);
     static std::optional<quint16> firstDecodingOrderNumber(const QByteArray& payload);
+    static AppleHevcAccessUnit::SubframeBoundary subframeBoundary(
+            const QList<QByteArray>& units);
     void harvest(const QList<QByteArray>& units);
     void observeSequence(const AppleRtpPacket& packet, qint64 nowMilliseconds);
 

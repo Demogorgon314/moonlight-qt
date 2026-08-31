@@ -17,6 +17,7 @@
 class LocalStreamRuntime;
 class QTimer;
 class AppleHighPerformanceSessionTask;
+class AppleD3D11Renderer;
 struct SDL_Renderer;
 struct SDL_Texture;
 
@@ -44,7 +45,8 @@ private:
     QList<AppleInputEncryptionRequest> takePendingInputs();
     void mediaReady(const AppleCanvas& canvas,
                     bool hardwareDecoderActive,
-                    bool hardwareFallbackOccurred);
+                    bool hardwareFallbackOccurred,
+                    void* decoderDevice);
     void updatePerformanceStatistics(const QString& summary);
     void pollSdlEvents();
     void renderLatestFrames();
@@ -62,6 +64,7 @@ private:
     std::unique_ptr<LocalStreamRuntime> m_Runtime;
     QTimer* m_EventTimer = nullptr;
     SDL_Renderer* m_Renderer = nullptr;
+    std::unique_ptr<AppleD3D11Renderer> m_D3D11Renderer;
     QHash<int, SDL_Texture*> m_Textures;
     QHash<int, QPair<int, int>> m_TextureSizes;
     QHash<int, quint32> m_TextureFormats;
@@ -70,6 +73,8 @@ private:
     QHash<int, AppleDecodedTile> m_LatestFrames;
     QHash<int, int> m_TileHeights;
     quint64 m_PendingFrameBatches = 0;
+    quint64 m_AwaitingPresentationBatches = 0;
+    QHash<int, quint64> m_AwaitingDecodeSubmissions;
     mutable QMutex m_FrameMutex;
     QList<AppleInputEncryptionRequest> m_PendingInputs;
     QMutex m_InputMutex;
@@ -83,9 +88,13 @@ private:
     quint64 m_PresentedTileUpdates = 0;
     quint64 m_DisplayedFrameBatches = 0;
     quint64 m_DroppedFrameBatches = 0;
+    quint64 m_PresentationBusyCount = 0;
     quint64 m_LastDisplayedFrameAt = 0;
     QVector<double> m_DisplayFrameIntervals;
+    QVector<double> m_SubmitToDisplayLatencies;
+    QVector<double> m_RenderCallDurations;
     QString m_PerformanceMediaSummary;
     QString m_PerformancePresentationSummary;
+    bool m_PresentationNeeded = true;
     bool m_MediaReady = false;
 };

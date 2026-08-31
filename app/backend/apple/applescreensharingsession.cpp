@@ -2,6 +2,7 @@
 
 #include "appleauthenticator.h"
 #include "applecredentialstore.h"
+#include "appled3d11renderer.h"
 #include "applemediatransport.h"
 #include "streaming/localstreamruntime.h"
 
@@ -25,6 +26,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -80,6 +82,13 @@ quint32 currentMicroseconds()
 {
     return static_cast<quint32>(
             SDL_GetPerformanceCounter() * 1000000ULL / SDL_GetPerformanceFrequency());
+}
+
+quint64 steadyNanoseconds()
+{
+    return static_cast<quint64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 quint32 keySymbolForSdl(int keycode)
@@ -257,6 +266,7 @@ private:
         bool hardwareActive = false;
         bool hardwareFallback = false;
         bool awaitingRandomAccessPicture = true;
+        bool hasEnteredDecodeRefreshState = false;
         qint64 performanceWindowStartedAt = 0;
         quint64 performancePackets = 0;
         quint64 performanceBytes = 0;
@@ -429,34 +439,51 @@ private:
                                     notifiedMediaReady = true;
                                     const QPointer<AppleScreenSharingSession> session = m_Session;
                                     const AppleCanvas canvas = negotiation.canvas;
+                                    void* decoderDevice =
+                                            decoder->nativeD3D11Device();
                                     QMetaObject::invokeMethod(
                                             session,
-                                            [session, canvas, hardwareActive, hardwareFallback]() {
+                                            [session, canvas, hardwareActive,
+                                             hardwareFallback, decoderDevice]() {
                                                 if (session != nullptr) {
                                                     session->mediaReady(canvas,
                                                                         hardwareActive,
-                                                                        hardwareFallback);
+                                                                        hardwareFallback,
+                                                                        decoderDevice);
                                                 }
                                             },
                                             Qt::QueuedConnection);
                                 }
                             }
-                            else if (!decodeError.isEmpty() &&
-                                     now - lastKeyFrameAt >= KeyFrameRetryIntervalMs) {
+                            else if (!decodeError.isEmpty()) {
                                 frameBatcher.recordDecodeFailure(
                                         ready.frameSequenceNumber, tile);
-                                if (!requestKeyFrames(media, feedback,
-                                                      negotiation.offers.videoSynchronizationSource,
-                                                      sources, &keyFrameSequence, error)) {
-                                    return false;
+                                readyBatches = frameBatcher.takeReadyBatches();
+                                for (QList<AppleDecodedTile>& batch : readyBatches) {
+                                    m_Session->queueDecodedFrames(std::move(batch));
                                 }
-                                performanceFirs +=
-                                        static_cast<quint64>(sources.size());
-                                assembler.discardIncomplete();
-                                decodingOrder.reset();
-                                frameBatcher.reset();
-                                awaitingRandomAccessPicture = true;
-                                lastKeyFrameAt = now;
+                                if (now - lastKeyFrameAt >=
+                                        KeyFrameRetryIntervalMs) {
+                                    if (!requestKeyFrames(
+                                                media, feedback,
+                                                negotiation.offers.videoSynchronizationSource,
+                                                sources, &keyFrameSequence, error)) {
+                                        return false;
+                                    }
+                                    performanceFirs += static_cast<quint64>(
+                                            sources.size());
+                                    // Native AVConference discards buffered
+                                    // access units only when first entering
+                                    // refresh recovery. It keeps submitting
+                                    // later units so a usable reference can
+                                    // recover the decoder without a freeze.
+                                    if (!hasEnteredDecodeRefreshState) {
+                                        hasEnteredDecodeRefreshState = true;
+                                        assembler.discardIncomplete();
+                                        decodingOrder.reset();
+                                    }
+                                    lastKeyFrameAt = now;
+                                }
                             }
                         }
                     }
@@ -534,10 +561,10 @@ private:
                         return false;
                     }
                     performanceFirs += static_cast<quint64>(sources.size());
-                    assembler.discardIncomplete();
                     decodingOrder.reset();
-                    frameBatcher.reset();
-                    awaitingRandomAccessPicture = true;
+                    if (awaitingFirstFrame) {
+                        assembler.discardIncomplete();
+                    }
                     lastKeyFrameAt = now;
                 }
             }
@@ -561,7 +588,7 @@ private:
                         ? QStringLiteral("D3D11VA")
                         : QStringLiteral("software");
                 const QString mediaSummary = QStringLiteral(
-                        "SOURCE %1 FPS   RX %2 Mbps   HEVC %3 tiles/s @ %4 ms   %5\n"
+                        "SOURCE %1 FPS   RX %2 Mbps   HEVC 4:4:4 %3 tiles/s @ %4 ms   %5\n"
                         "SOURCE TIME %6 ms avg   %7 p95   JITTER %8 ms   NACK %9   FIR %10")
                         .arg(sourceFramesPerSecond, 0, 'f', 1)
                         .arg(performanceBytes * 8.0 / seconds / 1000000.0,
@@ -744,7 +771,8 @@ QList<AppleInputEncryptionRequest> AppleScreenSharingSession::takePendingInputs(
 void AppleScreenSharingSession::mediaReady(
         const AppleCanvas& canvas,
         bool hardwareDecoderActive,
-        bool hardwareFallbackOccurred)
+        bool hardwareFallbackOccurred,
+        void* decoderDevice)
 {
     if (m_MediaReady || m_Cancelled.load() || !canvas.isUsable()) {
         return;
@@ -764,27 +792,22 @@ void AppleScreenSharingSession::mediaReady(
         emit displayLaunchError(tr("Couldn’t create the Apple Screen Sharing video window."));
         return;
     }
-    m_Renderer = SDL_CreateRenderer(
-            window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (m_Renderer == nullptr) {
-        m_Renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    }
-    if (m_Renderer == nullptr) {
+    QString d3d11Error;
+    m_D3D11Renderer = std::make_unique<AppleD3D11Renderer>();
+    if (!m_D3D11Renderer->initialize(window, decoderDevice, &d3d11Error)) {
+        m_D3D11Renderer.reset();
         m_Cancelled.store(true);
-        emit displayLaunchError(tr("Couldn’t create the Apple Screen Sharing renderer."));
+        emit displayLaunchError(tr(
+                "Couldn’t initialize lossless 4:4:4 presentation: %1")
+                                        .arg(d3d11Error));
         return;
     }
-    SDL_RendererInfo rendererInfo = {};
-    const bool rendererInfoAvailable =
-            SDL_GetRendererInfo(m_Renderer, &rendererInfo) == 0;
-    const bool rendererUsesVsync = rendererInfoAvailable &&
-            (rendererInfo.flags & SDL_RENDERER_PRESENTVSYNC) != 0;
     qInfo().nospace()
-            << "Apple High Performance renderer="
-            << (rendererInfoAvailable && rendererInfo.name != nullptr
-                    ? rendererInfo.name : "unknown")
-            << ", vsync=" << rendererUsesVsync;
-    SDL_SetYUVConversionMode(SDL_YUV_CONVERSION_BT709);
+            << "Apple High Performance renderer=direct3d11-owned, "
+               "vsync=true, maximum-frame-latency=1, format="
+            << (decoderDevice != nullptr
+                        ? "AYUV 4:4:4 GPU-native"
+                        : "VUYA 4:4:4 upload");
     if (hardwareFallbackOccurred) {
         addLaunchWarning(tr("D3D11VA HEVC decoding was unavailable or failed; the session continued with software decoding."));
     }
@@ -799,11 +822,10 @@ void AppleScreenSharingSession::mediaReady(
 
     m_EventTimer = new QTimer(this);
     m_EventTimer->setTimerType(Qt::PreciseTimer);
-    // SDL_RenderPresent() already blocks until the next refresh when V-sync is
-    // active. Adding another timer delay after that block lowers a nominal
-    // 60 Hz stream substantially. A zero-interval Qt timer returns control to
-    // the event loop between presents without inserting a second frame clock.
-    m_EventTimer->setInterval(rendererUsesVsync ? 0 : 8);
+    // DXGI presentation is non-blocking so the shared D3D11VA device never
+    // waits for vblank. Poll frequently enough to retry a busy swap chain while
+    // still yielding to the Qt event loop between attempts.
+    m_EventTimer->setInterval(1);
     connect(m_EventTimer, &QTimer::timeout,
             this, &AppleScreenSharingSession::pollSdlEvents);
     m_EventTimer->start();
@@ -833,7 +855,7 @@ void AppleScreenSharingSession::updatePerformanceStatistics(
 
 void AppleScreenSharingSession::updatePerformanceOverlayTexture()
 {
-    if (m_Renderer == nullptr) {
+    if (m_D3D11Renderer == nullptr) {
         return;
     }
 
@@ -851,7 +873,7 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
 
     int outputWidth = 0;
     int outputHeight = 0;
-    if (SDL_GetRendererOutputSize(m_Renderer, &outputWidth, &outputHeight) != 0 ||
+    if (!m_D3D11Renderer->outputSize(&outputWidth, &outputHeight) ||
             outputWidth <= 0 || outputHeight <= 0) {
         return;
     }
@@ -893,29 +915,14 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     }
     painter.end();
 
-    const QPair<int, int> size(image.width(), image.height());
-    if (m_PerformanceOverlayTexture == nullptr ||
-            m_PerformanceOverlaySize != size) {
-        if (m_PerformanceOverlayTexture != nullptr) {
-            SDL_DestroyTexture(m_PerformanceOverlayTexture);
-        }
-        m_PerformanceOverlayTexture = SDL_CreateTexture(
-                m_Renderer,
-                SDL_PIXELFORMAT_BGRA32,
-                SDL_TEXTUREACCESS_STREAMING,
-                image.width(),
-                image.height());
-        m_PerformanceOverlaySize = size;
-        if (m_PerformanceOverlayTexture != nullptr) {
-            SDL_SetTextureBlendMode(
-                    m_PerformanceOverlayTexture, SDL_BLENDMODE_BLEND);
-        }
+    QString overlayError;
+    if (!m_D3D11Renderer->uploadOverlay(image, &overlayError)) {
+        qWarning().nospace()
+                << "Apple High Performance overlay upload failed: "
+                << overlayError;
     }
-    if (m_PerformanceOverlayTexture != nullptr) {
-        SDL_UpdateTexture(m_PerformanceOverlayTexture,
-                          nullptr,
-                          image.constBits(),
-                          image.bytesPerLine());
+    else {
+        m_PresentationNeeded = true;
     }
 }
 
@@ -964,6 +971,18 @@ void AppleScreenSharingSession::pollSdlEvents()
                 queueKey(event.type == SDL_KEYDOWN,
                          event.key.keysym.sym,
                          event.key.keysym.scancode);
+            }
+            break;
+        case SDL_WINDOWEVENT:
+            switch (event.window.event) {
+            case SDL_WINDOWEVENT_EXPOSED:
+            case SDL_WINDOWEVENT_SHOWN:
+            case SDL_WINDOWEVENT_RESTORED:
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
+                m_PresentationNeeded = true;
+                break;
+            default:
+                break;
             }
             break;
         default:
@@ -1048,7 +1067,7 @@ std::optional<QPair<quint16, quint16>> AppleScreenSharingSession::remotePoint(
 
 void AppleScreenSharingSession::renderLatestFrames()
 {
-    if (m_Renderer == nullptr || !m_Canvas.isUsable()) {
+    if (m_D3D11Renderer == nullptr || !m_Canvas.isUsable()) {
         return;
     }
     QHash<int, AppleDecodedTile> frames;
@@ -1060,74 +1079,47 @@ void AppleScreenSharingSession::renderLatestFrames()
         pendingFrameBatches = m_PendingFrameBatches;
         m_PendingFrameBatches = 0;
     }
+    if (pendingFrameBatches > 0) {
+        m_AwaitingPresentationBatches += pendingFrameBatches;
+    }
     for (auto iterator = frames.begin(); iterator != frames.end(); ++iterator) {
         AppleDecodedTile& frame = iterator.value();
-        const QPair<int, int> size(frame.width, frame.height);
-        const quint32 textureFormat = SDL_PIXELFORMAT_NV12;
-        if (!m_Textures.contains(frame.tileIndex) ||
-                m_TextureSizes.value(frame.tileIndex) != size ||
-                m_TextureFormats.value(frame.tileIndex) != textureFormat) {
-            if (SDL_Texture* old = m_Textures.take(frame.tileIndex)) {
-                SDL_DestroyTexture(old);
-            }
-            SDL_Texture* texture = SDL_CreateTexture(
-                    m_Renderer,
-                    textureFormat,
-                    SDL_TEXTUREACCESS_STREAMING,
-                    frame.width,
-                    frame.height);
-            if (texture == nullptr) {
-                continue;
-            }
-            SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE);
-            m_Textures.insert(frame.tileIndex, texture);
-            m_TextureSizes.insert(frame.tileIndex, size);
-            m_TextureFormats.insert(frame.tileIndex, textureFormat);
-        }
-        const uint8_t* luma = reinterpret_cast<const uint8_t*>(
-                frame.pixels.constData());
-        const uint8_t* chroma = reinterpret_cast<const uint8_t*>(
-                frame.pixels.constData() + frame.chromaOffset);
-        if (SDL_UpdateNVTexture(m_Textures.value(frame.tileIndex),
-                                nullptr,
-                                luma,
-                                frame.stride,
-                                chroma,
-                                frame.chromaStride) != 0) {
-            void* lockedPixels = nullptr;
-            int texturePitch = 0;
-            if (SDL_LockTexture(m_Textures.value(frame.tileIndex),
-                                nullptr,
-                                &lockedPixels,
-                                &texturePitch) != 0) {
+        if (frame.pixelFormat == AppleDecodedTile::PixelFormat::Vuya ||
+                frame.pixelFormat ==
+                        AppleDecodedTile::PixelFormat::D3d11Ayuv) {
+            QString uploadError;
+            if (!m_D3D11Renderer ||
+                    !m_D3D11Renderer->upload(frame, &uploadError)) {
                 qWarning().nospace()
-                        << "Apple High Performance NV12 upload failed: "
-                        << SDL_GetError();
+                        << "Apple High Performance VUYA upload failed: "
+                        << uploadError;
                 continue;
             }
-            char* destination = static_cast<char*>(lockedPixels);
-            const int lumaBytes = qMin(frame.stride, texturePitch);
-            for (int row = 0; row < frame.height; ++row) {
-                std::memcpy(destination + texturePitch * row,
-                            frame.pixels.constData() + frame.stride * row,
-                            lumaBytes);
-            }
-            const int chromaBytes = qMin(frame.chromaStride, texturePitch);
-            const int chromaRows = (frame.height + 1) / 2;
-            for (int row = 0; row < chromaRows; ++row) {
-                std::memcpy(destination + texturePitch * (frame.height + row),
-                            frame.pixels.constData() + frame.chromaOffset +
-                                    frame.chromaStride * row,
-                            chromaBytes);
-            }
-            SDL_UnlockTexture(m_Textures.value(frame.tileIndex));
+            m_TextureSizes.insert(
+                    frame.tileIndex, {frame.width, frame.height});
+            m_TextureFormats.insert(
+                    frame.tileIndex, static_cast<quint32>(
+                            frame.pixelFormat));
+            m_TileHeights.insert(frame.tileIndex, frame.height);
+            m_AwaitingDecodeSubmissions.insert(
+                    frame.tileIndex, frame.decodeSubmittedAtNanoseconds);
+            m_PresentationNeeded = true;
+            continue;
         }
-        m_TileHeights.insert(frame.tileIndex, frame.height);
+        qWarning().nospace()
+                << "Apple High Performance ignored non-4:4:4 decoded tile "
+                << frame.tileIndex;
+    }
+
+    if (!m_PresentationNeeded) {
+        return;
     }
 
     int outputWidth = 0;
     int outputHeight = 0;
-    SDL_GetRendererOutputSize(m_Renderer, &outputWidth, &outputHeight);
+    if (!m_D3D11Renderer->outputSize(&outputWidth, &outputHeight)) {
+        return;
+    }
     const double scale = qMin(static_cast<double>(outputWidth) / m_Canvas.width,
                               static_cast<double>(outputHeight) / m_Canvas.height);
     const int contentWidth = qRound(m_Canvas.width * scale);
@@ -1135,9 +1127,6 @@ void AppleScreenSharingSession::renderLatestFrames()
     const int left = (outputWidth - contentWidth) / 2;
     const int top = (outputHeight - contentHeight) / 2;
 
-    SDL_SetRenderDrawColor(m_Renderer, 0, 0, 0, 255);
-    SDL_RenderClear(m_Renderer);
-    int logicalTop = 0;
     const int fallbackHeight = (m_Canvas.height + m_Canvas.tileCount - 1) /
             m_Canvas.tileCount;
     QList<int> tileHeights;
@@ -1148,50 +1137,43 @@ void AppleScreenSharingSession::renderLatestFrames()
     const QList<int> tileBoundaries =
             AppleMediaLayout::verticalTileBoundaries(
                     m_Canvas, tileHeights, contentHeight);
-    for (int tile = 0; tile < m_Canvas.tileCount; ++tile) {
-        const int tileHeight = tileHeights.at(tile);
-        const int validHeight = qMin(tileHeight, m_Canvas.height - logicalTop);
-        if (validHeight <= 0) {
-            break;
-        }
-        SDL_Texture* texture = m_Textures.value(tile, nullptr);
-        if (texture != nullptr) {
-            const int textureWidth = m_TextureSizes.value(tile).first;
-            SDL_Rect source = {0, 0, textureWidth, validHeight};
-            // Both neighboring tiles must use the exact same rounded boundary.
-            // Rounding each tile's offset and height independently can leave a
-            // one-pixel clear strip between otherwise contiguous tiles.
-            const int scaledTop = tileBoundaries.at(tile);
-            const int scaledBottom = tileBoundaries.at(tile + 1);
-            SDL_Rect destination = {
-                left,
-                top + scaledTop,
-                contentWidth,
-                qMax(1, scaledBottom - scaledTop),
-            };
-            SDL_RenderCopy(m_Renderer, texture, &source, &destination);
-        }
-        logicalTop += tileHeight;
+    QString renderError;
+    QElapsedTimer renderTimer;
+    renderTimer.start();
+    const AppleD3D11Renderer::RenderResult renderResult =
+            m_D3D11Renderer->render(
+                    m_Canvas,
+                    tileHeights,
+                    tileBoundaries,
+                    left,
+                    top,
+                    contentWidth,
+                    outputWidth,
+                    outputHeight,
+                    &renderError);
+    m_RenderCallDurations.append(renderTimer.nsecsElapsed() / 1000000.0);
+    if (renderResult == AppleD3D11Renderer::RenderResult::Busy) {
+        ++m_PresentationBusyCount;
+        m_PresentationNeeded = true;
+        return;
     }
-    if (m_PerformanceOverlayTexture != nullptr) {
-        SDL_Rect overlayDestination = {
-            16,
-            16,
-            m_PerformanceOverlaySize.first,
-            m_PerformanceOverlaySize.second,
-        };
-        SDL_RenderCopy(m_Renderer,
-                       m_PerformanceOverlayTexture,
-                       nullptr,
-                       &overlayDestination);
+    if (renderResult == AppleD3D11Renderer::RenderResult::Failed) {
+        qWarning().nospace()
+                << "Apple High Performance 4:4:4 render failed: "
+                << renderError;
+        m_PresentationNeeded = false;
+        m_AwaitingPresentationBatches = 0;
+        m_AwaitingDecodeSubmissions.clear();
+        return;
     }
-    SDL_RenderPresent(m_Renderer);
+    m_PresentationNeeded = false;
     ++m_PresentationCount;
-    m_PresentedTileUpdates += static_cast<quint64>(frames.size());
+    m_PresentedTileUpdates += static_cast<quint64>(
+            m_AwaitingDecodeSubmissions.size());
     const quint64 presentationNow = SDL_GetTicks64();
-    if (pendingFrameBatches > 0) {
+    if (m_AwaitingPresentationBatches > 0) {
         ++m_DisplayedFrameBatches;
-        m_DroppedFrameBatches += pendingFrameBatches - 1;
+        m_DroppedFrameBatches += m_AwaitingPresentationBatches - 1;
         if (m_LastDisplayedFrameAt != 0 &&
                 presentationNow >= m_LastDisplayedFrameAt) {
             m_DisplayFrameIntervals.append(
@@ -1199,7 +1181,20 @@ void AppleScreenSharingSession::renderLatestFrames()
                                         m_LastDisplayedFrameAt));
         }
         m_LastDisplayedFrameAt = presentationNow;
+        const quint64 displayedAtNanoseconds = steadyNanoseconds();
+        for (quint64 decodeSubmittedAtNanoseconds :
+             std::as_const(m_AwaitingDecodeSubmissions)) {
+            if (decodeSubmittedAtNanoseconds != 0 &&
+                    displayedAtNanoseconds >=
+                            decodeSubmittedAtNanoseconds) {
+                m_SubmitToDisplayLatencies.append(
+                        (displayedAtNanoseconds -
+                         decodeSubmittedAtNanoseconds) / 1000000.0);
+            }
+        }
     }
+    m_AwaitingPresentationBatches = 0;
+    m_AwaitingDecodeSubmissions.clear();
     if (m_PresentationWindowStartedAt == 0) {
         m_PresentationWindowStartedAt = presentationNow;
     }
@@ -1209,16 +1204,27 @@ void AppleScreenSharingSession::renderLatestFrames()
                 1, presentationNow - m_PresentationWindowStartedAt) / 1000.0;
         const IntervalStatistics displayCadence =
                 calculateIntervalStatistics(m_DisplayFrameIntervals);
+        const IntervalStatistics submitToDisplay =
+                calculateIntervalStatistics(m_SubmitToDisplayLatencies);
+        const IntervalStatistics renderCalls =
+                calculateIntervalStatistics(m_RenderCallDurations);
         m_PerformancePresentationSummary = QStringLiteral(
                 "DISPLAY %1 FPS   VSYNC %2 Hz   TILE UPDATES %3/s   COALESCED %4\n"
-                "FRAME TIME %5 ms avg   %6 p95   JITTER %7 ms")
+                "FRAME TIME %5 ms avg   %6 p95   JITTER %7 ms\n"
+                "SUBMIT TO DISPLAY %8 ms avg   %9 p95\n"
+                "PRESENT CALL %10 ms avg   %11 p95   BUSY %12")
                 .arg(m_DisplayedFrameBatches / seconds, 0, 'f', 1)
                 .arg(m_PresentationCount / seconds, 0, 'f', 1)
                 .arg(m_PresentedTileUpdates / seconds, 0, 'f', 1)
                 .arg(m_DroppedFrameBatches)
                 .arg(displayCadence.average, 0, 'f', 1)
                 .arg(displayCadence.percentile95, 0, 'f', 1)
-                .arg(displayCadence.jitter, 0, 'f', 1);
+                .arg(displayCadence.jitter, 0, 'f', 1)
+                .arg(submitToDisplay.average, 0, 'f', 1)
+                .arg(submitToDisplay.percentile95, 0, 'f', 1)
+                .arg(renderCalls.average, 0, 'f', 2)
+                .arg(renderCalls.percentile95, 0, 'f', 2)
+                .arg(m_PresentationBusyCount);
         qInfo().nospace()
                 << "Apple High Performance presentation: "
                 << QString::number(m_PresentationCount / seconds, 'f', 1)
@@ -1230,14 +1236,24 @@ void AppleScreenSharingSession::renderLatestFrames()
                 << ", frame interval avg/p95/jitter="
                 << QString::number(displayCadence.average, 'f', 1) << "/"
                 << QString::number(displayCadence.percentile95, 'f', 1) << "/"
-                << QString::number(displayCadence.jitter, 'f', 1) << " ms";
+                << QString::number(displayCadence.jitter, 'f', 1)
+                << " ms, submit-to-display avg/p95="
+                << QString::number(submitToDisplay.average, 'f', 1) << "/"
+                << QString::number(submitToDisplay.percentile95, 'f', 1)
+                << " ms, present-call avg/p95="
+                << QString::number(renderCalls.average, 'f', 2) << "/"
+                << QString::number(renderCalls.percentile95, 'f', 2)
+                << " ms, busy=" << m_PresentationBusyCount;
         updatePerformanceOverlayTexture();
         m_PresentationWindowStartedAt = presentationNow;
         m_PresentationCount = 0;
         m_PresentedTileUpdates = 0;
         m_DisplayedFrameBatches = 0;
         m_DroppedFrameBatches = 0;
+        m_PresentationBusyCount = 0;
         m_DisplayFrameIntervals.clear();
+        m_SubmitToDisplayLatencies.clear();
+        m_RenderCallDurations.clear();
     }
 }
 
@@ -1248,21 +1264,16 @@ void AppleScreenSharingSession::destroyPresentation()
         m_EventTimer->deleteLater();
         m_EventTimer = nullptr;
     }
-    for (SDL_Texture* texture : std::as_const(m_Textures)) {
-        SDL_DestroyTexture(texture);
-    }
     m_Textures.clear();
     m_TextureSizes.clear();
     m_TextureFormats.clear();
-    if (m_PerformanceOverlayTexture != nullptr) {
-        SDL_DestroyTexture(m_PerformanceOverlayTexture);
-        m_PerformanceOverlayTexture = nullptr;
-    }
+    m_AwaitingPresentationBatches = 0;
+    m_AwaitingDecodeSubmissions.clear();
+    m_PresentationNeeded = true;
+    m_D3D11Renderer.reset();
+    m_PerformanceOverlayTexture = nullptr;
     m_PerformanceOverlaySize = {};
-    if (m_Renderer != nullptr) {
-        SDL_DestroyRenderer(m_Renderer);
-        m_Renderer = nullptr;
-    }
+    m_Renderer = nullptr;
     if (m_Runtime) {
         m_Runtime->shutdown();
     }
