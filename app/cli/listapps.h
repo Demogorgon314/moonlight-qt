@@ -5,7 +5,7 @@
 #include <QObject>
 #include <QVariant>
 
-class ComputerManager;
+class ComputerCatalog;
 class NvComputer;
 
 namespace CliListApps
@@ -22,7 +22,7 @@ public:
     explicit Launcher(QString computer, ListCommandLineParser arguments, QObject *parent = nullptr);
     ~Launcher();
 
-    Q_INVOKABLE void execute(ComputerManager *manager);
+    Q_INVOKABLE void execute(ComputerCatalog *catalog);
     Q_INVOKABLE bool isExecuted() const;
 
 private slots:

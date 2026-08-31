@@ -3,7 +3,7 @@
 #include <QObject>
 #include <QVariant>
 
-class ComputerManager;
+class ComputerCatalog;
 class NvComputer;
 class Session;
 class StreamingPreferences;
@@ -23,7 +23,7 @@ public:
     explicit Launcher(QString computer, QString predefinedPin,
                       QObject *parent = nullptr);
     ~Launcher();
-    Q_INVOKABLE void execute(ComputerManager *manager);
+    Q_INVOKABLE void execute(ComputerCatalog *catalog);
     Q_INVOKABLE bool isExecuted() const;
 
 signals:

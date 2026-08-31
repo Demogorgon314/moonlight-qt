@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QSemaphore>
 #include <QPoint>
 #include <QJsonArray>
 #include <QQuickWindow>
@@ -26,6 +25,7 @@
 #include "remoteusb/remote_usb_agent_client.h"
 #endif
 #include "video/overlaytoast.h"
+#include "streamsession.h"
 #ifndef STEAM_LINK
 #include "micstream.h"
 #endif
@@ -39,6 +39,7 @@ class DualSenseHapticsRenderer;
 #ifdef Q_OS_DARWIN
 class MacQtEventPumpInputGuard;
 #endif
+class LocalStreamRuntime;
 #ifdef MOONLIGHT_ENABLE_FUNCTION_TESTS
 class StylusReplayTest;
 #endif
@@ -121,7 +122,7 @@ public:
     }
 };
 
-class Session : public QObject
+class Session : public StreamSession
 {
     Q_OBJECT
 
@@ -135,11 +136,13 @@ public:
                      StreamingPreferences *preferences = nullptr,
                      QString launchDisplayName = QString(),
                      std::optional<bool> launchUseVdd = std::nullopt);
-    virtual ~Session();
+    explicit Session(std::unique_ptr<NvComputer> computer,
+                     NvApp app,
+                     StreamingPreferences *preferences = nullptr,
+                     QString launchDisplayName = QString(),
+                     std::optional<bool> launchUseVdd = std::nullopt);
+    ~Session() override;
 
-    Q_INVOKABLE bool initialize(QQuickWindow* qtWindow);
-    Q_INVOKABLE void start();
-    Q_INVOKABLE void interrupt();
 #if defined(MOONLIGHT_REMOTE_USB_SESSION_ENABLED) || \
     defined(MOONLIGHT_REMOTE_USB_AGENT_CLIENT_ENABLED)
     Q_PROPERTY(QJsonArray remoteUsbDevices READ remoteUsbDevices
@@ -155,7 +158,6 @@ public:
     QString remoteUsbState() const;
     QString remoteUsbActiveDeviceId() const { return m_RemoteUsbActiveDeviceId; }
 #endif
-    Q_PROPERTY(QStringList launchWarnings MEMBER m_LaunchWarnings NOTIFY launchWarningsChanged);
 
     static
     void getDecoderInfo(SDL_Window* window,
@@ -174,25 +176,7 @@ public:
 
     void flushWindowEvents();
 
-    void setShouldExit(bool quitHostApp = false);
-
 signals:
-    void stageStarting(QString stage);
-
-    void stageFailed(QString stage, int errorCode, QString failingPorts);
-
-    void connectionStarted();
-
-    void displayLaunchError(QString text);
-
-    void quitStarting();
-
-    void sessionFinished(int portTestResult);
-
-    // Emitted after sessionFinished() when the session is ready to be destroyed
-    void readyForDeletion();
-
-    void launchWarningsChanged();
 #if defined(MOONLIGHT_REMOTE_USB_SESSION_ENABLED) || \
     defined(MOONLIGHT_REMOTE_USB_AGENT_CLIENT_ENABLED)
     void remoteUsbDevicesChanged();
@@ -200,6 +184,14 @@ signals:
 #endif
 
 private:
+    bool initializeSession(QQuickWindow* qtWindow) override;
+    void startSession() override;
+    void interruptSession() override;
+    void setShouldExitSession(bool quitHostApp) override;
+
+    void finish(int portTestResult) { finishSession(portTestResult); }
+    void notifyReadyForDeletion() { publishReadyForDeletion(); }
+
     void exec();
 
     bool startConnectionAsync();
@@ -380,6 +372,7 @@ private:
     STREAM_CONFIGURATION m_StreamConfig;
     DECODER_RENDERER_CALLBACKS m_VideoCallbacks;
     AUDIO_RENDERER_CALLBACKS m_AudioCallbacks;
+    std::unique_ptr<NvComputer> m_OwnedComputer;
     NvComputer* m_Computer;
     NvApp m_App;
     QString m_LaunchDisplayName;
@@ -396,7 +389,6 @@ private:
     SdlInputHandler* m_InputHandler;
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;
-    QStringList m_LaunchWarnings;
     bool m_ShouldExit;
 
     // Graceful reconnect state
@@ -472,10 +464,10 @@ private:
     QString m_RemoteUsbActiveDeviceId;
     QString m_RemoteUsbDetail;
 #endif
+    std::unique_ptr<LocalStreamRuntime> m_LocalRuntime;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;
-    static QSemaphore s_ActiveSessionSemaphore;
 #ifndef STEAM_LINK
     MicStream* m_MicStream;
 #else

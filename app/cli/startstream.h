@@ -3,9 +3,9 @@
 #include <QObject>
 #include <QVariant>
 
-class ComputerManager;
+class ComputerCatalog;
 class NvComputer;
-class Session;
+class StreamSession;
 class StreamingPreferences;
 
 namespace CliStartStream
@@ -24,14 +24,14 @@ public:
                       StreamingPreferences* preferences,
                       QObject *parent = nullptr);
     ~Launcher();
-    Q_INVOKABLE void execute(ComputerManager *manager);
+    Q_INVOKABLE void execute(ComputerCatalog *catalog);
     Q_INVOKABLE void quitRunningApp();
     Q_INVOKABLE bool isExecuted() const;
 
 signals:
     void searchingComputer();
     void searchingApp();
-    void sessionCreated(QString appName, Session *session);
+    void sessionCreated(QString appName, StreamSession *session);
     void failed(QString text);
     void appQuitRequired(QString appName);
 

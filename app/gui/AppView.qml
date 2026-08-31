@@ -25,7 +25,7 @@ CenteredGridView {
     readonly property int directLaunchRole: AppModel.DirectLaunchRole
     readonly property int appCollectorGameRole: AppModel.AppCollectorGameRole
 
-    property int computerIndex
+    property string connectionId
     property AppModel appModel : createModel()
     property bool activated
     property bool showHiddenGames
@@ -357,7 +357,7 @@ CenteredGridView {
     function createModel()
     {
         var model = Qt.createQmlObject('import AppModel 1.0; AppModel {}', parent, '')
-        model.initialize(ComputerManager, computerIndex, showHiddenGames)
+        model.initialize(ComputerManager, connectionId, showHiddenGames)
         return model
     }
 

@@ -4,45 +4,28 @@
 #include <QReadLocker>
 #include <QWriteLocker>
 
-namespace {
-QString getAddressType(const NvAddress& address,
-                       const NvAddress& localAddress,
-                       const NvAddress& remoteAddress,
-                       const NvAddress& manualAddress,
-                       const NvAddress& ipv6Address)
-{
-    if (address == localAddress) {
-        return AppModel::tr("Local network");
-    }
-    if (address == remoteAddress) {
-        return AppModel::tr("Remote network");
-    }
-    if (address == manualAddress) {
-        return AppModel::tr("Manual");
-    }
-    if (address == ipv6Address) {
-        return AppModel::tr("IPv6 network");
-    }
-
-    return AppModel::tr("Other network");
-}
-}
-
 AppModel::AppModel(QObject *parent)
-    : QAbstractListModel(parent)
+    : QAbstractListModel(parent),
+      m_Computer(nullptr),
+      m_Catalog(nullptr),
+      m_CurrentGameId(0),
+      m_ShowHiddenGames(false)
 {
     connect(&m_BoxArtManager, &BoxArtManager::boxArtLoadComplete,
             this, &AppModel::handleBoxArtLoaded);
 }
 
-void AppModel::initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames)
+void AppModel::initialize(ComputerCatalog* catalog,
+                          QString connectionId,
+                          bool showHiddenGames)
 {
-    m_ComputerManager = computerManager;
-    connect(m_ComputerManager, &ComputerManager::computerStateChanged,
-            this, &AppModel::handleComputerStateChanged);
+    m_Catalog = catalog;
+    m_ConnectionId = std::move(connectionId);
+    connect(m_Catalog, &ComputerCatalog::connectionChanged,
+            this, &AppModel::handleConnectionChanged);
 
-    Q_ASSERT(computerIndex < m_ComputerManager->getComputers().count());
-    m_Computer = m_ComputerManager->getComputers().at(computerIndex);
+    m_Computer = m_Catalog->moonlightComputer(m_ConnectionId);
+    Q_ASSERT(m_Computer != nullptr);
     m_CurrentGameId = m_Computer->currentGameId;
     m_ShowHiddenGames = showHiddenGames;
 
@@ -67,19 +50,20 @@ QString AppModel::getRunningAppName()
     return nullptr;
 }
 
-Session* AppModel::createSessionForApp(int appIndex, const QString& displayId)
+StreamSession* AppModel::createSessionForApp(int appIndex, const QString& displayId)
 {
     Q_ASSERT(appIndex < m_VisibleApps.count());
-    NvApp app = m_VisibleApps.at(appIndex);
-
-    if (displayId == QStringLiteral("vdd")) {
-        return new Session(m_Computer, app, nullptr, QString(), true);
+    const NvApp app = m_VisibleApps.at(appIndex);
+    QString error;
+    StreamSession* session = m_Catalog->createSession(m_ConnectionId,
+                                                      QString::number(app.id),
+                                                      displayId,
+                                                      nullptr,
+                                                      &error);
+    if (session == nullptr) {
+        qWarning() << "Unable to create stream session:" << error;
     }
-    if (!displayId.isEmpty()) {
-        return new Session(m_Computer, app, nullptr, displayId, false);
-    }
-
-    return new Session(m_Computer, app);
+    return session;
 }
 
 QVariantList AppModel::getDisplayList()
@@ -168,7 +152,7 @@ QHash<int, QByteArray> AppModel::roleNames() const
 
 void AppModel::quitRunningApp()
 {
-    m_ComputerManager->quitRunningApp(m_Computer);
+    m_Catalog->quitRunningActivity(m_ConnectionId);
 }
 
 bool AppModel::isAppCurrentlyVisible(const NvApp& app)
@@ -229,7 +213,7 @@ void AppModel::setAppHidden(int appIndex, bool hidden)
         }
     }
 
-    m_ComputerManager->clientSideAttributeUpdated(m_Computer);
+    m_Catalog->notifyMoonlightClientMetadataChanged(m_ConnectionId);
 }
 
 void AppModel::setAppDirectLaunch(int appIndex, bool directLaunch)
@@ -255,150 +239,49 @@ void AppModel::setAppDirectLaunch(int appIndex, bool directLaunch)
         }
     }
 
-    m_ComputerManager->clientSideAttributeUpdated(m_Computer);
+    m_Catalog->notifyMoonlightClientMetadataChanged(m_ConnectionId);
 }
 
 QVariantList AppModel::getConnectionAddresses()
 {
-    return buildConnectionAddressList(m_Computer);
-}
-
-QVariantList AppModel::buildConnectionAddressList(NvComputer* computer)
-{
-    QVariantList addresses;
-    if (!computer) {
-        return addresses;
-    }
-
-    QVector<NvAddress> allAddresses = computer->uniqueAddresses();
-
-    NvAddress localAddress;
-    NvAddress remoteAddress;
-    NvAddress manualAddress;
-    NvAddress ipv6Address;
-    NvAddress pinnedAddress;
-
-    {
-        QReadLocker lock(&computer->lock);
-        localAddress = computer->localAddress;
-        remoteAddress = computer->remoteAddress;
-        manualAddress = computer->manualAddress;
-        ipv6Address = computer->ipv6Address;
-        pinnedAddress = computer->pinnedAddress;
-    }
-
-    // Add "Auto (default)" option
-    QVariantMap autoItem;
-    autoItem["address"] = "";
-    autoItem["port"] = 0;
-    autoItem["display"] = tr("Auto (default)");
-    autoItem["type"] = tr("Automatic selection with fallback");
-    // 没固定地址就是自动模式。这一位是弹窗预选的依据 —— 光看 activeAddress
-    // 分不出「自动选中的」和「用户固定的」。
-    autoItem["isActive"] = pinnedAddress.isNull();
-    autoItem["isAuto"] = true;
-    addresses.append(autoItem);
-
-    for (const NvAddress& address : allAddresses) {
-        QVariantMap item;
-        item["address"] = address.address();
-        item["port"] = static_cast<int>(address.port());
-        item["display"] = address.toString();
-        item["type"] = getAddressType(address, localAddress, remoteAddress, manualAddress, ipv6Address);
-        // 具体条目只在「被固定」时算选中；自动模式下选中的是上面的「自动」项，
-        // 实际生效的地址交给轮询，不在这里标。
-        item["isActive"] = !pinnedAddress.isNull() && address == pinnedAddress;
-        item["isAuto"] = false;
-        item["isTested"] = computer->hasAddressTestSucceeded(address);
-        addresses.append(item);
-    }
-
-    return addresses;
+    return m_Catalog->connectionEndpoints(m_ConnectionId);
 }
 
 bool AppModel::hasMultipleConnectionAddresses()
 {
-    if (!m_Computer) {
-        return false;
-    }
-    return m_Computer->uniqueAddresses().count() > 1;
+    return m_Catalog != nullptr && m_Catalog->hasMultipleEndpoints(m_ConnectionId);
 }
 
 bool AppModel::setActiveAddress(QString address, int port)
 {
-    if (!m_Computer) {
-        return false;
-    }
-
-    if (address.isEmpty() || port <= 0) {
-        return false;
-    }
-
-    NvAddress selectedAddress(address, static_cast<uint16_t>(port));
-
-    // Verify the address is one of the known addresses
-    bool found = false;
-    for (const NvAddress& addr : m_Computer->uniqueAddresses()) {
-        if (addr == selectedAddress) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        qWarning() << "Address is not a known address:" << selectedAddress.toString();
-        return false;
-    }
-
-    m_Computer->pinAddress(selectedAddress);
-
-    return true;
+    return m_Catalog != nullptr &&
+           m_Catalog->selectEndpoint(m_ConnectionId, address, port);
 }
 
 bool AppModel::resetToAutomaticAddress()
 {
-    if (!m_Computer) {
-        return false;
-    }
-
-    return m_Computer->resetToAutomaticAddress();
+    return m_Catalog != nullptr &&
+           m_Catalog->selectAutomaticEndpoint(m_ConnectionId);
 }
 
 QVariantMap AppModel::getActiveAddressInfo()
 {
-    QVariantMap info;
-    if (!m_Computer) {
-        return info;
-    }
-
-    NvAddress activeAddress;
-    NvAddress localAddress;
-    NvAddress remoteAddress;
-    NvAddress manualAddress;
-    NvAddress ipv6Address;
-
-    {
-        QReadLocker lock(&m_Computer->lock);
-        activeAddress = m_Computer->activeAddress;
-        localAddress = m_Computer->localAddress;
-        remoteAddress = m_Computer->remoteAddress;
-        manualAddress = m_Computer->manualAddress;
-        ipv6Address = m_Computer->ipv6Address;
-    }
-
-    info["address"] = activeAddress.address();
-    info["port"] = static_cast<int>(activeAddress.port());
-    info["display"] = activeAddress.toString();
-    info["type"] = getAddressType(activeAddress, localAddress, remoteAddress, manualAddress, ipv6Address);
-
-    return info;
+    return m_Catalog != nullptr ? m_Catalog->activeEndpoint(m_ConnectionId)
+                                : QVariantMap();
 }
 
-void AppModel::handleComputerStateChanged(NvComputer* computer)
+void AppModel::handleConnectionChanged(QString connectionId)
 {
-    // Ignore updates for computers that aren't ours
-    if (computer != m_Computer) {
+    if (connectionId != m_ConnectionId) {
         return;
     }
+
+    NvComputer* computer = m_Catalog->moonlightComputer(m_ConnectionId);
+    if (computer == nullptr) {
+        emit computerLost();
+        return;
+    }
+    m_Computer = computer;
 
     // If the computer has gone offline or we've been unpaired,
     // signal the UI so we can go back to the PC view.

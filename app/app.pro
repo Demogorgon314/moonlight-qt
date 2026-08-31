@@ -2,6 +2,20 @@ QT += core quick network quickcontrols2 svg gui-private
 !config_SL: QT += multimedia
 CONFIG += c++17
 
+# Apple Screen Sharing is isolated behind both a Windows x64 compile option and
+# a runtime gate. Stage 1 intentionally compiles only the gate: no Apple adapter
+# is registered or exposed to users yet.
+MOONLIGHT_APPLE_SCREEN_SHARING_BUILD = $$(MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING)
+win32:contains(QT_ARCH, x86_64):equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 1) {
+    CONFIG += apple-screen-sharing
+}
+
+apple-screen-sharing {
+    DEFINES += MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
+    SOURCES += backend/apple/applefeaturegate.cpp
+    HEADERS += backend/apple/applefeaturegate.h
+}
+
 unix:!macx {
     TARGET = moonlight
 } else {
@@ -268,6 +282,10 @@ SOURCES += \
     backend/nvhttp.cpp \
     backend/nvpairingmanager.cpp \
     backend/computermanager.cpp \
+    backend/computercatalog.cpp \
+    backend/protocol/protocoltypes.cpp \
+    backend/protocol/resolvedlaunchplan.cpp \
+    backend/protocol/moonlightprotocoladapter.cpp \
     backend/boxartmanager.cpp \
     backend/richpresencemanager.cpp \
     cli/commandlineparser.cpp \
@@ -287,6 +305,8 @@ SOURCES += \
     streaming/input/touchpad.cpp \
     streaming/input/reltouch.cpp \
     streaming/session.cpp \
+    streaming/streamsession.cpp \
+    streaming/localstreamruntime.cpp \
     streaming/filemappingclient.cpp \
     streaming/filemappingwebsocket.cpp \
     streaming/filemappingprotocoladapter.cpp \
@@ -335,6 +355,11 @@ HEADERS += \
     backend/nvhttp.h \
     backend/nvpairingmanager.h \
     backend/computermanager.h \
+    backend/computercatalog.h \
+    backend/protocol/protocoltypes.h \
+    backend/protocol/resolvedlaunchplan.h \
+    backend/protocol/protocoladapter.h \
+    backend/protocol/moonlightprotocoladapter.h \
     backend/boxartmanager.h \
     backend/richpresencemanager.h \
     cli/commandlineparser.h \
@@ -346,6 +371,8 @@ HEADERS += \
     streaming/input/penhistory.h \
     streaming/input/input.h \
     streaming/session.h \
+    streaming/streamsession.h \
+    streaming/localstreamruntime.h \
     streaming/filemappingclient.h \
     streaming/filemappingwebsocket.h \
     streaming/filemappingprotocoladapter.h \

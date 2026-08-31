@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../localstreamruntime.h"
+
 #include "settings/streamingpreferences.h"
 #include "backend/computermanager.h"
 #include "cursorshapeclassifier.h"
@@ -130,13 +132,13 @@ struct RemoteCursorUpdate {
     QByteArray bgra;
 };
 
-class SdlInputHandler
+class SdlInputHandler : public LocalInputContext
 {
 public:
     explicit SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight,
                              bool enablePhysicalDualSenseHaptics);
 
-    ~SdlInputHandler();
+    ~SdlInputHandler() override;
 
     void setWindow(SDL_Window* window);
 

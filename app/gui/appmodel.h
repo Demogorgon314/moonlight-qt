@@ -1,8 +1,8 @@
 #pragma once
 
 #include "backend/boxartmanager.h"
-#include "backend/computermanager.h"
-#include "streaming/session.h"
+#include "backend/computercatalog.h"
+#include "streaming/streamsession.h"
 
 #include <QAbstractListModel>
 
@@ -26,9 +26,12 @@ public:
     explicit AppModel(QObject *parent = nullptr);
 
     // Must be called before any QAbstractListModel functions
-    Q_INVOKABLE void initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames);
+    Q_INVOKABLE void initialize(ComputerCatalog* catalog,
+                                QString connectionId,
+                                bool showHiddenGames);
 
-    Q_INVOKABLE Session* createSessionForApp(int appIndex, const QString& displayId = QString());
+    Q_INVOKABLE StreamSession* createSessionForApp(int appIndex,
+                                                   const QString& displayId = QString());
 
     Q_INVOKABLE QVariantList getDisplayList();
 
@@ -45,14 +48,6 @@ public:
     Q_INVOKABLE void setAppDirectLaunch(int appIndex, bool directLaunch);
 
     Q_INVOKABLE QVariantList getConnectionAddresses();
-
-    // 地址选择框的条目列表。PcView 和 AppView 用同一个 QML 组件
-    // （SelectAddressDialog），所以条目形状和「哪一项算选中」的判定必须一致 ——
-    // 放在一处，ComputerModel 也调这里。
-    //
-    // 翻译上下文特意留在 AppModel：这几个字符串在 AppModel 下已经有译文了，
-    // 换个上下文会让它们退回英文。
-    static QVariantList buildConnectionAddressList(NvComputer* computer);
 
     Q_INVOKABLE bool hasMultipleConnectionAddresses();
 
@@ -78,7 +73,7 @@ public:
     virtual QHash<int, QByteArray> roleNames() const override;
 
 private slots:
-    void handleComputerStateChanged(NvComputer* computer);
+    void handleConnectionChanged(QString connectionId);
 
     void handleBoxArtLoaded(NvComputer* computer, NvApp app, QUrl image);
 
@@ -94,7 +89,8 @@ private:
 
     NvComputer* m_Computer;
     BoxArtManager m_BoxArtManager;
-    ComputerManager* m_ComputerManager;
+    ComputerCatalog* m_Catalog;
+    QString m_ConnectionId;
     QVector<NvApp> m_VisibleApps, m_AllApps;
     int m_CurrentGameId;
     bool m_ShowHiddenGames;

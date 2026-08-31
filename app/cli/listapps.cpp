@@ -1,6 +1,7 @@
 #include "listapps.h"
 
 #include "backend/boxartmanager.h"
+#include "backend/computercatalog.h"
 #include "backend/computermanager.h"
 #include "backend/computerseeker.h"
 
@@ -164,11 +165,11 @@ Launcher::~Launcher()
 {
 }
 
-void Launcher::execute(ComputerManager *manager)
+void Launcher::execute(ComputerCatalog *catalog)
 {
     Q_D(Launcher);
     Event event(Event::Executed);
-    event.computerManager = manager;
+    event.computerManager = catalog->moonlightManager();
     d->handleEvent(event);
 }
 

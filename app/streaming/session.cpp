@@ -2,6 +2,7 @@
 #include "clipboardhelperclient.h"
 #include "filemappingclient.h"
 #include "filemappingux.h"
+#include "localstreamruntime.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "streaming/audio/dualsensehaptics.h"
@@ -383,7 +384,6 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
 };
 
 Session* Session::s_ActiveSession;
-QSemaphore Session::s_ActiveSessionSemaphore(1);
 
 class AbrFeedbackTask : public QRunnable
 {
@@ -1338,6 +1338,7 @@ Session::Session(NvComputer* computer,
       m_FileMappingMountPath(),
       m_FileMappingSessionId(QUuid::createUuid().toString(QUuid::WithoutBraces)),
       m_MenuCloseTicks(0),
+      m_LocalRuntime(std::make_unique<LocalStreamRuntime>()),
       m_MicStream(nullptr)
 {
     memset(&m_LastAbrVideoStats, 0, sizeof(m_LastAbrVideoStats));
@@ -1378,6 +1379,21 @@ Session::Session(NvComputer* computer,
     }
 #endif
 #endif
+}
+
+Session::Session(std::unique_ptr<NvComputer> computer,
+                 NvApp app,
+                 StreamingPreferences* preferences,
+                 QString launchDisplayName,
+                 std::optional<bool> launchUseVdd)
+    : Session(computer.get(),
+              app,
+              preferences,
+              std::move(launchDisplayName),
+              launchUseVdd)
+{
+    m_OwnedComputer = std::move(computer);
+    m_Computer = m_OwnedComputer.get();
 }
 
 Session::~Session()
@@ -1724,77 +1740,18 @@ void Session::ensureRemoteUsbAgent()
 }
 #endif
 
-bool Session::initialize(QQuickWindow* qtWindow)
+bool Session::initializeSession(QQuickWindow* qtWindow)
 {
     m_QtWindow = qtWindow;
-#ifdef Q_OS_WIN32
-    // Capture this on the Qt thread. The launch request is assembled later on
-    // a worker thread, where reading QWindow/QScreen state would be unsafe.
-    if (m_QtWindow != nullptr && m_QtWindow->screen() != nullptr) {
-        m_ClientDisplayName = m_QtWindow->screen()->name();
-    }
-#endif
-
-    // SDL reads this hint when the video subsystem initializes. Configure it for
-    // each session so preference changes take effect on the next stream without
-    // restarting Moonlight. This hint makes sens only on macOS currently.
-    bool nativeTouchpadEnabled = m_Preferences->enableNativeTouchpad;
-    SDL_SetHint(SDL_HINT_TRACKPAD_IS_TOUCH_ONLY, nativeTouchpadEnabled ? "1" : "0");
-
-#ifdef Q_OS_DARWIN
-    if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
-        // If we have a notch and the user specified one of the two native display modes
-        // (notched or notchless), override the fullscreen mode to ensure it works as expected.
-        // - SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES=0 will place the video underneath the notch
-        // - SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES=1 will place the video below the notch
-        bool shouldUseFullScreenSpaces = m_Preferences->windowMode != StreamingPreferences::WM_FULLSCREEN;
-        SDL_DisplayMode desktopMode;
-        SDL_Rect safeArea;
-        for (int displayIndex = 0; StreamUtils::getNativeDesktopMode(displayIndex, &desktopMode, &safeArea); displayIndex++) {
-            // Check if this display has a notch (safeArea != desktopMode)
-            if (desktopMode.h != safeArea.h || desktopMode.w != safeArea.w) {
-                // Check if we're trying to stream at the full native resolution (including notch)
-                if (m_Preferences->width == desktopMode.w && m_Preferences->height == desktopMode.h) {
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "Overriding default fullscreen mode for native fullscreen resolution");
-                    shouldUseFullScreenSpaces = false;
-                    break;
-                }
-                else if (m_Preferences->width == safeArea.w && m_Preferences->height == safeArea.h) {
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "Overriding default fullscreen mode for native safe area resolution");
-                    shouldUseFullScreenSpaces = true;
-                    break;
-                }
-            }
-        }
-
-        // Using modesetting on modern versions of macOS is extremely unreliable
-        // and leads to hangs, deadlocks, and other nasty stuff. The only time
-        // people seem to use it is to get the full screen on notched Macs,
-        // which setting SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES=1 also accomplishes
-        // with much less headache.
-        //
-        // https://github.com/moonlight-stream/moonlight-qt/issues/973
-        // https://github.com/moonlight-stream/moonlight-qt/issues/999
-        // https://github.com/moonlight-stream/moonlight-qt/issues/1211
-        // https://github.com/moonlight-stream/moonlight-qt/issues/1218
-        SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, shouldUseFullScreenSpaces ? "1" : "0");
-    }
-#endif
-
-    if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "SDL_InitSubSystem(SDL_INIT_VIDEO) failed: %s",
-                     SDL_GetError());
+    LocalStreamRuntimeConfig runtimeConfig;
+    runtimeConfig.streamWidth = m_Preferences->width;
+    runtimeConfig.streamHeight = m_Preferences->height;
+    runtimeConfig.windowMode = m_Preferences->windowMode;
+    runtimeConfig.nativeTouchpadEnabled = m_Preferences->enableNativeTouchpad;
+    if (!m_LocalRuntime->initialize(qtWindow, runtimeConfig)) {
         return false;
     }
-
-    // Stop text input. SDL enables it by default
-    // when we initialize the video subsystem, but this
-    // causes an IME popup when certain keys are held down
-    // on macOS.
-    SDL_StopTextInput();
+    m_ClientDisplayName = m_LocalRuntime->clientDisplayName();
 
     LiInitializeStreamConfiguration(&m_StreamConfig);
     m_StreamConfig.width = m_Preferences->width;
@@ -1818,7 +1775,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Failed to create window for hardware decode test: %s",
                      SDL_GetError());
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        m_LocalRuntime->shutdown();
         return false;
     }
 
@@ -2111,7 +2068,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
     SDL_DestroyWindow(testWindow);
 
     if (!ret) {
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        m_LocalRuntime->shutdown();
         return false;
     }
 
@@ -2125,8 +2082,7 @@ void Session::emitLaunchWarning(QString text)
 {
     if (m_Preferences->configurationWarnings) {
         // Queue this launch warning to be displayed after validation
-        m_LaunchWarnings.append(text);
-        emit launchWarningsChanged();
+        addLaunchWarning(text);
     }
 }
 
@@ -2421,12 +2377,10 @@ public:
 private:
     virtual ~DeferredSessionCleanupTask() override
     {
-        // Allow another session to start now that we're cleaned up
+        // Limelight callbacks must stop observing this session before the shared
+        // process lease is released to another protocol session.
         Session::s_ActiveSession = nullptr;
-        Session::s_ActiveSessionSemaphore.release();
-
-        // Notify that the session is ready to be cleaned up
-        emit m_Session->readyForDeletion();
+        m_Session->notifyReadyForDeletion();
     }
 
     void run() override
@@ -2441,7 +2395,7 @@ private:
             emit m_Session->quitStarting();
         }
         else {
-            emit m_Session->sessionFinished(m_Session->m_PortTestResults);
+            m_Session->finish(m_Session->m_PortTestResults);
         }
 
         // The video decoder must already be destroyed, since it could
@@ -2471,7 +2425,7 @@ private:
             }
 
             // Session is finished now
-            emit m_Session->sessionFinished(m_Session->m_PortTestResults);
+            m_Session->finish(m_Session->m_PortTestResults);
         }
 
         // Exit the entire program if requested
@@ -4295,6 +4249,7 @@ bool Session::startConnectionAsync()
         }
     }
 
+    setRunning();
     emit connectionStarted();
     startSunshineAbr();
     startFileMappingUxProbe();
@@ -4324,7 +4279,7 @@ void Session::flushWindowEvents()
     SDL_PushEvent(&flushEvent);
 }
 
-void Session::setShouldExit(bool quitHostApp)
+void Session::setShouldExitSession(bool quitHostApp)
 {
     // If the caller has explicitly asked us to quit the host app,
     // override whatever the preferences say and do it. If the
@@ -4337,12 +4292,9 @@ void Session::setShouldExit(bool quitHostApp)
     m_ShouldExit = true;
 }
 
-void Session::start()
+void Session::startSession()
 {
-    // Wait for any old session to finish cleanup
-    s_ActiveSessionSemaphore.acquire();
-
-    // We're now active
+    // ActiveStreamLease has already serialized us with any previous protocol session.
     s_ActiveSession = this;
 
 #ifndef STEAM_LINK
@@ -4383,8 +4335,13 @@ void Session::start()
 
     // Initialize the gamepad code with the effective (post-preflight) capability.
     // NB: m_InputHandler must be initialized before starting the connection.
-    m_InputHandler = new SdlInputHandler(*m_Preferences, m_StreamConfig.width,
-                                         m_StreamConfig.height, enablePhysicalDualSenseHaptics);
+    auto inputHandler = std::make_unique<SdlInputHandler>(
+            *m_Preferences,
+            m_StreamConfig.width,
+            m_StreamConfig.height,
+            enablePhysicalDualSenseHaptics);
+    m_InputHandler = inputHandler.get();
+    m_LocalRuntime->setInputContext(std::move(inputHandler));
     updateDualSenseHapticsControllerTarget();
 
     // Kick off the async connection thread then return to the caller to pump the event loop
@@ -4394,16 +4351,13 @@ void Session::start()
     thread->start();
 }
 
-void Session::interrupt()
+void Session::interruptSession()
 {
     // Stop any connection in progress
     LiInterruptConnection();
 
-    // Inject a quit event to our SDL event loop
-    SDL_Event event;
-    event.type = SDL_QUIT;
-    event.quit.timestamp = SDL_GetTicks();
-    SDL_PushEvent(&event);
+    // Stop the protocol-neutral local runtime event loop.
+    m_LocalRuntime->requestStop();
 }
 
 #ifdef Q_OS_WIN32
@@ -4621,9 +4575,9 @@ void Session::exec()
             m_DualSenseHapticsRenderer->setControllerTarget(-1);
         }
         stopControllerRumbleAtConnectionBoundary(m_InputHandler);
-        delete m_InputHandler;
+        m_LocalRuntime->clearInputContext();
         m_InputHandler = nullptr;
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        m_LocalRuntime->shutdown();
         QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
         return;
     }
@@ -4721,48 +4675,32 @@ void Session::exec()
     // We use only the computer name on macOS to match Apple conventions where the
     // app name is featured in the menu bar and the document name is in the title bar.
 #ifdef Q_OS_DARWIN
-    std::string windowName = QString(m_Computer->name).toStdString();
+    QString windowName = m_Computer->name;
 #else
-    std::string windowName = QString(m_Computer->name + " - Moonlight").toStdString();
+    QString windowName = m_Computer->name + QStringLiteral(" - Moonlight");
 #endif
 
-    m_Window = SDL_CreateWindow(windowName.c_str(),
-                                x,
-                                y,
-                                width,
-                                height,
-                                defaultWindowFlags | StreamUtils::getPlatformWindowFlags());
+    m_Window = m_LocalRuntime->createStreamWindow(windowName,
+                                                  x,
+                                                  y,
+                                                  width,
+                                                  height,
+                                                  defaultWindowFlags);
     if (!m_Window) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SDL_CreateWindow() failed with platform flags: %s",
-                    SDL_GetError());
-
-        m_Window = SDL_CreateWindow(windowName.c_str(),
-                                    x,
-                                    y,
-                                    width,
-                                    height,
-                                    defaultWindowFlags);
-        if (!m_Window) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "SDL_CreateWindow() failed: %s",
-                         SDL_GetError());
-
-            if (m_ClipboardHelper != nullptr) {
-                m_ClipboardHelper->stop();
-                delete m_ClipboardHelper;
-                m_ClipboardHelper = nullptr;
-            }
-            if (m_DualSenseHapticsRenderer != nullptr) {
-                m_DualSenseHapticsRenderer->setControllerTarget(-1);
-            }
-            stopControllerRumbleAtConnectionBoundary(m_InputHandler);
-            delete m_InputHandler;
-            m_InputHandler = nullptr;
-            SDL_QuitSubSystem(SDL_INIT_VIDEO);
-            QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
-            return;
+        if (m_ClipboardHelper != nullptr) {
+            m_ClipboardHelper->stop();
+            delete m_ClipboardHelper;
+            m_ClipboardHelper = nullptr;
         }
+        if (m_DualSenseHapticsRenderer != nullptr) {
+            m_DualSenseHapticsRenderer->setControllerTarget(-1);
+        }
+        stopControllerRumbleAtConnectionBoundary(m_InputHandler);
+        m_LocalRuntime->clearInputContext();
+        m_InputHandler = nullptr;
+        m_LocalRuntime->shutdown();
+        QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
+        return;
     }
 
     m_InputHandler->setWindow(m_Window);
@@ -5696,7 +5634,7 @@ DispatchDeferredCleanup:
         m_DualSenseHapticsRenderer->setControllerTarget(-1);
     }
     stopControllerRumbleAtConnectionBoundary(m_InputHandler);
-    delete m_InputHandler;
+    m_LocalRuntime->clearInputContext();
     m_InputHandler = nullptr;
 
     // Destroy the decoder, since this must be done on the main thread
@@ -5735,13 +5673,14 @@ DispatchDeferredCleanup:
 
     // This must be called after the decoder is deleted, because
     // the renderer may want to interact with the window
-    SDL_DestroyWindow(m_Window);
+    m_LocalRuntime->destroyStreamWindow();
+    m_Window = nullptr;
 
     if (iconSurface != nullptr) {
         SDL_FreeSurface(iconSurface);
     }
 
-    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    m_LocalRuntime->shutdown();
 
 #ifdef MOONLIGHT_REMOTE_USB_SESSION_ENABLED
     if (m_RemoteUsbCoordinator != nullptr) {
@@ -5755,8 +5694,7 @@ DispatchDeferredCleanup:
 #endif
 
     // Cleanup can take a while, so dispatch it to a worker thread.
-    // When it is complete, it will release our s_ActiveSessionSemaphore
-    // reference.
+    // When it is complete, it will release the process-wide ActiveStreamLease.
     QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
 
     // 停止带宽计算

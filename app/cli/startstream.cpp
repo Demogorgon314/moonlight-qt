@@ -1,4 +1,5 @@
 #include "startstream.h"
+#include "backend/computercatalog.h"
 #include "backend/computermanager.h"
 #include "backend/computerseeker.h"
 #include "streaming/session.h"
@@ -33,9 +34,10 @@ public:
     };
 
     Event(Type type)
-        : type(type), computerManager(nullptr), computer(nullptr) {}
+        : type(type), catalog(nullptr), computerManager(nullptr), computer(nullptr) {}
 
     Type type;
+    ComputerCatalog *catalog;
     ComputerManager *computerManager;
     NvComputer *computer;
     QString errorMessage;
@@ -51,7 +53,7 @@ public:
     void handleEvent(Event event)
     {
         Q_Q(Launcher);
-        Session* session;
+        StreamSession* session;
         NvApp app;
 
         switch (event.type) {
@@ -59,6 +61,7 @@ public:
         case Event::Executed:
             if (m_State == StateInit) {
                 m_State = StateSeekComputer;
+                m_Catalog = event.catalog;
                 m_ComputerManager = event.computerManager;
 
                 m_ComputerSeeker = new ComputerSeeker(m_ComputerManager, m_ComputerName, q);
@@ -102,8 +105,20 @@ public:
                     m_TimeoutTimer->stop();
                     if (isNotStreaming() || isStreamingApp(app)) {
                         m_State = StateStartSession;
-                        session = new Session(m_Computer, app, m_Preferences);
-                        emit q->sessionCreated(app.name, session);
+                        QString error;
+                        session = m_Catalog->createSession(
+                                m_Catalog->moonlightConnectionId(m_Computer),
+                                QString::number(app.id),
+                                QString(),
+                                m_Preferences,
+                                &error);
+                        if (session != nullptr) {
+                            emit q->sessionCreated(app.name, session);
+                        }
+                        else {
+                            m_State = StateFailure;
+                            emit q->failed(error);
+                        }
                     } else {
                         emit q->appQuitRequired(getCurrentAppName());
                     }
@@ -174,6 +189,7 @@ public:
     QString m_ComputerName;
     QString m_AppName;
     StreamingPreferences *m_Preferences;
+    ComputerCatalog *m_Catalog;
     ComputerManager *m_ComputerManager;
     ComputerSeeker *m_ComputerSeeker;
     NvComputer *m_Computer;
@@ -201,11 +217,12 @@ Launcher::~Launcher()
 {
 }
 
-void Launcher::execute(ComputerManager *manager)
+void Launcher::execute(ComputerCatalog *catalog)
 {
     Q_D(Launcher);
     Event event(Event::Executed);
-    event.computerManager = manager;
+    event.catalog = catalog;
+    event.computerManager = catalog->moonlightManager();
     d->handleEvent(event);
 }
 

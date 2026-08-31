@@ -1,4 +1,5 @@
 #include "../session.h"
+#include "../localstreamruntime.h"
 #include "renderers/renderer.h"
 
 #ifdef HAVE_SLAUDIO
@@ -59,12 +60,14 @@ bool Session::initializeAudioRenderer()
     SDL_assert(m_AudioRenderer == nullptr);
     SDL_assert(m_OpusDecoder == nullptr);
 
-    m_AudioRenderer = createAudioRenderer(&m_OriginalAudioConfig);
+    std::unique_ptr<IAudioRenderer> audioRenderer(
+            createAudioRenderer(&m_OriginalAudioConfig));
 
     // We may be unable to create an audio renderer right now
-    if (m_AudioRenderer == nullptr) {
+    if (audioRenderer == nullptr) {
         return false;
     }
+    m_AudioRenderer = m_LocalRuntime->setPcmOutput(std::move(audioRenderer));
 
     // Allow the chosen renderer to remap Opus channels as needed to ensure proper output
     m_ActiveAudioConfig = m_OriginalAudioConfig;
@@ -79,7 +82,7 @@ bool Session::initializeAudioRenderer()
                                         m_ActiveAudioConfig.mapping,
                                         &error);
     if (m_OpusDecoder == nullptr) {
-        delete m_AudioRenderer;
+        m_LocalRuntime->clearPcmOutput();
         m_AudioRenderer = nullptr;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Failed to create decoder: %d",
@@ -119,12 +122,10 @@ bool Session::testAudio(int audioConfiguration)
     opusConfig.samplesPerFrame = 240;
     opusConfig.channelCount = CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(audioConfiguration);
 
-    IAudioRenderer* audioRenderer = createAudioRenderer(&opusConfig);
+    std::unique_ptr<IAudioRenderer> audioRenderer(createAudioRenderer(&opusConfig));
     if (audioRenderer == nullptr) {
         return false;
     }
-
-    delete audioRenderer;
 
     return true;
 }
@@ -140,7 +141,7 @@ int Session::arInit(int /* audioConfiguration */,
 
 void Session::arCleanup()
 {
-    delete s_ActiveSession->m_AudioRenderer;
+    s_ActiveSession->m_LocalRuntime->clearPcmOutput();
     s_ActiveSession->m_AudioRenderer = nullptr;
 
     opus_multistream_decoder_destroy(s_ActiveSession->m_OpusDecoder);
@@ -229,7 +230,7 @@ void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength)
             opus_multistream_decoder_destroy(s_ActiveSession->m_OpusDecoder);
             s_ActiveSession->m_OpusDecoder = nullptr;
 
-            delete s_ActiveSession->m_AudioRenderer;
+            s_ActiveSession->m_LocalRuntime->clearPcmOutput();
             s_ActiveSession->m_AudioRenderer = nullptr;
         }
     }

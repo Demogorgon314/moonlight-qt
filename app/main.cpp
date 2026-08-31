@@ -85,7 +85,7 @@ static QString getStartupApplicationDir(const char* argv0)
 #include "gui/computermodel.h"
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
-#include "backend/computermanager.h"
+#include "backend/computercatalog.h"
 #include "backend/systemproperties.h"
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
@@ -653,19 +653,19 @@ int SDLCALL signalHandlerThread(void* data)
 {
     Q_UNUSED(data);
 
-    Session* lastSession = nullptr;
+    StreamSession* lastSession = nullptr;
     bool requestedQuit = false;
 
     int sig;
     while (recv(signalFds[1], &sig, sizeof(sig), MSG_WAITALL) == sizeof(sig)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Received signal: %d", sig);
 
-        Session* session;
+        StreamSession* session;
         switch (sig) {
         case SIGINT:
         case SIGTERM:
             // Check if we have an active streaming session
-            session = Session::get();
+            session = StreamSession::active();
             if (session != nullptr) {
                 // Exit immediately if we haven't changed state since last attempt
                 if (session == lastSession || requestedQuit) {
@@ -1277,11 +1277,11 @@ int main(int argc, char *argv[])
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
     qmlRegisterType<AppModel>("AppModel", 1, 0, "AppModel");
-    qmlRegisterUncreatableType<Session>("Session", 1, 0, "Session", "Session cannot be created from QML");
-    qmlRegisterSingletonType<ComputerManager>("ComputerManager", 1, 0,
+    qmlRegisterUncreatableType<StreamSession>("Session", 1, 0, "Session", "Session cannot be created from QML");
+    qmlRegisterSingletonType<ComputerCatalog>("ComputerManager", 1, 0,
                                               "ComputerManager",
                                               [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
-                                                  return new ComputerManager(StreamingPreferences::get(qmlEngine));
+                                                  return new ComputerCatalog(StreamingPreferences::get(qmlEngine));
                                               });
     qmlRegisterSingletonType<AutoUpdateChecker>("AutoUpdateChecker", 1, 0,
                                                 "AutoUpdateChecker",
@@ -1508,7 +1508,7 @@ int main(int argc, char *argv[])
             ListCommandLineParser listParser;
             listParser.parse(app.arguments());
             auto launcher = new CliListApps::Launcher(listParser.getHost(), listParser, &app);
-            launcher->execute(new ComputerManager(StreamingPreferences::get()));
+            launcher->execute(new ComputerCatalog(StreamingPreferences::get()));
             hasGUI = false;
             break;
         }

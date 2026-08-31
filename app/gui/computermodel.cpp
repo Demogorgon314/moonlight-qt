@@ -1,329 +1,236 @@
 #include "computermodel.h"
-#include "appmodel.h"
-#include "backend/nvcomputer.h"
+
+#include <Limelight.h>
 
 #include <QDebug>
-#include <QReadLocker>
 #include <QThreadPool>
-#include <QWriteLocker>
-
 
 ComputerModel::ComputerModel(QObject* object)
-    : QAbstractListModel(object) {}
-
-void ComputerModel::initialize(ComputerManager* computerManager)
+    : QAbstractListModel(object)
 {
-    m_ComputerManager = computerManager;
-    connect(m_ComputerManager, &ComputerManager::computerStateChanged,
-            this, &ComputerModel::handleComputerStateChanged);
-    connect(m_ComputerManager, &ComputerManager::pairingCompleted,
-            this, &ComputerModel::handlePairingCompleted);
+}
 
-    m_Computers = m_ComputerManager->getComputers();
+void ComputerModel::initialize(ComputerCatalog* catalog)
+{
+    if (m_Catalog != nullptr) {
+        disconnect(m_Catalog, nullptr, this, nullptr);
+    }
+
+    m_Catalog = catalog;
+    connect(m_Catalog, &ComputerCatalog::connectionChanged,
+            this, &ComputerModel::handleConnectionChanged);
+    connect(m_Catalog, &ComputerCatalog::pairingCompleted,
+            this, &ComputerModel::handlePairingCompleted);
+    refreshConnections();
 }
 
 QVariant ComputerModel::data(const QModelIndex& index, int role) const
 {
-    if (!index.isValid()) {
+    if (!index.isValid() || index.row() < 0 || index.row() >= m_Connections.count()) {
         return QVariant();
     }
 
-    Q_ASSERT(index.row() < m_Computers.count());
-
-    NvComputer* computer = m_Computers[index.row()];
-    QReadLocker lock(&computer->lock);
-
+    const CatalogConnectionView& connection = m_Connections.at(index.row());
     switch (role) {
-    case NameRole:
-        return computer->name;
-    case OnlineRole:
-        return computer->state == NvComputer::CS_ONLINE;
-    case PairedRole:
-        return computer->pairState == NvComputer::PS_PAIRED;
-    case BusyRole:
-        return computer->currentGameId != 0;
-    case WakeableRole:
-        return !computer->macAddress.isEmpty();
-    case StatusUnknownRole:
-        return computer->state == NvComputer::CS_UNKNOWN;
-    case ServerSupportedRole:
-        return computer->isSupportedServerVersion;
-    case DetailsRole: {
-        QString state, pairState;
-
-        switch (computer->state) {
-        case NvComputer::CS_ONLINE:
-            state = tr("Online");
-            break;
-        case NvComputer::CS_OFFLINE:
-            state = tr("Offline");
-            break;
-        default:
-            state = tr("Unknown");
-            break;
-        }
-
-        switch (computer->pairState) {
-        case NvComputer::PS_PAIRED:
-            pairState = tr("Paired");
-            break;
-        case NvComputer::PS_NOT_PAIRED:
-            pairState = tr("Unpaired");
-            break;
-        default:
-            pairState = tr("Unknown");
-            break;
-        }
-
-        QString pairname = NvComputer::getPairname(computer->uuid);
-        QString pairnameInfo = pairname.isEmpty() ? tr("Unknown") : pairname;
-        
-        return tr("Name: %1").arg(computer->name) + '\n' +
-               tr("Status: %1").arg(state) + '\n' +
-               tr("Active Address: %1").arg(computer->activeAddress.toString()) + '\n' +
-               tr("UUID: %1").arg(computer->uuid) + '\n' +
-               tr("Pair Name: %1").arg(pairnameInfo) + '\n' +
-               tr("Local Address: %1").arg(computer->localAddress.toString()) + '\n' +
-               tr("Remote Address: %1").arg(computer->remoteAddress.toString()) + '\n' +
-               tr("IPv6 Address: %1").arg(computer->ipv6Address.toString()) + '\n' +
-               tr("Manual Address: %1").arg(computer->manualAddress.toString()) + '\n' +
-               tr("MAC Address: %1").arg(computer->macAddress.isEmpty() ? tr("Unknown") : QString(computer->macAddress.toHex(':'))) + '\n' +
-               tr("Pair State: %1").arg(pairState) + '\n' +
-               tr("Running Game ID: %1").arg(computer->state == NvComputer::CS_ONLINE ? QString::number(computer->currentGameId) : tr("Unknown")) + '\n' +
-               tr("HTTPS Port: %1").arg(computer->state == NvComputer::CS_ONLINE ? QString::number(computer->activeHttpsPort) : tr("Unknown"));
-    }
-    default:
-        return QVariant();
+    case ConnectionIdRole: return connection.identity.toString();
+    case ProtocolRole: return connection.protocolName;
+    case NameRole: return connection.displayName;
+    case OnlineRole: return connection.online;
+    case PairedRole: return connection.paired;
+    case BusyRole: return connection.busy;
+    case WakeableRole: return connection.wakeable;
+    case StatusUnknownRole: return connection.statusUnknown;
+    case ServerSupportedRole: return connection.serverSupported;
+    case DetailsRole: return connection.details;
+    default: return QVariant();
     }
 }
 
 int ComputerModel::rowCount(const QModelIndex& parent) const
 {
-    // We should not return a count for valid index values,
-    // only the parent (which will not have a "valid" index).
-    if (parent.isValid()) {
-        return 0;
-    }
-
-    return m_Computers.count();
+    return parent.isValid() ? 0 : m_Connections.count();
 }
 
 QHash<int, QByteArray> ComputerModel::roleNames() const
 {
-    QHash<int, QByteArray> names;
-
-    names[NameRole] = "name";
-    names[OnlineRole] = "online";
-    names[PairedRole] = "paired";
-    names[BusyRole] = "busy";
-    names[WakeableRole] = "wakeable";
-    names[StatusUnknownRole] = "statusUnknown";
-    names[ServerSupportedRole] = "serverSupported";
-    names[DetailsRole] = "details";
-
-    return names;
+    return {
+        {ConnectionIdRole, "connectionId"},
+        {ProtocolRole, "protocol"},
+        {NameRole, "name"},
+        {OnlineRole, "online"},
+        {PairedRole, "paired"},
+        {BusyRole, "busy"},
+        {WakeableRole, "wakeable"},
+        {StatusUnknownRole, "statusUnknown"},
+        {ServerSupportedRole, "serverSupported"},
+        {DetailsRole, "details"},
+    };
 }
 
-Session* ComputerModel::createSessionForCurrentGame(int computerIndex)
+void ComputerModel::deleteComputer(QString connectionId)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
-
-    NvComputer* computer = m_Computers[computerIndex];
-
-    // We must currently be streaming a game to use this function
-    Q_ASSERT(computer->currentGameId != 0);
-
-    for (NvApp& app : computer->appList) {
-        if (app.id == computer->currentGameId) {
-            return new Session(computer, app);
-        }
+    if (m_Catalog != nullptr) {
+        m_Catalog->deleteConnection(connectionId);
     }
-
-    // We have a current running app but it's not in our app list
-    Q_ASSERT(false);
-    return nullptr;
 }
 
-QVariantList ComputerModel::getConnectionAddressesForComputer(int computerIndex) const
+QString ComputerModel::generatePinString(QString connectionId)
 {
-    QVariantList addresses;
-
-    if (computerIndex < 0 || computerIndex >= m_Computers.count()) {
-        qWarning() << "Invalid computer index for getConnectionAddressesForComputer:" << computerIndex;
-        return addresses;
-    }
-
-    // 和 AppView 那边共用一份构造逻辑：两边喂的是同一个 QML 组件，
-    // 条目形状和「哪一项算选中」的判定必须一致。
-    return AppModel::buildConnectionAddressList(m_Computers[computerIndex]);
+    return m_Catalog != nullptr ? m_Catalog->generatePairingSecret(connectionId) : QString();
 }
 
-bool ComputerModel::hasMultipleConnectionAddresses(int computerIndex) const
+void ComputerModel::pairComputer(QString connectionId, QString pin)
 {
-    if (computerIndex < 0 || computerIndex >= m_Computers.count()) {
-        qWarning() << "Invalid computer index for hasMultipleConnectionAddresses:" << computerIndex;
-        return false;
+    if (m_Catalog != nullptr) {
+        m_PendingPairingConnectionId = connectionId;
+        m_Catalog->pairConnection(connectionId, pin);
     }
-
-    // 数的是全部已知地址，不只是验证过的 —— 用户应该总能从所有地址里挑。
-    return m_Computers[computerIndex]->uniqueAddresses().count() > 1;
 }
 
-bool ComputerModel::setActiveAddressForComputer(int computerIndex, QString address, int port)
-{
-    if (computerIndex < 0 || computerIndex >= m_Computers.count()) {
-        qWarning() << "Invalid computer index for setActiveAddressForComputer:" << computerIndex;
-        return false;
-    }
-
-    if (address.isEmpty() || port <= 0) {
-        qWarning() << "Invalid address for setActiveAddressForComputer:" << address << port;
-        return false;
-    }
-
-    NvComputer* computer = m_Computers[computerIndex];
-    NvAddress selectedAddress(address, static_cast<uint16_t>(port));
-
-    // Verify the address is one of the known addresses
-    bool found = false;
-    for (const NvAddress& addr : computer->uniqueAddresses()) {
-        if (addr == selectedAddress) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        qWarning() << "Address is not a known address:" << selectedAddress.toString();
-        return false;
-    }
-
-    computer->pinAddress(selectedAddress);
-
-    emit dataChanged(createIndex(computerIndex, 0), createIndex(computerIndex, 0));
-    return true;
-}
-
-bool ComputerModel::resetToAutomaticAddressForComputer(int computerIndex)
-{
-    if (computerIndex < 0 || computerIndex >= m_Computers.count()) {
-        qWarning() << "Invalid computer index for resetToAutomaticAddressForComputer:" << computerIndex;
-        return false;
-    }
-
-    if (!m_Computers[computerIndex]->resetToAutomaticAddress()) {
-        return false;
-    }
-
-    emit dataChanged(createIndex(computerIndex, 0), createIndex(computerIndex, 0));
-    return true;
-}
-
-void ComputerModel::deleteComputer(int computerIndex)
-{
-    Q_ASSERT(computerIndex < m_Computers.count());
-
-    beginRemoveRows(QModelIndex(), computerIndex, computerIndex);
-
-    // m_Computer[computerIndex] will be deleted by this call
-    m_ComputerManager->deleteHost(m_Computers[computerIndex]);
-
-    // Remove the now invalid item
-    m_Computers.removeAt(computerIndex);
-
-    endRemoveRows();
-}
-
-class DeferredWakeHostTask : public QRunnable
-{
-public:
-    DeferredWakeHostTask(NvComputer* computer)
-        : m_Computer(computer) {}
-
-    void run()
-    {
-        m_Computer->wake();
-    }
-
-private:
-    NvComputer* m_Computer;
-};
-
-void ComputerModel::wakeComputer(int computerIndex)
-{
-    Q_ASSERT(computerIndex < m_Computers.count());
-
-    DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(m_Computers[computerIndex]);
-    QThreadPool::globalInstance()->start(wakeTask);
-}
-
-void ComputerModel::renameComputer(int computerIndex, QString name)
-{
-    Q_ASSERT(computerIndex < m_Computers.count());
-
-    m_ComputerManager->renameHost(m_Computers[computerIndex], name);
-}
-
-QString ComputerModel::generatePinString()
-{
-    return m_ComputerManager->generatePinString();
-}
-
-class DeferredTestConnectionTask : public QObject, public QRunnable
+class DeferredTestConnectionTask final : public QObject, public QRunnable
 {
     Q_OBJECT
+
 public:
-    void run()
+    void run() override
     {
-        unsigned int portTestResult = LiTestClientConnectivity("qt.conntest.moonlight-stream.org", 443, ML_PORT_FLAG_ALL);
-        if (portTestResult == ML_TEST_RESULT_INCONCLUSIVE) {
+        const unsigned int result = LiTestClientConnectivity(
+                "qt.conntest.moonlight-stream.org", 443, ML_PORT_FLAG_ALL);
+        if (result == ML_TEST_RESULT_INCONCLUSIVE) {
             emit connectionTestCompleted(-1, QString());
+            return;
         }
-        else {
-            char blockedPorts[512];
-            LiStringifyPortFlags(portTestResult, "\n", blockedPorts, sizeof(blockedPorts));
-            emit connectionTestCompleted(portTestResult, QString(blockedPorts));
-        }
+
+        char blockedPorts[512];
+        LiStringifyPortFlags(result, "\n", blockedPorts, sizeof(blockedPorts));
+        emit connectionTestCompleted(result, QString(blockedPorts));
     }
 
 signals:
     void connectionTestCompleted(int result, QString blockedPorts);
 };
 
-void ComputerModel::testConnectionForComputer(int)
+void ComputerModel::testConnectionForComputer(QString connectionId)
 {
-    DeferredTestConnectionTask* testConnectionTask = new DeferredTestConnectionTask();
-    QObject::connect(testConnectionTask, &DeferredTestConnectionTask::connectionTestCompleted,
-                     this, &ComputerModel::connectionTestCompleted);
-    QThreadPool::globalInstance()->start(testConnectionTask);
+    Q_UNUSED(connectionId);
+    auto* task = new DeferredTestConnectionTask();
+    connect(task, &DeferredTestConnectionTask::connectionTestCompleted,
+            this, &ComputerModel::connectionTestCompleted);
+    QThreadPool::globalInstance()->start(task);
 }
 
-void ComputerModel::pairComputer(int computerIndex, QString pin)
+void ComputerModel::wakeComputer(QString connectionId)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
-
-    m_ComputerManager->pairHost(m_Computers[computerIndex], pin);
+    if (m_Catalog != nullptr) {
+        m_Catalog->wakeConnection(connectionId);
+    }
 }
 
-void ComputerModel::handlePairingCompleted(NvComputer*, QString error)
+void ComputerModel::renameComputer(QString connectionId, QString name)
 {
+    if (m_Catalog != nullptr) {
+        m_Catalog->renameConnection(connectionId, name);
+    }
+}
+
+StreamSession* ComputerModel::createSessionForCurrentGame(QString connectionId)
+{
+    bool found = false;
+    const CatalogConnectionView connection = m_Catalog != nullptr
+            ? m_Catalog->connection(connectionId, &found)
+            : CatalogConnectionView();
+    if (!found || !connection.busy) {
+        return nullptr;
+    }
+
+    QString error;
+    StreamSession* session = m_Catalog->createSession(connectionId,
+                                                      QString(),
+                                                      QString(),
+                                                      nullptr,
+                                                      &error);
+    if (session == nullptr) {
+        qWarning() << "Unable to create session for running activity:" << error;
+    }
+    return session;
+}
+
+QVariantList ComputerModel::getConnectionAddressesForComputer(QString connectionId) const
+{
+    return m_Catalog != nullptr ? m_Catalog->connectionEndpoints(connectionId) : QVariantList();
+}
+
+bool ComputerModel::hasMultipleConnectionAddresses(QString connectionId) const
+{
+    return m_Catalog != nullptr && m_Catalog->hasMultipleEndpoints(connectionId);
+}
+
+bool ComputerModel::setActiveAddressForComputer(QString connectionId,
+                                                QString address,
+                                                int port)
+{
+    return m_Catalog != nullptr && m_Catalog->selectEndpoint(connectionId, address, port);
+}
+
+bool ComputerModel::resetToAutomaticAddressForComputer(QString connectionId)
+{
+    return m_Catalog != nullptr && m_Catalog->selectAutomaticEndpoint(connectionId);
+}
+
+void ComputerModel::handleConnectionChanged(QString connectionId)
+{
+    const int oldIndex = indexOf(connectionId);
+    const QVector<CatalogConnectionView> updated = m_Catalog->connections();
+
+    bool sameLayout = updated.size() == m_Connections.size();
+    if (sameLayout) {
+        for (int i = 0; i < updated.size(); ++i) {
+            if (updated.at(i).identity != m_Connections.at(i).identity) {
+                sameLayout = false;
+                break;
+            }
+        }
+    }
+
+    if (!sameLayout) {
+        beginResetModel();
+        m_Connections = updated;
+        endResetModel();
+        return;
+    }
+
+    m_Connections = updated;
+    const int changedIndex = oldIndex >= 0 ? indexOf(connectionId) : -1;
+    if (changedIndex >= 0) {
+        emit dataChanged(createIndex(changedIndex, 0), createIndex(changedIndex, 0));
+    }
+}
+
+void ComputerModel::handlePairingCompleted(QString connectionId, QString error)
+{
+    if (connectionId != m_PendingPairingConnectionId) {
+        return;
+    }
+    m_PendingPairingConnectionId.clear();
     emit pairingCompleted(error.isEmpty() ? QVariant() : error);
 }
 
-void ComputerModel::handleComputerStateChanged(NvComputer* computer)
+int ComputerModel::indexOf(const QString& connectionId) const
 {
-    QVector<NvComputer*> newComputerList = m_ComputerManager->getComputers();
+    for (int i = 0; i < m_Connections.size(); ++i) {
+        if (m_Connections.at(i).identity.toString() == connectionId) {
+            return i;
+        }
+    }
+    return -1;
+}
 
-    // Reset the model if the structural layout of the list has changed
-    if (m_Computers != newComputerList) {
-        beginResetModel();
-        m_Computers = newComputerList;
-        endResetModel();
-    }
-    else {
-        // Let the view know that this specific computer changed
-        int index = m_Computers.indexOf(computer);
-        emit dataChanged(createIndex(index, 0), createIndex(index, 0));
-    }
+void ComputerModel::refreshConnections()
+{
+    beginResetModel();
+    m_Connections = m_Catalog != nullptr ? m_Catalog->connections()
+                                         : QVector<CatalogConnectionView>();
+    endResetModel();
 }
 
 #include "computermodel.moc"

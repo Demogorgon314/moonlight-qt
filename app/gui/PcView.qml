@@ -126,7 +126,7 @@ CenteredGridView {
         return model
     }
 
-    function openAppView(computerIndex, computerName, showHiddenGames)
+    function openAppView(connectionId, computerName, showHiddenGames)
     {
         // 造不出来时 createObject 返回 null，push(null) 只会往日志里丢一句
         // 「nothing to push」就完了 —— 界面上表现为「点了没反应」，非常难查。
@@ -145,7 +145,7 @@ CenteredGridView {
             return
         }
 
-        var properties = {"computerIndex": computerIndex, "objectName": computerName}
+        var properties = {"connectionId": connectionId, "objectName": computerName}
         if (showHiddenGames === true) {
             properties.showHiddenGames = true
         }
@@ -159,9 +159,9 @@ CenteredGridView {
         stackView.push(appView)
     }
 
-    function showAddressSelectionForComputer(computerIndex, computerName, openAppAfterSelection)
+    function showAddressSelectionForComputer(connectionId, computerName, openAppAfterSelection)
     {
-        var addresses = computerModel.getConnectionAddressesForComputer(computerIndex)
+        var addresses = computerModel.getConnectionAddressesForComputer(connectionId)
 
         // 列表里第一项是「自动」这个伪条目，判断有没有可选地址得数真地址。
         var realAddressCount = 0
@@ -180,13 +180,13 @@ CenteredGridView {
 
         if (realAddressCount === 1) {
             if (openAppAfterSelection === true) {
-                openAppView(computerIndex, computerName, false)
+                openAppView(connectionId, computerName, false)
             }
             return
         }
 
         // 预选交给 SelectAddressDialog 自己按 isActive 算
-        selectAddressDialog.pcIndex = computerIndex
+        selectAddressDialog.connectionId = connectionId
         selectAddressDialog.pcName = computerName
         selectAddressDialog.openAppAfterSelection = openAppAfterSelection === true
         selectAddressDialog.addresses = addresses
@@ -405,24 +405,24 @@ CenteredGridView {
                 NavigableMenuItem {
                     text: qsTr("View All Apps")
                     onTriggered: {
-                        openAppView(index, model.name, true)
+                        openAppView(model.connectionId, model.name, true)
                     }
                     visible: model.online && model.paired
                 }
                 NavigableMenuItem {
                     text: qsTr("Select Connection IP")
-                    onTriggered: showAddressSelectionForComputer(index, model.name, false)
-                    visible: model.online && model.paired && computerModel.hasMultipleConnectionAddresses(index)
+                    onTriggered: showAddressSelectionForComputer(model.connectionId, model.name, false)
+                    visible: model.online && model.paired && computerModel.hasMultipleConnectionAddresses(model.connectionId)
                 }
                 NavigableMenuItem {
                     text: qsTr("Wake PC")
-                    onTriggered: computerModel.wakeComputer(index)
+                    onTriggered: computerModel.wakeComputer(model.connectionId)
                     visible: !model.online && model.wakeable
                 }
                 NavigableMenuItem {
                     text: qsTr("Test Network")
                     onTriggered: {
-                        computerModel.testConnectionForComputer(index)
+                        computerModel.testConnectionForComputer(model.connectionId)
                         testConnectionDialog.open()
                     }
                 }
@@ -430,7 +430,7 @@ CenteredGridView {
                 NavigableMenuItem {
                     text: qsTr("Rename PC")
                     onTriggered: {
-                        renamePcDialog.pcIndex = index
+                        renamePcDialog.connectionId = model.connectionId
                         renamePcDialog.originalName = model.name
                         renamePcDialog.open()
                     }
@@ -438,7 +438,7 @@ CenteredGridView {
                 NavigableMenuItem {
                     text: qsTr("Delete PC")
                     onTriggered: {
-                        deletePcDialog.pcIndex = index
+                        deletePcDialog.connectionId = model.connectionId
                         deletePcDialog.pcName = model.name
                         deletePcDialog.open()
                     }
@@ -462,13 +462,13 @@ CenteredGridView {
                 }
                 else if (model.paired) {
                     // Go directly to app view; IP can be changed from there
-                    openAppView(index, model.name, false)
+                    openAppView(model.connectionId, model.name, false)
                 }
                 else {
-                    var pin = computerModel.generatePinString()
+                    var pin = computerModel.generatePinString(model.connectionId)
 
                     // Kick off pairing in the background
-                    computerModel.pairComputer(index, pin)
+                    computerModel.pairComputer(model.connectionId, pin)
 
                     // Display the pairing dialog
                     pairDialog.pin = pin
@@ -500,7 +500,7 @@ CenteredGridView {
         }
 
         Keys.onDeletePressed: {
-            deletePcDialog.pcIndex = index
+            deletePcDialog.connectionId = model.connectionId
             deletePcDialog.pcName = model.name
             deletePcDialog.open()
         }
@@ -531,13 +531,13 @@ CenteredGridView {
     NavigableMessageDialog {
         id: deletePcDialog
         // don't allow edits to the rest of the window while open
-        property int pcIndex : -1
+        property string connectionId : ""
         property string pcName : ""
         text: qsTr("Are you sure you want to remove '%1'?").arg(pcName)
         standardButtons: DialogButtonBox.Ok | DialogButtonBox.Cancel
 
         onAccepted: {
-            computerModel.deleteComputer(pcIndex)
+            computerModel.deleteComputer(connectionId)
         }
     }
 
@@ -576,7 +576,7 @@ CenteredGridView {
         id: renamePcDialog
         property string label: qsTr("Enter the new name for this PC:")
         property string originalName
-        property int pcIndex : -1;
+        property string connectionId : ""
 
         standardButtons: DialogButtonBox.Ok | DialogButtonBox.Cancel
 
@@ -591,7 +591,7 @@ CenteredGridView {
 
         onAccepted: {
             if (editText.text) {
-                computerModel.renameComputer(pcIndex, editText.text)
+                computerModel.renameComputer(connectionId, editText.text)
             }
         }
 
@@ -625,14 +625,14 @@ CenteredGridView {
     // 和 AppView 的地址选择框是同一个组件，只有提示语和落地方式不同
     SelectAddressDialog {
         id: selectAddressDialog
-        property int pcIndex: -1
+        property string connectionId: ""
         property string pcName: ""
         property bool openAppAfterSelection: false
 
         onAddressSelected: function(address) {
             var ok = address.isAuto
-                    ? computerModel.resetToAutomaticAddressForComputer(pcIndex)
-                    : computerModel.setActiveAddressForComputer(pcIndex, address.address, address.port)
+                    ? computerModel.resetToAutomaticAddressForComputer(connectionId)
+                    : computerModel.setActiveAddressForComputer(connectionId, address.address, address.port)
             if (!ok) {
                 errorDialog.text = qsTr("Unable to switch the connection IP for %1.").arg(pcName)
                 errorDialog.helpText = ""
@@ -641,14 +641,14 @@ CenteredGridView {
             }
 
             if (openAppAfterSelection) {
-                openAppView(pcIndex, pcName, false)
+                openAppView(connectionId, pcName, false)
             }
         }
 
         onClosed: {
             addresses = []
             openAppAfterSelection = false
-            pcIndex = -1
+            connectionId = ""
             pcName = ""
         }
     }

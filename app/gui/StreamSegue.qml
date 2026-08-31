@@ -327,8 +327,8 @@ Item {
 
             // Initialize the session and probe for host/client capabilities
             if (!session.initialize(window)) {
-                sessionFinished(0);
-                sessionReadyForDeletion();
+                // StreamSession publishes one terminal result and deletion readiness
+                // on the next event-loop turn for failed preflight.
                 return;
             }
 
