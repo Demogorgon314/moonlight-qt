@@ -28,7 +28,9 @@ foreach ($AssetName in $Assets) {
     Remove-Item $ArchivePath
 }
 
-if ($env:MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING -eq '1') {
+# Apple Screen Sharing is enabled by default for Windows x64 builds. An
+# explicit 0 retains the dependency-light feature-off build path.
+if ($env:MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING -ne '0') {
     & (Join-Path $PSScriptRoot 'scripts\setup-apple-audio.ps1')
 }
 

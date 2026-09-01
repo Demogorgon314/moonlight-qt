@@ -2,11 +2,13 @@ QT += core quick network quickcontrols2 svg gui-private
 !config_SL: QT += multimedia
 CONFIG += c++17
 
-# Apple Screen Sharing is isolated behind a supported-platform compile option
-# and a runtime gate. With either gate off, no Apple adapter, discovery,
-# connection, or credential access is registered.
+# Apple Screen Sharing is enabled by default on supported platforms and remains
+# isolated behind a compile option and runtime gate. Set
+# MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING=0 to produce a feature-off build.
+# With either gate off, no Apple adapter, discovery, connection, or credential
+# access is registered.
 MOONLIGHT_APPLE_SCREEN_SHARING_BUILD = $$(MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING)
-equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 1) {
+!equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 0) {
     win32:contains(QT_ARCH, x86_64) {
         CONFIG += apple-screen-sharing
     }
@@ -22,6 +24,7 @@ apple-screen-sharing {
         backend/apple/applefeaturegate.cpp \
         backend/apple/appleconnectionstore.cpp \
         backend/apple/applecredentialstore.cpp \
+        backend/apple/applekeyboardmapper.cpp \
         backend/apple/appleprotocol.cpp \
         backend/apple/applecontrolfeatures.cpp \
         backend/apple/appleaudiostream.cpp \
@@ -37,6 +40,7 @@ apple-screen-sharing {
         backend/apple/applefeaturegate.h \
         backend/apple/appleconnectionstore.h \
         backend/apple/applecredentialstore.h \
+        backend/apple/applekeyboardmapper.h \
         backend/apple/appleprotocol.h \
         backend/apple/applecontrolfeatures.h \
         backend/apple/appleaudiostream.h \

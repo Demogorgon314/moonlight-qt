@@ -6,6 +6,10 @@ rem Run from Qt command prompt with working directory set to root of repo
 set BUILD_CONFIG=%1
 set BUILD_ARCH=%2
 
+rem Apple Screen Sharing is enabled by default on supported platforms. Keep the
+rem environment variable normalized so deployment follows qmake's default.
+if not defined MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING set MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING=1
+
 rem Convert to lower case for windeployqt
 if /I "%BUILD_CONFIG%"=="debug" (
     set BUILD_CONFIG=debug
@@ -214,7 +218,7 @@ if "%MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING%"=="1" if /I "%ARCH%"=="x64" (
         echo Missing Apple AAC-ELD dependency. Run setup-deps.ps1 with MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING=1.
         goto Error
     )
-    echo Copying optional Apple AAC-ELD dependency
+    echo Copying Apple AAC-ELD dependency
     copy !APPLE_AUDIO_DEPS!\fdk-aac.dll %DEPLOY_FOLDER%
     if !ERRORLEVEL! NEQ 0 goto Error
     mkdir %DEPLOY_FOLDER%\third-party\fdk-aac 2>nul

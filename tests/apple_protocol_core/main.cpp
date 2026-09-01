@@ -3,6 +3,7 @@
 #include "backend/apple/appleconnectionstore.h"
 #include "backend/apple/applecontrolfeatures.h"
 #include "backend/apple/applefeaturegate.h"
+#include "backend/apple/applekeyboardmapper.h"
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
 #include "backend/apple/appleprotocol.h"
@@ -850,6 +851,141 @@ void testEncryptedInputWireBoundary()
             "the inner input block must use the record content key without consuming record order");
 }
 
+void testAppleKeyboardMappingAndFocusRelease()
+{
+    AppleKeyboardMapper swallowedWinMapper(false, 40);
+    const QList<AppleRemoteKeyEvent> recoveredShortcut =
+            swallowedWinMapper.updateWithModifiers(
+                    true, SDLK_c, SDL_SCANCODE_C,
+                    KMOD_LGUI, KMOD_NONE, true);
+    require(recoveredShortcut.size() == 2 &&
+                    recoveredShortcut.at(0).isDown &&
+                    recoveredShortcut.at(0).symbol == 0xffeb &&
+                    recoveredShortcut.at(0).keyCode == 55 &&
+                    recoveredShortcut.at(1).isDown &&
+                    recoveredShortcut.at(1).symbol == 'c' &&
+                    recoveredShortcut.at(1).keyCode == 8,
+            "a GUI modifier reported only on C must reconstruct native Command-down before C-down");
+    const QList<AppleRemoteKeyEvent> recoveredCUp =
+            swallowedWinMapper.updateWithModifiers(
+                    false, SDLK_c, SDL_SCANCODE_C,
+                    KMOD_LGUI, KMOD_NONE, true);
+    const QList<AppleRemoteKeyEvent> recoveredCommandRelease =
+            swallowedWinMapper.updateWithModifiers(
+                    true, SDLK_v, SDL_SCANCODE_V,
+                    KMOD_NONE, KMOD_NONE, true);
+    require(recoveredCUp.size() == 1 &&
+                    !recoveredCUp.at(0).isDown &&
+                    recoveredCUp.at(0).symbol == 'c' &&
+                    recoveredCommandRelease.size() == 2 &&
+                    !recoveredCommandRelease.at(0).isDown &&
+                    recoveredCommandRelease.at(0).symbol == 0xffeb &&
+                    recoveredCommandRelease.at(1).isDown &&
+                    recoveredCommandRelease.at(1).symbol == 'v',
+            "a reconstructed Command must remain held across C-up and release before the next unmodified key");
+    const QList<AppleRemoteKeyEvent> recoveredFocusRelease =
+            swallowedWinMapper.releaseAll();
+    require(recoveredFocusRelease.size() == 1 &&
+                    recoveredFocusRelease.at(0).symbol == 'v' &&
+                    !recoveredFocusRelease.at(0).isDown,
+            "focus loss must not leave a reconstructed Command pressed remotely");
+
+    AppleKeyboardMapper localSystemKeyMapper(false, 40);
+    const QList<AppleRemoteKeyEvent> localSystemShortcut =
+            localSystemKeyMapper.updateWithModifiers(
+                    true, SDLK_c, SDL_SCANCODE_C,
+                    KMOD_LGUI, KMOD_NONE, false);
+    require(localSystemShortcut.size() == 1 &&
+                    localSystemShortcut.at(0).symbol == 'c',
+            "GUI state must not synthesize a remote Command while system-key capture is disabled");
+
+    AppleKeyboardMapper nativeWinFallbackMapper(false, 40);
+    const QList<AppleRemoteKeyEvent> nativeWinShortcut =
+            nativeWinFallbackMapper.updateWithModifiers(
+                    true, SDLK_c, SDL_SCANCODE_C,
+                    KMOD_NUM, KMOD_LGUI, true);
+    require(nativeWinShortcut.size() == 2 &&
+                    nativeWinShortcut.at(0).isDown &&
+                    nativeWinShortcut.at(0).symbol == 0xffeb &&
+                    nativeWinShortcut.at(1).isDown &&
+                    nativeWinShortcut.at(1).symbol == 'c',
+            "native Left Win state must recover Command+C when SDL reports only NumLock");
+    AppleKeyboardMapper nativeRightWinFallbackMapper(false, 40);
+    const QList<AppleRemoteKeyEvent> nativeRightWinShortcut =
+            nativeRightWinFallbackMapper.updateWithModifiers(
+                    true, SDLK_v, SDL_SCANCODE_V,
+                    KMOD_NUM, KMOD_RGUI, true);
+    require(nativeRightWinShortcut.size() == 2 &&
+                    nativeRightWinShortcut.at(0).isDown &&
+                    nativeRightWinShortcut.at(0).symbol == 0xffec &&
+                    nativeRightWinShortcut.at(0).keyCode == 54 &&
+                    nativeRightWinShortcut.at(1).symbol == 'v',
+            "native Right Win state must preserve right Command semantics");
+
+    AppleKeyboardMapper semanticMapper(false, 40);
+    require(!semanticMapper.update(
+                    true, SDLK_LGUI, SDL_SCANCODE_LGUI, false).has_value(),
+            "the local Win/Command key must stay local when system-key capture is disabled");
+
+    const auto commandDown = semanticMapper.update(
+            true, SDLK_LGUI, SDL_SCANCODE_LGUI, true);
+    const auto cDown = semanticMapper.update(
+            true, SDLK_c, SDL_SCANCODE_C, true);
+    require(commandDown.has_value() && commandDown->isDown &&
+                    commandDown->symbol == 0xffeb &&
+                    commandDown->keyCode == 55 &&
+                    commandDown->keyboardType == 40 &&
+                    cDown.has_value() && cDown->symbol == 'c' &&
+                    cDown->keyCode == 8,
+            "semantic mapping must send left Win as native left Command and preserve the Apple C key code");
+
+    const QList<AppleRemoteKeyEvent> focusReleases =
+            semanticMapper.releaseAll();
+    require(focusReleases.size() == 2 &&
+                    !focusReleases.at(0).isDown &&
+                    focusReleases.at(0).symbol == 'c' &&
+                    focusReleases.at(1).symbol == 0xffeb &&
+                    semanticMapper.pressedKeyCount() == 0 &&
+                    !semanticMapper.update(
+                            false, SDLK_LGUI, SDL_SCANCODE_LGUI,
+                            false).has_value(),
+            "focus loss must release ordinary keys before modifiers and suppress a later duplicate key-up");
+
+    const auto optionDown = semanticMapper.update(
+            true, SDLK_RALT, SDL_SCANCODE_RALT, true);
+    const auto optionUp = semanticMapper.update(
+            false, SDLK_RALT, SDL_SCANCODE_RALT, true);
+    require(optionDown.has_value() && optionDown->symbol == 0xffea &&
+                    optionDown->keyCode == 61 &&
+                    optionUp.has_value() && !optionUp->isDown &&
+                    optionUp->symbol == optionDown->symbol &&
+                    optionUp->keyCode == optionDown->keyCode,
+            "default mapping must preserve right Alt as native right Option across down and up");
+
+    AppleKeyboardMapper positionalMapper(true);
+    const auto altAsCommand = positionalMapper.update(
+            true, SDLK_LALT, SDL_SCANCODE_LALT, true);
+    const auto winAsOption = positionalMapper.update(
+            true, SDLK_LGUI, SDL_SCANCODE_LGUI, true);
+    require(altAsCommand.has_value() &&
+                    altAsCommand->symbol == 0xffeb &&
+                    altAsCommand->keyCode == 55 &&
+                    winAsOption.has_value() &&
+                    winAsOption->symbol == 0xffe9 &&
+                    winAsOption->keyCode == 58,
+            "the shared Alt/Win swap setting must swap both Apple modifier symbols and virtual key codes");
+
+    AppleKeyboardMapper functionMapper(false);
+    const auto f13 = functionMapper.update(
+            true, SDLK_F13, SDL_SCANCODE_F13, true);
+    const auto f24 = functionMapper.update(
+            true, SDLK_F24, SDL_SCANCODE_F24, true);
+    require(f13.has_value() && f13->symbol == 0xffca &&
+                    f13->keyCode == 105 &&
+                    f24.has_value() && f24->symbol == 0xffd5,
+            "function-key mapping must follow X11 order across SDL's non-contiguous F12/F13 scancode boundary");
+}
+
 void testNativePrecisionScrollWireAndDeltas()
 {
     AppleScrollWheelEvent event;
@@ -1629,6 +1765,8 @@ int main(int argc, char* argv[])
     testHevcGlobalDecodingOrderAdmission();
     std::fprintf(stderr, "testEncryptedInputWireBoundary\n");
     testEncryptedInputWireBoundary();
+    std::fprintf(stderr, "testAppleKeyboardMappingAndFocusRelease\n");
+    testAppleKeyboardMappingAndFocusRelease();
     std::fprintf(stderr, "testNativePrecisionScrollWireAndDeltas\n");
     testNativePrecisionScrollWireAndDeltas();
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");

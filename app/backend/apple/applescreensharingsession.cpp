@@ -3,6 +3,7 @@
 #include "appleauthenticator.h"
 #include "appleaudiostream.h"
 #include "applecredentialstore.h"
+#include "applekeyboardmapper.h"
 #include "applevideorenderer.h"
 #include "applemediatransport.h"
 #include "settings/streamingpreferences.h"
@@ -188,16 +189,25 @@ double cursorDpiScale(SDL_Window* window)
 }
 
 #ifdef Q_OS_WIN
-bool nativeHandleMatchesWindow(SDL_Window* window, HWND nativeHandle)
+HWND nativeHandleForWindow(SDL_Window* window)
 {
-    if (window == nullptr || nativeHandle == nullptr) {
-        return false;
+    if (window == nullptr) {
+        return nullptr;
     }
     SDL_SysWMinfo windowInfo = {};
     SDL_VERSION(&windowInfo.version);
-    return SDL_GetWindowWMInfo(window, &windowInfo) == SDL_TRUE &&
+    if (SDL_GetWindowWMInfo(window, &windowInfo) == SDL_TRUE &&
             windowInfo.subsystem == SDL_SYSWM_WINDOWS &&
-            windowInfo.info.win.window == nativeHandle;
+            windowInfo.info.win.window != nullptr) {
+        return windowInfo.info.win.window;
+    }
+    return nullptr;
+}
+
+bool nativeHandleMatchesWindow(SDL_Window* window, HWND nativeHandle)
+{
+    return nativeHandle != nullptr &&
+            nativeHandleForWindow(window) == nativeHandle;
 }
 #endif
 
@@ -209,42 +219,6 @@ void recordMaximum(std::atomic<quint64>& value, quint64 candidate)
                    previous, candidate,
                    std::memory_order_relaxed,
                    std::memory_order_relaxed)) {
-    }
-}
-
-quint32 keySymbolForSdl(int keycode)
-{
-    if (keycode >= 0x20 && keycode <= 0xff) {
-        return static_cast<quint32>(keycode);
-    }
-    switch (keycode) {
-    case SDLK_BACKSPACE: return 0xff08;
-    case SDLK_TAB: return 0xff09;
-    case SDLK_RETURN: return 0xff0d;
-    case SDLK_ESCAPE: return 0xff1b;
-    case SDLK_HOME: return 0xff50;
-    case SDLK_LEFT: return 0xff51;
-    case SDLK_UP: return 0xff52;
-    case SDLK_RIGHT: return 0xff53;
-    case SDLK_DOWN: return 0xff54;
-    case SDLK_PAGEUP: return 0xff55;
-    case SDLK_PAGEDOWN: return 0xff56;
-    case SDLK_END: return 0xff57;
-    case SDLK_INSERT: return 0xff63;
-    case SDLK_DELETE: return 0xffff;
-    case SDLK_LSHIFT: return 0xffe1;
-    case SDLK_RSHIFT: return 0xffe2;
-    case SDLK_LCTRL: return 0xffe3;
-    case SDLK_RCTRL: return 0xffe4;
-    case SDLK_LALT: return 0xffe9;
-    case SDLK_RALT: return 0xffea;
-    case SDLK_LGUI: return 0xffeb;
-    case SDLK_RGUI: return 0xffec;
-    default:
-        if (keycode >= SDLK_F1 && keycode <= SDLK_F24) {
-            return 0xffbe + static_cast<quint32>(keycode - SDLK_F1);
-        }
-        return 0;
     }
 }
 
@@ -332,6 +306,155 @@ QImage renderMoonlightPerformanceOverlay(
 }
 
 } // namespace
+
+#ifdef Q_OS_WIN
+// SDL's Windows system-key grab is implemented with WH_KEYBOARD_LL. With the
+// SDL3 backend used through sdl2-compat, the hook can suppress LWIN/RWIN before
+// their SDL keyboard events reach this session. Install after SDL updates its
+// grab so this session can forward Command explicitly while still preventing
+// the local Start menu from opening.
+class AppleWindowsKeyboardHook
+{
+public:
+    AppleWindowsKeyboardHook()
+        : m_EventType(SDL_RegisterEvents(1))
+    {
+    }
+
+    ~AppleWindowsKeyboardHook()
+    {
+        stop();
+    }
+
+    void update(SDL_Window* primary,
+                bool primaryCapture,
+                SDL_Window* secondary,
+                bool secondaryCapture)
+    {
+        stop();
+        m_Primary = targetForWindow(primary, primaryCapture);
+        m_Secondary = targetForWindow(secondary, secondaryCapture);
+        if (m_EventType == InvalidEventType ||
+                (!m_Primary.capture && !m_Secondary.capture)) {
+            return;
+        }
+
+        s_ActiveHook = this;
+        m_Hook = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                &AppleWindowsKeyboardHook::keyboardHookProc,
+                GetModuleHandleW(nullptr),
+                0);
+        if (m_Hook == nullptr) {
+            s_ActiveHook = nullptr;
+            qWarning().nospace()
+                    << "[DEBUG-APPLE-WIN-HOOK] installation failed error="
+                    << GetLastError();
+            return;
+        }
+        qInfo().nospace()
+                << "[DEBUG-APPLE-WIN-HOOK] installed primary="
+                << m_Primary.windowId << "/" << m_Primary.capture
+                << " secondary=" << m_Secondary.windowId
+                << "/" << m_Secondary.capture;
+    }
+
+    bool decodeEvent(const SDL_Event& event,
+                     bool* isDown,
+                     bool* isRight,
+                     quint32* windowId) const
+    {
+        if (event.type != m_EventType || isDown == nullptr ||
+                isRight == nullptr || windowId == nullptr) {
+            return false;
+        }
+        *isDown = (event.user.code & DownFlag) != 0;
+        *isRight = (event.user.code & RightFlag) != 0;
+        *windowId = event.user.windowID;
+        return true;
+    }
+
+private:
+    struct WindowTarget
+    {
+        HWND nativeHandle = nullptr;
+        quint32 windowId = 0;
+        bool capture = false;
+    };
+
+    static constexpr Uint32 InvalidEventType = static_cast<Uint32>(-1);
+    static constexpr Sint32 DownFlag = 1 << 0;
+    static constexpr Sint32 RightFlag = 1 << 1;
+
+    static WindowTarget targetForWindow(SDL_Window* window, bool capture)
+    {
+        WindowTarget target;
+        target.nativeHandle = nativeHandleForWindow(window);
+        target.windowId = window != nullptr ? SDL_GetWindowID(window) : 0;
+        target.capture = capture && target.nativeHandle != nullptr &&
+                target.windowId != 0;
+        return target;
+    }
+
+    const WindowTarget* capturedTarget(HWND foreground) const
+    {
+        if (m_Primary.capture && m_Primary.nativeHandle == foreground) {
+            return &m_Primary;
+        }
+        if (m_Secondary.capture && m_Secondary.nativeHandle == foreground) {
+            return &m_Secondary;
+        }
+        return nullptr;
+    }
+
+    static LRESULT CALLBACK keyboardHookProc(
+            int code, WPARAM message, LPARAM data)
+    {
+        AppleWindowsKeyboardHook* hook = s_ActiveHook;
+        if (code == HC_ACTION && hook != nullptr) {
+            const auto* keyboard =
+                    reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
+            const bool isWin = keyboard->vkCode == VK_LWIN ||
+                    keyboard->vkCode == VK_RWIN;
+            const bool isDown = message == WM_KEYDOWN ||
+                    message == WM_SYSKEYDOWN;
+            const bool isUp = message == WM_KEYUP ||
+                    message == WM_SYSKEYUP;
+            const WindowTarget* target =
+                    hook->capturedTarget(GetForegroundWindow());
+            if (isWin && (isDown || isUp) && target != nullptr) {
+                SDL_Event event = {};
+                event.type = hook->m_EventType;
+                event.user.timestamp = SDL_GetTicks();
+                event.user.windowID = target->windowId;
+                event.user.code = (isDown ? DownFlag : 0) |
+                        (keyboard->vkCode == VK_RWIN ? RightFlag : 0);
+                if (SDL_PushEvent(&event) == 1) {
+                    return 1;
+                }
+            }
+        }
+        return CallNextHookEx(nullptr, code, message, data);
+    }
+
+    void stop()
+    {
+        if (m_Hook != nullptr) {
+            UnhookWindowsHookEx(m_Hook);
+            m_Hook = nullptr;
+        }
+        if (s_ActiveHook == this) {
+            s_ActiveHook = nullptr;
+        }
+    }
+
+    inline static AppleWindowsKeyboardHook* s_ActiveHook = nullptr;
+    Uint32 m_EventType = InvalidEventType;
+    HHOOK m_Hook = nullptr;
+    WindowTarget m_Primary;
+    WindowTarget m_Secondary;
+};
+#endif
 
 // A second display is a distinct AVConference stream, not another tile group
 // in the primary decoder. This module owns every mutable decoder/network state
@@ -1838,6 +1961,17 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     QSettings settings;
     const StreamingPreferences* preferences = StreamingPreferences::get();
     m_RememberWindowPlacement = preferences->rememberWindowPosition;
+    m_KeyboardMapper = std::make_unique<AppleKeyboardMapper>(
+            preferences->swapWinAltKeys);
+    m_CaptureSystemKeysMode = static_cast<int>(
+            preferences->captureSysKeysMode);
+    // Match Moonlight's established streaming input behavior. These hints keep
+    // Alt+Tab and Alt+F4 in SDL's key path while the Apple window owns the
+    // explicit keyboard grab.
+    SDL_SetHint(SDL_HINT_ALLOW_ALT_TAB_WHILE_GRABBED, "0");
+#ifdef Q_OS_WIN
+    SDL_SetHint(SDL_HINT_WINDOWS_NO_CLOSE_ON_ALT_F4, "1");
+#endif
     m_ScrollSpeedMultiplier = qBound(
             25, preferences->appleScrollSpeedPercent, 150) / 50.0;
     const ApplePerformanceOverlayPolicy overlayPolicy =
@@ -1902,6 +2036,9 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     if (!m_Runtime->initialize(qtWindow, runtimeConfig)) {
         return false;
     }
+#ifdef Q_OS_WIN
+    m_WindowsKeyboardHook = std::make_unique<AppleWindowsKeyboardHook>();
+#endif
     if (QCoreApplication::instance() != nullptr) {
         QCoreApplication::instance()->installNativeEventFilter(this);
         m_NativeEventFilterInstalled = true;
@@ -2202,6 +2339,7 @@ void AppleScreenSharingSession::mediaReady(
                 << (hardwareFallbackOccurred ? " (fallback)" : "");
         SDL_ShowWindow(m_SecondaryWindow);
         SDL_RaiseWindow(m_SecondaryWindow);
+        updateKeyboardGrabState(m_SecondaryWindow);
         m_SecondaryPresentationNeeded.store(true);
         return;
     }
@@ -2241,6 +2379,7 @@ void AppleScreenSharingSession::mediaReady(
                                         .arg(rendererError));
         return;
     }
+    updateKeyboardGrabState(window);
     qInfo().nospace()
             << "Apple High Performance renderer="
             << m_VideoRenderer->name()
@@ -2303,6 +2442,7 @@ void AppleScreenSharingSession::mediaReady(
         }
         SDL_ShowWindow(guard->m_Runtime->streamWindow());
         SDL_RaiseWindow(guard->m_Runtime->streamWindow());
+        guard->updateKeyboardGrabState(guard->m_Runtime->streamWindow());
     });
 }
 
@@ -2582,6 +2722,9 @@ void AppleScreenSharingSession::refreshLocalClipboard(bool windowFocusGained)
 void AppleScreenSharingSession::toggleControlMode()
 {
     const bool observing = !m_Observing.load();
+    if (observing) {
+        releaseAllKeys();
+    }
     m_Observing.store(observing);
     m_MouseButtons = 0;
     AppleOutboundControl outbound;
@@ -2827,6 +2970,28 @@ void AppleScreenSharingSession::pollSdlEvents()
     };
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+#ifdef Q_OS_WIN
+        bool winKeyDown = false;
+        bool rightWinKey = false;
+        quint32 winKeyWindowId = 0;
+        if (m_WindowsKeyboardHook != nullptr &&
+                m_WindowsKeyboardHook->decodeEvent(
+                        event, &winKeyDown, &rightWinKey,
+                        &winKeyWindowId)) {
+            qInfo().nospace()
+                    << "[DEBUG-APPLE-WIN-HOOK] "
+                    << (winKeyDown ? "down" : "up")
+                    << " " << (rightWinKey ? "right" : "left")
+                    << " window=" << winKeyWindowId;
+            queueKey(
+                    winKeyDown,
+                    rightWinKey ? SDLK_RGUI : SDLK_LGUI,
+                    rightWinKey ? SDL_SCANCODE_RGUI : SDL_SCANCODE_LGUI,
+                    rightWinKey ? KMOD_RGUI : KMOD_LGUI,
+                    systemKeyCaptureRequestedForWindow(winKeyWindowId));
+            continue;
+        }
+#endif
         switch (event.type) {
         case SDL_QUIT:
             interrupt();
@@ -2883,7 +3048,30 @@ void AppleScreenSharingSession::pollSdlEvents()
             break;
         }
         case SDL_KEYDOWN:
-        case SDL_KEYUP:
+        case SDL_KEYUP: {
+            const bool commandClipboardKey =
+                    event.key.keysym.scancode == SDL_SCANCODE_LGUI ||
+                    event.key.keysym.scancode == SDL_SCANCODE_RGUI ||
+                    event.key.keysym.scancode == SDL_SCANCODE_C ||
+                    event.key.keysym.scancode == SDL_SCANCODE_V;
+            if (commandClipboardKey) {
+                SDL_Window* keyboardFocus = SDL_GetKeyboardFocus();
+                qInfo().nospace()
+                        << "[DEBUG-APPLE-CMD-CV-EVENT] "
+                        << (event.type == SDL_KEYDOWN ? "down" : "up")
+                        << " window=" << event.key.windowID
+                        << " focus=" << (keyboardFocus != nullptr
+                                ? SDL_GetWindowID(keyboardFocus) : 0)
+                        << " sym=" << event.key.keysym.sym
+                        << " scan=" << event.key.keysym.scancode
+                        << " mod=0x" << Qt::hex
+                        << static_cast<quint32>(event.key.keysym.mod)
+                        << Qt::dec
+                        << " repeat=" << static_cast<int>(event.key.repeat)
+                        << " capture="
+                        << systemKeyCaptureRequestedForWindow(
+                                event.key.windowID);
+            }
             if (event.key.keysym.sym == SDLK_s &&
                     (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
                             (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
@@ -2911,9 +3099,13 @@ void AppleScreenSharingSession::pollSdlEvents()
             if (event.type == SDL_KEYUP || event.key.repeat == 0) {
                 queueKey(event.type == SDL_KEYDOWN,
                          event.key.keysym.sym,
-                         event.key.keysym.scancode);
+                         event.key.keysym.scancode,
+                         event.key.keysym.mod,
+                         systemKeyCaptureRequestedForWindow(
+                                 event.key.windowID));
             }
             break;
+        }
         case SDL_WINDOWEVENT: {
             const int displayIndex = displayIndexForWindow(event.window.windowID);
             SDL_Window* changedWindow = displayIndex == 1
@@ -2932,6 +3124,7 @@ void AppleScreenSharingSession::pollSdlEvents()
                 refreshRemoteCursor(changedWindow, false);
             }
             if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                updateKeyboardGrabState(changedWindow);
                 // Match the native client: copying normally occurs while the
                 // stream window is inactive, so becoming key is the reliable
                 // point to sample the current pasteboard. QClipboard's native
@@ -2939,11 +3132,28 @@ void AppleScreenSharingSession::pollSdlEvents()
                 // window and must remain only the fast path.
                 refreshLocalClipboard(true);
             }
+            else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                qInfo().nospace()
+                        << "[DEBUG-APPLE-CMD-CV-FOCUS] lost window="
+                        << event.window.windowID
+                        << " pressed=" << (m_KeyboardMapper != nullptr
+                                ? m_KeyboardMapper->pressedKeyCount() : 0);
+                // System shortcuts can move focus before SDL delivers their
+                // key-up events. Match both native iScreenSharing and the
+                // Moonlight input path by releasing the exact remote keys now.
+                releaseAllKeys();
+                if (m_MouseButtons != 0) {
+                    m_MouseButtons = 0;
+                    queuePointer(m_LastMouseX, m_LastMouseY, 0, 0,
+                                 displayIndex);
+                }
+            }
             switch (event.window.event) {
             case SDL_WINDOWEVENT_EXPOSED:
             case SDL_WINDOWEVENT_SHOWN:
             case SDL_WINDOWEVENT_RESTORED:
             case SDL_WINDOWEVENT_SIZE_CHANGED:
+                updateKeyboardGrabState(changedWindow);
                 m_PresentationNeeded.store(true);
                 if (displayIndex == 1) {
                     m_SecondaryPresentationNeeded.store(true);
@@ -3086,16 +3296,62 @@ void AppleScreenSharingSession::queuePointer(
                   static_cast<quint64>(m_PendingControls.size()));
 }
 
-void AppleScreenSharingSession::queueKey(bool isDown,
-                                         int sdlKeycode,
-                                         int sdlScancode)
+void AppleScreenSharingSession::queueKey(
+        bool isDown,
+        int sdlKeycode,
+        int sdlScancode,
+        int sdlModifiers,
+        bool systemKeyCaptureRequested)
 {
-    if (m_Observing.load()) {
+    if (m_Observing.load() || m_KeyboardMapper == nullptr) {
         return;
     }
-    const quint32 symbol = keySymbolForSdl(sdlKeycode);
-    if (symbol == 0) {
-        return;
+    int platformGuiModifiers = KMOD_NONE;
+#ifdef Q_OS_WIN
+    const bool leftWinDown =
+            (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+    const bool rightWinDown =
+            (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+    if (leftWinDown) {
+        platformGuiModifiers |= KMOD_LGUI;
+    }
+    if (rightWinDown) {
+        platformGuiModifiers |= KMOD_RGUI;
+    }
+    if (sdlScancode == SDL_SCANCODE_C ||
+            sdlScancode == SDL_SCANCODE_V ||
+            platformGuiModifiers != KMOD_NONE) {
+        qInfo().nospace()
+                << "[DEBUG-APPLE-WIN-GUI-STATE] scan=" << sdlScancode
+                << " sdl=0x" << Qt::hex << sdlModifiers
+                << " native=0x" << platformGuiModifiers << Qt::dec
+                << " capture=" << systemKeyCaptureRequested;
+    }
+#endif
+    const QList<AppleRemoteKeyEvent> keys =
+            m_KeyboardMapper->updateWithModifiers(
+            isDown,
+            sdlKeycode,
+            sdlScancode,
+            sdlModifiers,
+            platformGuiModifiers,
+            systemKeyCaptureRequested);
+    for (const AppleRemoteKeyEvent& key : keys) {
+        queueRemoteKey(key);
+    }
+}
+
+void AppleScreenSharingSession::queueRemoteKey(
+        const AppleRemoteKeyEvent& key)
+{
+    if (key.symbol == 0xffeb || key.symbol == 0xffec ||
+            key.symbol == 'c' || key.symbol == 'v') {
+        qInfo().nospace()
+                << "[DEBUG-APPLE-CMD-CV-WIRE] "
+                << (key.isDown ? "down" : "up")
+                << " symbol=0x" << Qt::hex << key.symbol << Qt::dec
+                << " keyCode=" << key.keyCode
+                << " keyboardType=" << key.keyboardType;
     }
     const quint32 now = currentMicroseconds();
     const quint32 delta = now - m_PreviousInputTimestamp;
@@ -3104,12 +3360,110 @@ void AppleScreenSharingSession::queueKey(bool isDown,
     outbound.kind = AppleOutboundControl::Kind::Input;
     outbound.timestampDeltaMicroseconds = delta;
     outbound.input = AppleMediaWire::keyEvent(
-                isDown,
-                symbol,
+                key.isDown,
+                key.symbol,
                 delta,
-                0,
-                static_cast<quint16>(qBound(0, sdlScancode, 65535)));
+                key.keyboardType,
+                key.keyCode);
     queueControl(std::move(outbound));
+}
+
+void AppleScreenSharingSession::releaseAllKeys()
+{
+    if (m_KeyboardMapper == nullptr) {
+        return;
+    }
+    const QList<AppleRemoteKeyEvent> releases =
+            m_KeyboardMapper->releaseAll();
+    if (releases.isEmpty()) {
+        return;
+    }
+    qInfo() << "Apple Screen Sharing releasing"
+            << releases.size() << "pressed remote key(s)";
+    if (m_Observing.load()) {
+        return;
+    }
+    for (const AppleRemoteKeyEvent& key : releases) {
+        queueRemoteKey(key);
+    }
+}
+
+void AppleScreenSharingSession::updateKeyboardGrabState(SDL_Window* window)
+{
+    if (window == nullptr) {
+        return;
+    }
+    bool shouldGrab = m_CaptureSystemKeysMode !=
+            static_cast<int>(StreamingPreferences::CSK_OFF);
+    if (shouldGrab && m_CaptureSystemKeysMode ==
+            static_cast<int>(StreamingPreferences::CSK_FULLSCREEN) &&
+            (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0) {
+        shouldGrab = false;
+    }
+
+    bool* active = nullptr;
+    const bool isPrimary = m_Runtime != nullptr &&
+            window == m_Runtime->streamWindow();
+    if (isPrimary) {
+        active = &m_PrimaryKeyboardGrabActive;
+    }
+    else if (window == m_SecondaryWindow) {
+        active = &m_SecondaryKeyboardGrabActive;
+    }
+    if (active == nullptr) {
+        return;
+    }
+
+    const bool wasActive = *active;
+#if SDL_VERSION_ATLEAST(2, 0, 15)
+    // Reapply on focus gain because some SDL platform adapters ignore a grab
+    // requested while the stream window is still hidden.
+    SDL_SetWindowKeyboardGrab(window, shouldGrab ? SDL_TRUE : SDL_FALSE);
+    qInfo().nospace()
+            << "[DEBUG-APPLE-CMD-CV-GRAB] window="
+            << SDL_GetWindowID(window)
+            << " requested=" << shouldGrab
+            << " reported=" << SDL_GetWindowKeyboardGrab(window)
+            << " focus=" << (SDL_GetKeyboardFocus() == window);
+#else
+    shouldGrab = false;
+#endif
+    *active = shouldGrab;
+#ifdef Q_OS_WIN
+    if (m_WindowsKeyboardHook != nullptr) {
+        m_WindowsKeyboardHook->update(
+                m_Runtime != nullptr ? m_Runtime->streamWindow() : nullptr,
+                m_PrimaryKeyboardGrabActive,
+                m_SecondaryWindow,
+                m_SecondaryKeyboardGrabActive);
+    }
+#endif
+    if (wasActive == shouldGrab) {
+        return;
+    }
+    qInfo().nospace()
+            << "Apple Screen Sharing system-key capture "
+            << (shouldGrab ? "enabled" : "disabled")
+            << " for " << (isPrimary ? "primary" : "secondary")
+            << " window";
+}
+
+bool AppleScreenSharingSession::systemKeyCaptureRequestedForWindow(
+        quint32 windowId) const
+{
+    SDL_Window* primary = m_Runtime != nullptr
+            ? m_Runtime->streamWindow() : nullptr;
+    if (primary != nullptr && SDL_GetWindowID(primary) == windowId) {
+        // A Win key can move Windows focus before the queued SDL event is
+        // consumed. The event's window ID plus our requested grab is the stable
+        // ownership signal; focus loss separately releases every remote key.
+        return m_PrimaryKeyboardGrabActive;
+    }
+    if (m_SecondaryWindow != nullptr &&
+            SDL_GetWindowID(m_SecondaryWindow) == windowId) {
+        return m_SecondaryKeyboardGrabActive;
+    }
+    return false;
 }
 
 void AppleScreenSharingSession::queueControl(AppleOutboundControl control)
@@ -3363,6 +3717,14 @@ void AppleScreenSharingSession::renderLatestFrames()
 
 void AppleScreenSharingSession::destroyPresentation()
 {
+#ifdef Q_OS_WIN
+    m_WindowsKeyboardHook.reset();
+#endif
+    releaseAllKeys();
+#ifdef Q_OS_WIN
+    // Restore SDL's normal application behavior outside a streaming session.
+    SDL_SetHint(SDL_HINT_WINDOWS_NO_CLOSE_ON_ALT_F4, "0");
+#endif
     if (m_EventTimer != nullptr) {
         m_EventTimer->stop();
         m_EventTimer->deleteLater();
@@ -3408,6 +3770,8 @@ void AppleScreenSharingSession::destroyPresentation()
     m_SecondaryTileHeights.clear();
     m_SecondaryCanvas = {};
     m_SecondaryMediaReady = false;
+    m_PrimaryKeyboardGrabActive = false;
+    m_SecondaryKeyboardGrabActive = false;
     m_PerformanceOverlayTexture = nullptr;
     m_PerformanceOverlaySize = {};
     m_Renderer = nullptr;

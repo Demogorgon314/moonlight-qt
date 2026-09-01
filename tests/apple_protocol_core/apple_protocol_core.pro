@@ -36,6 +36,7 @@ SOURCES += \
     ../../app/backend/apple/applefeaturegate.cpp \
     ../../app/backend/apple/appleconnectionstore.cpp \
     ../../app/backend/apple/applecredentialstore.cpp \
+    ../../app/backend/apple/applekeyboardmapper.cpp \
     ../../app/backend/apple/appleprotocol.cpp \
     ../../app/backend/apple/applecontrolfeatures.cpp \
     ../../app/backend/apple/appleaudiostream.cpp \
@@ -51,6 +52,7 @@ HEADERS += \
     ../../app/backend/apple/applefeaturegate.h \
     ../../app/backend/apple/appleconnectionstore.h \
     ../../app/backend/apple/applecredentialstore.h \
+    ../../app/backend/apple/applekeyboardmapper.h \
     ../../app/backend/apple/appleprotocol.h \
     ../../app/backend/apple/applecontrolfeatures.h \
     ../../app/backend/apple/appleaudiostream.h \

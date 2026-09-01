@@ -25,6 +25,11 @@ class QTimer;
 class AppleHighPerformanceSessionTask;
 class AppleSecondaryVideoStream;
 class ApplePresentationThread;
+class AppleKeyboardMapper;
+#ifdef Q_OS_WIN
+class AppleWindowsKeyboardHook;
+#endif
+struct AppleRemoteKeyEvent;
 struct SDL_Renderer;
 struct SDL_Texture;
 struct SDL_Cursor;
@@ -127,7 +132,15 @@ private:
                      double preciseDeltaY,
                      bool flipped,
                      int displayIndex);
-    void queueKey(bool isDown, int sdlKeycode, int sdlScancode);
+    void queueKey(bool isDown,
+                  int sdlKeycode,
+                  int sdlScancode,
+                  int sdlModifiers,
+                  bool systemKeyCaptureRequested);
+    void queueRemoteKey(const AppleRemoteKeyEvent& key);
+    void releaseAllKeys();
+    void updateKeyboardGrabState(SDL_Window* window);
+    bool systemKeyCaptureRequestedForWindow(quint32 windowId) const;
     void queueControl(AppleOutboundControl control);
     std::optional<QRect> restoredWindowGeometry(AppleWindowRole role) const;
     void captureWindowGeometry(SDL_Window* window, AppleWindowRole role);
@@ -143,6 +156,7 @@ private:
     QThreadPool m_WorkerPool;
     QPointer<QQuickWindow> m_QtWindow;
     std::unique_ptr<LocalStreamRuntime> m_Runtime;
+    std::unique_ptr<AppleKeyboardMapper> m_KeyboardMapper;
     AppleWindowPlacementStore m_WindowPlacementStore;
     std::optional<QRect> m_PrimaryWindowGeometry;
     std::optional<QRect> m_SecondaryWindowGeometry;
@@ -233,4 +247,10 @@ private:
     bool m_MediaReady = false;
     bool m_SecondaryMediaReady = false;
     bool m_NativeEventFilterInstalled = false;
+    int m_CaptureSystemKeysMode = 0;
+    bool m_PrimaryKeyboardGrabActive = false;
+    bool m_SecondaryKeyboardGrabActive = false;
+#ifdef Q_OS_WIN
+    std::unique_ptr<AppleWindowsKeyboardHook> m_WindowsKeyboardHook;
+#endif
 };
