@@ -100,6 +100,23 @@ struct AppleInputEncryptionRequest
     }
 };
 
+struct AppleScrollWheelEvent
+{
+    qint16 deltaX = 0;
+    qint16 deltaY = 0;
+    qint16 deltaZ = 0;
+    qint32 fixedDeltaX = 0;
+    qint32 fixedDeltaY = 0;
+    qint32 fixedDeltaZ = 0;
+    qint32 pointDeltaX = 0;
+    qint32 pointDeltaY = 0;
+    qint32 pointDeltaZ = 0;
+    quint32 scrollPhase = 0;
+    quint32 momentumPhase = 0;
+    quint32 scrollCount = 0;
+    quint32 flags = 0;
+};
+
 namespace AppleMediaWire {
 
 AppleMediaOffers createOffers(bool audioEnabled,
@@ -127,6 +144,15 @@ QByteArray autoFramebufferUpdate();
 QByteArray controlMode(bool observing);
 QByteArray selectCombinedDisplays();
 QByteArray selectDisplay(quint32 displayId);
+AppleScrollWheelEvent scrollWheelDeltas(qint32 deltaX,
+                                        qint32 deltaY,
+                                        double preciseDeltaX,
+                                        double preciseDeltaY,
+                                        bool flipped,
+                                        quint32 scrollCount);
+QByteArray scrollWheelEvent(const AppleScrollWheelEvent& event,
+                            quint16 x,
+                            quint16 y);
 
 bool parsePorts(const QByteArray& answer, AppleMediaPorts* ports);
 bool parseCanvas(const QByteArray& answer, AppleCanvas* canvas);

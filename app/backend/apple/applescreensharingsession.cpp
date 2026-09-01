@@ -685,6 +685,7 @@ private:
     bool runConnectionAttempt(QString* error)
     {
         m_Session->m_ReconnectRequested.store(false);
+        m_Session->m_NativePrecisionScrollSupported.store(false);
         AppleTcpTransport tcp;
         AppleAuthenticator authenticator;
         AppleAuthenticatedControl authenticated;
@@ -711,6 +712,14 @@ private:
                 &authenticated,
                 m_Cancelled,
                 error);
+        if (succeeded) {
+            const bool precisionScroll =
+                    authenticated.supportsServerCommand(23);
+            m_Session->m_NativePrecisionScrollSupported.store(
+                    precisionScroll);
+            qInfo() << "Apple Screen Sharing native precision scrolling:"
+                    << (precisionScroll ? "supported" : "legacy fallback");
+        }
 
         AppleControlChannel control;
         if (succeeded) {
@@ -2411,14 +2420,28 @@ void AppleScreenSharingSession::pollSdlEvents()
             break;
         }
         case SDL_MOUSEWHEEL: {
+            const int displayIndex = displayIndexForWindow(
+                    event.wheel.windowID);
+            m_LastMouseX = event.wheel.mouseX;
+            m_LastMouseY = event.wheel.mouseY;
+            if (m_NativePrecisionScrollSupported.load()) {
+                queueScroll(
+                        m_LastMouseX,
+                        m_LastMouseY,
+                        event.wheel.x,
+                        event.wheel.y,
+                        event.wheel.preciseX,
+                        event.wheel.preciseY,
+                        event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED,
+                        displayIndex);
+                break;
+            }
             quint8 wheel = 0;
             if (event.wheel.y > 0) wheel |= 1 << 3;
             if (event.wheel.y < 0) wheel |= 1 << 4;
             if (event.wheel.x > 0) wheel |= 1 << 6;
             if (event.wheel.x < 0) wheel |= 1 << 5;
             if (wheel != 0) {
-                const int displayIndex = displayIndexForWindow(
-                        event.wheel.windowID);
                 queuePointer(m_LastMouseX, m_LastMouseY, 0, wheel,
                              displayIndex);
                 queuePointer(m_LastMouseX, m_LastMouseY, 0, 0,
@@ -2473,6 +2496,58 @@ void AppleScreenSharingSession::pollSdlEvents()
             break;
         }
     }
+}
+
+void AppleScreenSharingSession::queueScroll(
+        int windowX,
+        int windowY,
+        qint32 deltaX,
+        qint32 deltaY,
+        double preciseDeltaX,
+        double preciseDeltaY,
+        bool flipped,
+        int displayIndex)
+{
+    if (m_Observing.load()) {
+        return;
+    }
+    const auto point = remotePoint(windowX, windowY, displayIndex);
+    if (!point.has_value()) {
+        return;
+    }
+    std::optional<quint32> displayId;
+    if (m_DisplayCount > 1 &&
+            displayIndex >= 0 && displayIndex < m_MediaDisplayIds.size()) {
+        displayId = m_MediaDisplayIds.at(displayIndex);
+    }
+
+    QMutexLocker locker(&m_InputMutex);
+    if (displayId != m_SelectedInputDisplayId) {
+        AppleOutboundControl selection;
+        selection.kind = AppleOutboundControl::Kind::Message;
+        selection.queuedAtNanoseconds = steadyNanoseconds();
+        selection.message = displayId.has_value()
+                ? AppleMediaWire::selectDisplay(*displayId)
+                : AppleMediaWire::selectCombinedDisplays();
+        m_PendingControls.append(std::move(selection));
+        m_SelectedInputDisplayId = displayId;
+    }
+    AppleOutboundControl input;
+    input.kind = AppleOutboundControl::Kind::Message;
+    input.queuedAtNanoseconds = steadyNanoseconds();
+    input.message = AppleMediaWire::scrollWheelEvent(
+            AppleMediaWire::scrollWheelDeltas(
+                    deltaX,
+                    deltaY,
+                    preciseDeltaX,
+                    preciseDeltaY,
+                    flipped,
+                    ++m_ScrollEventCount),
+            point->first,
+            point->second);
+    m_PendingControls.append(std::move(input));
+    recordMaximum(m_MaxPendingControlDepth,
+                  static_cast<quint64>(m_PendingControls.size()));
 }
 
 void AppleScreenSharingSession::queuePointer(

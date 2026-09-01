@@ -390,6 +390,9 @@ bool AppleAuthenticator::authenticate(
         return false;
     }
     QByteArray plainName = nameData;
+    bool hasEnhancedServerInfo = false;
+    quint32 serverFlags = 0;
+    QByteArray serverCommandBitmap;
     if (nameData.size() >= 2 && nameData.at(0) == 0 && nameData.at(1) == 0) {
         if (nameData.size() < 22) {
             setError(error, QCoreApplication::translate(
@@ -397,6 +400,16 @@ bool AppleAuthenticator::authenticate(
                     "The Mac returned an invalid display description."));
             return false;
         }
+        bool flagsOk = false;
+        serverFlags = AppleWire::readUInt32(nameData, 2, &flagsOk);
+        if (!flagsOk) {
+            setError(error, QCoreApplication::translate(
+                    "AppleAuthenticator",
+                    "The Mac returned an invalid display description."));
+            return false;
+        }
+        hasEnhancedServerInfo = true;
+        serverCommandBitmap = nameData.mid(6, 16);
         plainName = nameData.mid(22);
     }
     const QString serverName = QString::fromUtf8(plainName);
@@ -407,6 +420,9 @@ bool AppleAuthenticator::authenticate(
     if (result != nullptr) {
         result->masterKey = masterKey;
         result->serverName = serverName;
+        result->serverCommandBitmap = serverCommandBitmap;
+        result->serverFlags = serverFlags;
+        result->hasEnhancedServerInfo = hasEnhancedServerInfo;
         result->width = width;
         result->height = height;
     }
@@ -468,6 +484,20 @@ bool AppleAuthenticator::prepareHostIdentity(
                 QCryptographicHash::hash(spki, QCryptographicHash::Sha256).toHex());
     }
     return true;
+}
+
+bool AppleAuthenticatedControl::supportsServerCommand(quint8 command) const
+{
+    if (serverCommandBitmap.size() != 16) {
+        return false;
+    }
+    const int byteIndex = command >> 3;
+    if (byteIndex >= serverCommandBitmap.size()) {
+        return false;
+    }
+    const quint8 mask = static_cast<quint8>(
+            1U << (7 - (command & 7)));
+    return (static_cast<quint8>(serverCommandBitmap.at(byteIndex)) & mask) != 0;
 }
 
 bool AppleControlChannel::negotiate(AppleByteTransport& transport,

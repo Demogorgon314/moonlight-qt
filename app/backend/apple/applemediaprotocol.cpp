@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -935,6 +936,76 @@ QByteArray selectDisplay(quint32 displayId)
 {
     QByteArray message = QByteArray::fromHex("0d00000000000000");
     writeUInt32(message, 4, displayId);
+    return message;
+}
+
+AppleScrollWheelEvent scrollWheelDeltas(qint32 deltaX,
+                                        qint32 deltaY,
+                                        double preciseDeltaX,
+                                        double preciseDeltaY,
+                                        bool flipped,
+                                        quint32 scrollCount)
+{
+    const qint64 direction = flipped ? -1 : 1;
+    const auto clampInt16 = [](qint64 value) {
+        return static_cast<qint16>(std::clamp<qint64>(
+                value, std::numeric_limits<qint16>::min(),
+                std::numeric_limits<qint16>::max()));
+    };
+    const auto scaledInt32 = [](double value, double scale) {
+        if (!std::isfinite(value)) {
+            return qint32{0};
+        }
+        const long double scaled = static_cast<long double>(value) * scale;
+        const long double bounded = std::clamp<long double>(
+                scaled, std::numeric_limits<qint32>::min(),
+                std::numeric_limits<qint32>::max());
+        return static_cast<qint32>(std::llround(bounded));
+    };
+    const auto effectivePrecision = [](double precise, qint32 integral) {
+        return std::isfinite(precise) && (precise != 0.0 || integral == 0)
+                ? precise : static_cast<double>(integral);
+    };
+
+    const double normalizedPreciseX = effectivePrecision(
+            preciseDeltaX, deltaX) * direction;
+    const double normalizedPreciseY = effectivePrecision(
+            preciseDeltaY, deltaY) * direction;
+    AppleScrollWheelEvent event;
+    event.deltaX = clampInt16(static_cast<qint64>(deltaX) * direction);
+    event.deltaY = clampInt16(static_cast<qint64>(deltaY) * direction);
+    event.fixedDeltaX = scaledInt32(normalizedPreciseX, 65536.0);
+    event.fixedDeltaY = scaledInt32(normalizedPreciseY, 65536.0);
+    event.pointDeltaX = scaledInt32(normalizedPreciseX, 10.0);
+    event.pointDeltaY = scaledInt32(normalizedPreciseY, 10.0);
+    event.scrollCount = scrollCount;
+    return event;
+}
+
+QByteArray scrollWheelEvent(const AppleScrollWheelEvent& event,
+                            quint16 x,
+                            quint16 y)
+{
+    QByteArray message(58, '\0');
+    message[0] = char(0x17);
+    writeUInt16(message, 2, 54);
+    writeUInt16(message, 4, 1);
+    writeUInt16(message, 6, 11);
+    writeUInt16(message, 8, static_cast<quint16>(event.deltaX));
+    writeUInt16(message, 10, static_cast<quint16>(event.deltaY));
+    writeUInt16(message, 12, static_cast<quint16>(event.deltaZ));
+    writeUInt32(message, 14, static_cast<quint32>(event.fixedDeltaX));
+    writeUInt32(message, 18, static_cast<quint32>(event.fixedDeltaY));
+    writeUInt32(message, 22, static_cast<quint32>(event.fixedDeltaZ));
+    writeUInt32(message, 26, static_cast<quint32>(event.pointDeltaX));
+    writeUInt32(message, 30, static_cast<quint32>(event.pointDeltaY));
+    writeUInt32(message, 34, static_cast<quint32>(event.pointDeltaZ));
+    writeUInt32(message, 38, event.scrollPhase);
+    writeUInt32(message, 42, event.momentumPhase);
+    writeUInt32(message, 46, event.scrollCount);
+    writeUInt32(message, 50, event.flags);
+    writeUInt16(message, 54, x);
+    writeUInt16(message, 56, y);
     return message;
 }
 

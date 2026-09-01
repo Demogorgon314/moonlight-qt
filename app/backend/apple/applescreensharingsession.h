@@ -107,6 +107,14 @@ private:
     void updatePerformanceOverlayTexture();
     void queuePointer(int windowX, int windowY, int clickCount = 0,
                       quint8 extraButtons = 0, int displayIndex = 0);
+    void queueScroll(int windowX,
+                     int windowY,
+                     qint32 deltaX,
+                     qint32 deltaY,
+                     double preciseDeltaX,
+                     double preciseDeltaY,
+                     bool flipped,
+                     int displayIndex);
     void queueKey(bool isDown, int sdlKeycode, int sdlScancode);
     void queueControl(AppleOutboundControl control);
     std::optional<QPair<quint16, quint16>> remotePoint(int windowX,
@@ -154,6 +162,7 @@ private:
     int m_LastMouseX = 0;
     int m_LastMouseY = 0;
     quint32 m_PreviousInputTimestamp = 0;
+    quint32 m_ScrollEventCount = 0;
     quint64 m_PresentationWindowStartedAt = 0;
     quint64 m_PresentationCount = 0;
     quint64 m_PresentedTileUpdates = 0;
@@ -187,6 +196,7 @@ private:
     std::atomic_bool m_SecondaryPresentationNeeded{true};
     std::atomic_bool m_Observing{false};
     std::atomic_bool m_ControlReady{false};
+    std::atomic_bool m_NativePrecisionScrollSupported{false};
     std::atomic_bool m_AudioMuted{false};
     std::atomic_bool m_EverMediaReady{false};
     std::atomic_bool m_ReconnectRequested{false};

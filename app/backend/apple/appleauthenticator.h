@@ -72,8 +72,13 @@ struct AppleAuthenticatedControl
 {
     QByteArray masterKey;
     QString serverName;
+    QByteArray serverCommandBitmap;
+    quint32 serverFlags = 0;
+    bool hasEnhancedServerInfo = false;
     quint16 width = 0;
     quint16 height = 0;
+
+    bool supportsServerCommand(quint8 command) const;
 };
 
 class AppleAuthenticator

@@ -378,12 +378,16 @@ void testFormalAuthenticationTranscript()
     transport.incoming.append(QByteArray(4, '\0'));
     transport.incoming.append(QByteArray(4, '\0'));
     const QByteArray serverName = QByteArrayLiteral("Test Mac");
+    QByteArray serverCommands(16, '\0');
+    serverCommands[2] = 0x01;
+    QByteArray serverNameData = QByteArray::fromHex("000001020304") +
+            serverCommands + serverName;
     QByteArray serverHeader(24, '\0');
     writeUInt16(serverHeader, 0, 1440);
     writeUInt16(serverHeader, 2, 900);
-    writeUInt32(serverHeader, 20, static_cast<quint32>(serverName.size()));
+    writeUInt32(serverHeader, 20, static_cast<quint32>(serverNameData.size()));
     transport.incoming.append(serverHeader);
-    transport.incoming.append(serverName);
+    transport.incoming.append(serverNameData);
 
     const QString fingerprint = QString::fromLatin1(
             QCryptographicHash::hash(spki, QCryptographicHash::Sha256).toHex());
@@ -413,6 +417,11 @@ void testFormalAuthenticationTranscript()
     require(result.masterKey.size() == 16 && result.width == 1440 &&
             result.height == 900 && result.serverName == QStringLiteral("Test Mac"),
             "authenticated control state must retain negotiated server data");
+    require(result.hasEnhancedServerInfo && result.serverFlags == 0x01020304 &&
+            result.serverCommandBitmap == serverCommands &&
+            result.supportsServerCommand(23) &&
+            !result.supportsServerCommand(22),
+            "enhanced ServerInit must retain the advertised server command bitmap");
     require(transport.writes.size() == 4 &&
             transport.writes.at(2).size() == 398 &&
             AppleWire::readUInt32(transport.writes.at(2), 0) == 394 &&
@@ -820,6 +829,46 @@ void testEncryptedInputWireBoundary()
     require(inputMessage.size() == 18 && inputMessage.startsWith(key.header) &&
             inputMessage.mid(2) != key.plaintextBlock,
             "the inner input block must use the record content key without consuming record order");
+}
+
+void testNativePrecisionScrollWireAndDeltas()
+{
+    AppleScrollWheelEvent event;
+    event.deltaX = -1;
+    event.deltaY = 2;
+    event.deltaZ = -3;
+    event.fixedDeltaX = 0x01020304;
+    event.fixedDeltaY = -2;
+    event.pointDeltaX = 0x11223344;
+    event.pointDeltaY = -1;
+    event.pointDeltaZ = 4;
+    event.scrollPhase = 1;
+    event.momentumPhase = 2;
+    event.scrollCount = 3;
+    event.flags = 0x12345678;
+    require(AppleMediaWire::scrollWheelEvent(event, 0x9abc, 0xdef0) ==
+                    QByteArray::fromHex(
+                            "170000360001000bffff0002fffd"
+                            "01020304fffffffe00000000"
+                            "11223344ffffffff00000004"
+                            "00000001000000020000000312345678"
+                            "9abcdef0"),
+            "native precision scrolling must match the Swift Apple wire vector");
+
+    const AppleScrollWheelEvent mapped = AppleMediaWire::scrollWheelDeltas(
+            -3, 5, -2.5, 4.25, false, 7);
+    require(mapped.deltaX == -3 && mapped.deltaY == 5 &&
+            mapped.fixedDeltaX == -163840 && mapped.fixedDeltaY == 278528 &&
+            mapped.pointDeltaX == -25 && mapped.pointDeltaY == 43 &&
+            mapped.scrollCount == 7,
+            "SDL precision scrolling must preserve both tick magnitude and fractional deltas");
+
+    const AppleScrollWheelEvent flipped = AppleMediaWire::scrollWheelDeltas(
+            -3, 5, -2.5, 4.25, true, 8);
+    require(flipped.deltaX == 3 && flipped.deltaY == -5 &&
+            flipped.fixedDeltaX == 163840 && flipped.fixedDeltaY == -278528 &&
+            flipped.pointDeltaX == 25 && flipped.pointDeltaY == -43,
+            "SDL flipped scrolling must reverse every Apple delta representation");
 }
 
 void testHevcDecoderBackendFallback()
@@ -1283,6 +1332,8 @@ int main(int argc, char* argv[])
     testHevcGlobalDecodingOrderAdmission();
     std::fprintf(stderr, "testEncryptedInputWireBoundary\n");
     testEncryptedInputWireBoundary();
+    std::fprintf(stderr, "testNativePrecisionScrollWireAndDeltas\n");
+    testNativePrecisionScrollWireAndDeltas();
     std::fprintf(stderr, "testHevcDecoderBackendFallback\n");
     testHevcDecoderBackendFallback();
     std::fprintf(stderr, "testScaledTileBoundariesRemainContiguous\n");
