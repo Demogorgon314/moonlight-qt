@@ -2204,7 +2204,9 @@ SDL_Window* AppleScreenSharingSession::cursorWindow() const
     SDL_Window* primaryWindow = m_Runtime != nullptr
             ? m_Runtime->streamWindow() : nullptr;
     SDL_Window* focusedWindow = SDL_GetMouseFocus();
-    if (focusedWindow == primaryWindow || focusedWindow == m_SecondaryWindow) {
+    if (focusedWindow != nullptr &&
+            (focusedWindow == primaryWindow ||
+             focusedWindow == m_SecondaryWindow)) {
         return focusedWindow;
     }
     return primaryWindow != nullptr ? primaryWindow : m_SecondaryWindow;
