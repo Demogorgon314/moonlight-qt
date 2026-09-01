@@ -26,6 +26,7 @@ apple-screen-sharing {
         backend/apple/applemediatransport.cpp \
         backend/apple/applevideodecoder.cpp \
         backend/apple/appled3d11renderer.cpp \
+        backend/apple/applewindowplacement.cpp \
         backend/apple/appleprotocoladapter.cpp \
         backend/apple/applescreensharingsession.cpp
     HEADERS += \
@@ -40,6 +41,7 @@ apple-screen-sharing {
         backend/apple/applemediatransport.h \
         backend/apple/applevideodecoder.h \
         backend/apple/appled3d11renderer.h \
+        backend/apple/applewindowplacement.h \
         backend/apple/appleprotocoladapter.h \
         backend/apple/applescreensharingsession.h
     DISTFILES += backend/apple/LICENSE.ScreenSharingProtocol

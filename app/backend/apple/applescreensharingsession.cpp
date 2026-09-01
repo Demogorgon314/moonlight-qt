@@ -57,6 +57,25 @@ constexpr int PerformanceOverlayReservedCharacters = 96;
 constexpr quint32 FixedLanBandwidthKilobitsPerSecond = 60001;
 constexpr int MaximumReconnectAttempts = 3;
 
+QList<QRect> sdlUsableDisplayBounds()
+{
+    QList<QRect> displays;
+    const int displayCount = SDL_GetNumVideoDisplays();
+    for (int index = 0; index < displayCount; ++index) {
+        SDL_Rect bounds;
+        if (SDL_GetDisplayUsableBounds(index, &bounds) == 0 &&
+                bounds.w > 0 && bounds.h > 0) {
+            displays.append(QRect(bounds.x, bounds.y, bounds.w, bounds.h));
+        }
+    }
+    return displays;
+}
+
+const char* appleWindowRoleName(AppleWindowRole role)
+{
+    return role == AppleWindowRole::Primary ? "primary" : "secondary";
+}
+
 struct IntervalStatistics
 {
     double average = 0.0;
@@ -1723,6 +1742,8 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     }
     m_QtWindow = qtWindow;
     QSettings settings;
+    m_RememberWindowPlacement =
+            StreamingPreferences::get()->rememberWindowPosition;
     m_ScrollSpeedMultiplier = qBound(
             25, StreamingPreferences::get()->appleScrollSpeedPercent, 150) / 50.0;
     m_DisplayCount = qBound(1, m_Connection.virtualDisplayCount, 2);
@@ -1765,6 +1786,85 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
                          .arg(audioProbeError));
     }
     return true;
+}
+
+std::optional<QRect> AppleScreenSharingSession::restoredWindowGeometry(
+        AppleWindowRole role) const
+{
+    if (!m_RememberWindowPlacement) {
+        return std::nullopt;
+    }
+
+    const auto saved = m_WindowPlacementStore.load(role);
+    if (!saved.has_value()) {
+        return std::nullopt;
+    }
+    const QRect restored = AppleWindowPlacement::constrainToVisibleDisplays(
+            *saved, sdlUsableDisplayBounds());
+    if (!restored.isValid()) {
+        return std::nullopt;
+    }
+    qInfo().nospace()
+            << "Apple Screen Sharing restored " << appleWindowRoleName(role)
+            << " window=[" << restored.x() << "," << restored.y() << " "
+            << restored.width() << "x" << restored.height() << "]";
+    return restored;
+}
+
+void AppleScreenSharingSession::captureWindowGeometry(
+        SDL_Window* window,
+        AppleWindowRole role)
+{
+    if (!m_RememberWindowPlacement || window == nullptr) {
+        return;
+    }
+
+    const quint32 flags = SDL_GetWindowFlags(window);
+    if ((flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED |
+                  SDL_WINDOW_FULLSCREEN)) != 0) {
+        return;
+    }
+
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowPosition(window, &x, &y);
+    SDL_GetWindowSize(window, &width, &height);
+    const QRect geometry(x, y, width, height);
+    if (!geometry.isValid()) {
+        return;
+    }
+    if (role == AppleWindowRole::Primary) {
+        m_PrimaryWindowGeometry = geometry;
+    }
+    else {
+        m_SecondaryWindowGeometry = geometry;
+    }
+}
+
+void AppleScreenSharingSession::persistWindowGeometry(
+        SDL_Window* window,
+        AppleWindowRole role)
+{
+    if (!m_RememberWindowPlacement) {
+        return;
+    }
+    captureWindowGeometry(window, role);
+    const auto& geometry = role == AppleWindowRole::Primary
+            ? m_PrimaryWindowGeometry : m_SecondaryWindowGeometry;
+    if (!geometry.has_value()) {
+        return;
+    }
+    if (!m_WindowPlacementStore.save(role, *geometry)) {
+        qWarning() << "Could not save Apple Screen Sharing"
+                   << appleWindowRoleName(role) << "window placement";
+        return;
+    }
+    qInfo().nospace()
+            << "Apple Screen Sharing saved " << appleWindowRoleName(role)
+            << " window=[" << geometry->x() << "," << geometry->y() << " "
+            << geometry->width() << "x" << geometry->height() << "]";
 }
 
 void AppleScreenSharingSession::startSession()
@@ -1877,14 +1977,21 @@ void AppleScreenSharingSession::mediaReady(
             QMutexLocker locker(&m_FrameMutex);
             m_SecondaryCanvas = canvas;
         }
-        const int width = qBound(800, canvas.width, 1600);
-        const int height = qBound(450, canvas.height, 1000);
+        const auto restored = restoredWindowGeometry(AppleWindowRole::Secondary);
+        const int width = restored.has_value()
+                ? restored->width() : qBound(800, canvas.width, 1600);
+        const int height = restored.has_value()
+                ? restored->height() : qBound(450, canvas.height, 1000);
+        const int x = restored.has_value()
+                ? restored->x() : SDL_WINDOWPOS_CENTERED;
+        const int y = restored.has_value()
+                ? restored->y() : SDL_WINDOWPOS_CENTERED;
         const QByteArray title = tr("%1 — Apple Screen Sharing — Display 2")
                 .arg(m_Connection.displayName).toUtf8();
         m_SecondaryWindow = SDL_CreateWindow(
                 title.constData(),
-                SDL_WINDOWPOS_CENTERED,
-                SDL_WINDOWPOS_CENTERED,
+                x,
+                y,
                 width,
                 height,
                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
@@ -1895,6 +2002,7 @@ void AppleScreenSharingSession::mediaReady(
                     "Couldn’t create the second Apple Screen Sharing display window."));
             return;
         }
+        captureWindowGeometry(m_SecondaryWindow, AppleWindowRole::Secondary);
         QString rendererError;
         m_SecondaryD3D11Renderer = std::make_unique<AppleD3D11Renderer>();
         if (!m_SecondaryD3D11Renderer->initialize(
@@ -1925,12 +2033,19 @@ void AppleScreenSharingSession::mediaReady(
         return;
     }
     applyCanvas(canvas);
-    const int width = qBound(800, canvas.width, 1600);
-    const int height = qBound(450, canvas.height, 1000);
+    const auto restored = restoredWindowGeometry(AppleWindowRole::Primary);
+    const int width = restored.has_value()
+            ? restored->width() : qBound(800, canvas.width, 1600);
+    const int height = restored.has_value()
+            ? restored->height() : qBound(450, canvas.height, 1000);
+    const int x = restored.has_value()
+            ? restored->x() : SDL_WINDOWPOS_CENTERED;
+    const int y = restored.has_value()
+            ? restored->y() : SDL_WINDOWPOS_CENTERED;
     SDL_Window* window = m_Runtime->createStreamWindow(
             tr("%1 — Apple Screen Sharing").arg(m_Connection.displayName),
-            SDL_WINDOWPOS_CENTERED,
-            SDL_WINDOWPOS_CENTERED,
+            x,
+            y,
             width,
             height,
             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN);
@@ -1939,6 +2054,7 @@ void AppleScreenSharingSession::mediaReady(
         emit displayLaunchError(tr("Couldn’t create the Apple Screen Sharing video window."));
         return;
     }
+    captureWindowGeometry(window, AppleWindowRole::Primary);
     QString d3d11Error;
     m_D3D11Renderer = std::make_unique<AppleD3D11Renderer>();
     if (!m_D3D11Renderer->initialize(window, decoderDevice, &d3d11Error)) {
@@ -2476,14 +2592,25 @@ void AppleScreenSharingSession::pollSdlEvents()
                          event.key.keysym.scancode);
             }
             break;
-        case SDL_WINDOWEVENT:
+        case SDL_WINDOWEVENT: {
+            const int displayIndex = displayIndexForWindow(event.window.windowID);
+            if (event.window.event == SDL_WINDOWEVENT_MOVED ||
+                    event.window.event == SDL_WINDOWEVENT_RESTORED ||
+                    event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                SDL_Window* changedWindow = displayIndex == 1
+                        ? m_SecondaryWindow : m_Runtime->streamWindow();
+                captureWindowGeometry(
+                        changedWindow,
+                        displayIndex == 1 ? AppleWindowRole::Secondary
+                                          : AppleWindowRole::Primary);
+            }
             switch (event.window.event) {
             case SDL_WINDOWEVENT_EXPOSED:
             case SDL_WINDOWEVENT_SHOWN:
             case SDL_WINDOWEVENT_RESTORED:
             case SDL_WINDOWEVENT_SIZE_CHANGED:
                 m_PresentationNeeded.store(true);
-                if (displayIndexForWindow(event.window.windowID) == 1) {
+                if (displayIndex == 1) {
                     m_SecondaryPresentationNeeded.store(true);
                 }
                 else if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
@@ -2495,6 +2622,7 @@ void AppleScreenSharingSession::pollSdlEvents()
                 break;
             }
             break;
+        }
         default:
             break;
         }
@@ -2949,6 +3077,9 @@ void AppleScreenSharingSession::destroyPresentation()
     m_LastRenderLoopAtNanoseconds = 0;
     m_MaxRenderLoopGapMilliseconds = 0.0;
     m_MaxOverlayUpdateMilliseconds = 0.0;
+    persistWindowGeometry(m_Runtime ? m_Runtime->streamWindow() : nullptr,
+                          AppleWindowRole::Primary);
+    persistWindowGeometry(m_SecondaryWindow, AppleWindowRole::Secondary);
     m_D3D11Renderer.reset();
     m_SecondaryD3D11Renderer.reset();
     if (m_SecondaryWindow != nullptr) {

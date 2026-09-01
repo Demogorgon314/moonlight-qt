@@ -25,7 +25,9 @@ SOURCES += \
     ../../app/backend/apple/appleauthenticator.cpp \
     ../../app/backend/apple/applemediatransport.cpp \
     ../../app/backend/apple/applemediaprotocol.cpp \
-    ../../app/backend/apple/applevideodecoder.cpp
+    ../../app/backend/apple/applevideodecoder.cpp \
+    ../../app/backend/apple/applewindowplacement.cpp \
+    ../../app/settings/devicelocalsettings.cpp
 
 HEADERS += \
     ../../app/backend/apple/applefeaturegate.h \
@@ -37,4 +39,6 @@ HEADERS += \
     ../../app/backend/apple/appleauthenticator.h \
     ../../app/backend/apple/applemediatransport.h \
     ../../app/backend/apple/applemediaprotocol.h \
-    ../../app/backend/apple/applevideodecoder.h
+    ../../app/backend/apple/applevideodecoder.h \
+    ../../app/backend/apple/applewindowplacement.h \
+    ../../app/settings/devicelocalsettings.h

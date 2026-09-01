@@ -4,6 +4,7 @@
 #include "applecontrolfeatures.h"
 #include "applemediaprotocol.h"
 #include "applevideodecoder.h"
+#include "applewindowplacement.h"
 #include "streaming/streamsession.h"
 
 #include <QAbstractNativeEventFilter>
@@ -117,6 +118,9 @@ private:
                      int displayIndex);
     void queueKey(bool isDown, int sdlKeycode, int sdlScancode);
     void queueControl(AppleOutboundControl control);
+    std::optional<QRect> restoredWindowGeometry(AppleWindowRole role) const;
+    void captureWindowGeometry(SDL_Window* window, AppleWindowRole role);
+    void persistWindowGeometry(SDL_Window* window, AppleWindowRole role);
     std::optional<QPair<quint16, quint16>> remotePoint(int windowX,
                                                        int windowY,
                                                        int displayIndex = 0) const;
@@ -128,6 +132,9 @@ private:
     QThreadPool m_WorkerPool;
     QPointer<QQuickWindow> m_QtWindow;
     std::unique_ptr<LocalStreamRuntime> m_Runtime;
+    AppleWindowPlacementStore m_WindowPlacementStore;
+    std::optional<QRect> m_PrimaryWindowGeometry;
+    std::optional<QRect> m_SecondaryWindowGeometry;
     QList<QSize> m_InitialDisplaySizes;
     QTimer* m_EventTimer = nullptr;
     QTimer* m_DynamicResolutionTimer = nullptr;
@@ -191,6 +198,7 @@ private:
     quint64 m_LastDynamicResolutionRequestAt = 0;
     int m_DisplayCount = 1;
     bool m_DynamicResolutionEnabled = true;
+    bool m_RememberWindowPlacement = false;
     double m_ScrollSpeedMultiplier = 1.0;
     std::atomic_bool m_PerformanceOverlayUpdateNeeded{false};
     std::atomic_bool m_PresentationNeeded{true};

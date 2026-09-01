@@ -7,6 +7,7 @@
 #include "backend/apple/applemediatransport.h"
 #include "backend/apple/appleprotocol.h"
 #include "backend/apple/applevideodecoder.h"
+#include "backend/apple/applewindowplacement.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -879,6 +880,46 @@ void testNativePrecisionScrollWireAndDeltas()
             "Apple scroll speed must scale every delta representation consistently");
 }
 
+void testAppleStreamWindowPlacementPersistence()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(),
+            "temporary Apple window placement directory must be available");
+    const QString path = directory.filePath(QStringLiteral("placement.ini"));
+
+    AppleWindowPlacementStore store(path);
+    require(!store.load(AppleWindowRole::Primary).has_value(),
+            "Apple window placement must start empty");
+    require(store.save(AppleWindowRole::Primary, QRect(2100, 120, 1400, 900)),
+            "primary Apple window geometry must persist");
+    require(store.save(AppleWindowRole::Secondary, QRect(100, 80, 960, 640)),
+            "secondary Apple window geometry must persist independently");
+
+    AppleWindowPlacementStore reopened(path);
+    require(reopened.load(AppleWindowRole::Primary) ==
+                    std::optional<QRect>(QRect(2100, 120, 1400, 900)) &&
+            reopened.load(AppleWindowRole::Secondary) ==
+                    std::optional<QRect>(QRect(100, 80, 960, 640)),
+            "saved Apple window geometries must survive store recreation");
+
+    const QList<QRect> displays{
+        QRect(0, 0, 1920, 1040),
+        QRect(1920, 0, 2560, 1400),
+    };
+    require(AppleWindowPlacement::constrainToVisibleDisplays(
+                    QRect(4000, 1200, 1600, 1000), displays) ==
+                    QRect(2880, 400, 1600, 1000),
+            "a partially visible saved Apple window must remain on its display");
+    require(AppleWindowPlacement::constrainToVisibleDisplays(
+                    QRect(7000, 3000, 1600, 900), displays) ==
+                    QRect(320, 140, 1600, 900),
+            "an off-screen saved Apple window must return to a visible display");
+    require(AppleWindowPlacement::constrainToVisibleDisplays(
+                    QRect(200, 100, 100, 80), displays) ==
+                    QRect(200, 100, 320, 240),
+            "restored Apple windows must retain a usable minimum size");
+}
+
 void testHevcDecoderBackendFallback()
 {
     QString error;
@@ -1342,6 +1383,8 @@ int main(int argc, char* argv[])
     testEncryptedInputWireBoundary();
     std::fprintf(stderr, "testNativePrecisionScrollWireAndDeltas\n");
     testNativePrecisionScrollWireAndDeltas();
+    std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
+    testAppleStreamWindowPlacementPersistence();
     std::fprintf(stderr, "testHevcDecoderBackendFallback\n");
     testHevcDecoderBackendFallback();
     std::fprintf(stderr, "testScaledTileBoundariesRemainContiguous\n");
