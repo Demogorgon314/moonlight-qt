@@ -1,5 +1,7 @@
 #include "appled3d11renderer.h"
 
+#include "applecontrolfeatures.h"
+
 #include "SDL.h"
 #include "SDL_syswm.h"
 
@@ -841,12 +843,17 @@ AppleD3D11Renderer::RenderResult AppleD3D11Renderer::render(
     }
 
     if (implementation.overlayResourceView != nullptr) {
-        const float x0 = 16.0f * 2.0f / outputWidth - 1.0f;
-        const float x1 = (16.0f + implementation.overlayWidth) * 2.0f /
+        const QPoint overlayTopLeft = ApplePerformanceOverlayPolicy().topLeft(
+                QSize(outputWidth, outputHeight),
+                QSize(implementation.overlayWidth,
+                      implementation.overlayHeight));
+        const float x0 = overlayTopLeft.x() * 2.0f / outputWidth - 1.0f;
+        const float x1 = (overlayTopLeft.x() + implementation.overlayWidth) * 2.0f /
                         outputWidth - 1.0f;
-        const float y0 = 1.0f - 16.0f * 2.0f / outputHeight;
+        const float y0 = 1.0f - overlayTopLeft.y() * 2.0f / outputHeight;
         const float y1 = 1.0f -
-                (16.0f + implementation.overlayHeight) * 2.0f / outputHeight;
+                (overlayTopLeft.y() + implementation.overlayHeight) * 2.0f /
+                        outputHeight;
         const Vertex overlayVertices[] = {
             {x0, y0, 0.0f, 0.0f},
             {x0, y1, 0.0f, 1.0f},
@@ -887,13 +894,20 @@ AppleD3D11Renderer::RenderResult AppleD3D11Renderer::render(
     return RenderResult::Presented;
 }
 
-void AppleD3D11Renderer::clear()
+void AppleD3D11Renderer::clearOverlay()
 {
     if (m_Implementation != nullptr) {
-        m_Implementation->tiles.clear();
         m_Implementation->overlayTexture.Reset();
         m_Implementation->overlayResourceView.Reset();
         m_Implementation->overlayWidth = 0;
         m_Implementation->overlayHeight = 0;
     }
+}
+
+void AppleD3D11Renderer::clear()
+{
+    if (m_Implementation != nullptr) {
+        m_Implementation->tiles.clear();
+    }
+    clearOverlay();
 }

@@ -200,6 +200,13 @@ public:
     };
     Q_ENUM(ScreenCombinationMode);
 
+    enum PerformanceStatsStyle
+    {
+        PSS_MOONLIGHT = 0,
+        PSS_DETAILED = 1,
+    };
+    Q_ENUM(PerformanceStatsStyle);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -233,6 +240,7 @@ public:
     Q_PROPERTY(bool gamepadMouse MEMBER gamepadMouse NOTIFY gamepadMouseChanged)
     Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged)
     Q_PROPERTY(bool showPerformanceOverlay MEMBER showPerformanceOverlay NOTIFY showPerformanceOverlayChanged)
+    Q_PROPERTY(PerformanceStatsStyle performanceStatsStyle MEMBER performanceStatsStyle NOTIFY performanceStatsStyleChanged)
     Q_PROPERTY(AudioConfig audioConfig MEMBER audioConfig NOTIFY audioConfigChanged)
     Q_PROPERTY(VideoCodecConfig videoCodecConfig MEMBER videoCodecConfig NOTIFY videoCodecConfigChanged)
     Q_PROPERTY(bool enableHdr MEMBER enableHdr NOTIFY enableHdrChanged)
@@ -305,6 +313,7 @@ public:
     bool gamepadMouse;
     bool detectNetworkBlocking;
     bool showPerformanceOverlay;
+    PerformanceStatsStyle performanceStatsStyle;
     bool swapMouseButtons;
     bool swapWinAltKeys;
     bool muteOnFocusLoss;
@@ -384,6 +393,7 @@ signals:
     void gamepadMouseChanged();
     void detectNetworkBlockingChanged();
     void showPerformanceOverlayChanged();
+    void performanceStatsStyleChanged();
     void mouseButtonsChanged();
     void swapWinAltKeysChanged();
     void muteOnFocusLossChanged();

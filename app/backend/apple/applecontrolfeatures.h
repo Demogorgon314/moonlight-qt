@@ -3,10 +3,14 @@
 #include <QByteArray>
 #include <QHash>
 #include <QList>
+#include <QPoint>
 #include <QSize>
 #include <QString>
+#include <QStringList>
 
 #include <optional>
+
+class QMimeData;
 
 struct AppleCursorImage
 {
@@ -156,3 +160,68 @@ private:
     bool m_Eligible = false;
     bool m_HasLocalText = false;
 };
+
+// Keeps the local clipboard snapshot used by the Apple promise exchange. The
+// stream window is owned by SDL, so QClipboard notifications alone are not a
+// sufficient boundary when focus moves between native applications.
+class AppleLocalClipboardTracker
+{
+public:
+    std::optional<QString> dataChanged(const QMimeData* mime);
+    std::optional<QString> windowFocusGained(const QMimeData* mime);
+    void expectRemoteText(const QString& text);
+    void reset();
+    static bool containsFiles(const QMimeData* mime);
+
+private:
+    std::optional<QString> observe(const QMimeData* mime);
+
+    std::optional<QString> m_PendingRemoteText;
+    std::optional<QString> m_LastObservedText;
+};
+
+enum class ApplePerformanceOverlayStyle
+{
+    Moonlight = 0,
+    Detailed = 1,
+};
+
+struct ApplePerformanceOverlayPolicy
+{
+    bool visible = false;
+    ApplePerformanceOverlayStyle style =
+            ApplePerformanceOverlayStyle::Moonlight;
+
+    static ApplePerformanceOverlayPolicy fromSettings(
+            bool showPerformanceOverlay,
+            int styleValue);
+    QPoint topLeft(const QSize& outputSize,
+                   const QSize& overlaySize) const;
+};
+
+struct ApplePerformanceOverlayMetrics
+{
+    QSize canvasSize;
+    double receivedFramesPerSecond = 0.0;
+    double decodedFramesPerSecond = 0.0;
+    double presentedFramesPerSecond = 0.0;
+    double networkMegabitsPerSecond = 0.0;
+    double decodeMilliseconds = 0.0;
+    double renderMilliseconds = 0.0;
+    QString decoderBackend;
+    bool hasMediaSample = false;
+    bool hasPresentationSample = false;
+};
+
+struct ApplePerformanceOverlayTextRun
+{
+    QString text;
+    int pixelSize = 18;
+    bool bold = false;
+};
+
+QList<ApplePerformanceOverlayTextRun> appleMoonlightPerformanceRuns(
+        const ApplePerformanceOverlayMetrics& metrics);
+
+QStringList appleMoonlightPerformanceLines(
+        const ApplePerformanceOverlayMetrics& metrics);

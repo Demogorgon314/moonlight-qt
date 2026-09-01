@@ -38,6 +38,7 @@ public:
     bool outputSize(int* width, int* height) const;
     bool upload(const AppleDecodedTile& frame, QString* error = nullptr);
     bool uploadOverlay(const QImage& image, QString* error = nullptr);
+    void clearOverlay();
     RenderResult render(const AppleCanvas& canvas,
                         const QList<int>& tileHeights,
                         const QList<int>& tileBoundaries,

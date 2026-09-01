@@ -91,7 +91,9 @@ private:
                     void* decoderDevice,
                     int displayIndex = 0);
     void applyCanvas(const AppleCanvas& canvas);
-    void updatePerformanceStatistics(const QString& summary);
+    void updatePerformanceStatistics(
+            const QString& summary,
+            const ApplePerformanceOverlayMetrics& metrics);
     void updateSecondaryPerformanceStatistics(const QString& summary);
     void updateAudioStatistics(const QString& summary);
     void applyControlEvents(const AppleControlEvents& events);
@@ -101,6 +103,9 @@ private:
     void applyRemoteClipboardText(const QString& text);
     void updateControlSummary();
     void localClipboardChanged();
+    void refreshLocalClipboard(bool windowFocusGained);
+    void requestPerformanceOverlayUpdate();
+    void togglePerformanceOverlay();
     void toggleControlMode();
     void toggleAudioMute();
     void scheduleDynamicResolution(SDL_Window* window,
@@ -196,11 +201,14 @@ private:
     QString m_PerformancePresentationSummary;
     QString m_ControlSummary;
     QString m_AudioSummary;
+    ApplePerformanceOverlayMetrics m_PerformanceMetrics;
+    ApplePerformanceOverlayStyle m_PerformanceOverlayStyle =
+            ApplePerformanceOverlayStyle::Moonlight;
     AppleCursorStore m_RemoteCursorStore;
     SDL_Cursor* m_ActiveRemoteCursor = nullptr;
     double m_ActiveRemoteCursorScale = 0.0;
     quint64 m_RemoteCursorUpdateCount = 0;
-    std::optional<QString> m_PendingRemoteClipboardText;
+    AppleLocalClipboardTracker m_LocalClipboardTracker;
     QSize m_PendingDynamicResolution;
     QSize m_LastRequestedDynamicResolution;
     quint64 m_LastDynamicResolutionRequestAt = 0;
@@ -209,6 +217,7 @@ private:
     bool m_LiveResizing = false;
     bool m_RememberWindowPlacement = false;
     double m_ScrollSpeedMultiplier = 1.0;
+    std::atomic_bool m_PerformanceOverlayVisible{false};
     std::atomic_bool m_PerformanceOverlayUpdateNeeded{false};
     std::atomic_bool m_PresentationNeeded{true};
     std::atomic_bool m_SecondaryPresentationNeeded{true};

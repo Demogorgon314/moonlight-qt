@@ -13,11 +13,13 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QFile>
+#include <QMimeData>
 #include <QScopeGuard>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUdpSocket>
+#include <QUrl>
 
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
@@ -1413,6 +1415,99 @@ void testStageFourTextOnlyClipboardExchange()
             "remote clipboard changes must not fetch while observing");
 }
 
+void testLocalClipboardRefreshesWhenStreamWindowRegainsFocus()
+{
+    AppleLocalClipboardTracker tracker;
+    QMimeData initial;
+    initial.setText(QStringLiteral("initial"));
+    require(tracker.dataChanged(&initial) ==
+                    std::optional<QString>(QStringLiteral("initial")),
+            "a local clipboard notification must publish its text");
+
+    // Native clipboard ownership can change while the SDL stream window is
+    // inactive without Qt delivering QClipboard::dataChanged. Swift samples
+    // NSPasteboard when the session window becomes key, so the Windows seam
+    // must recover the latest value at the equivalent focus boundary.
+    QMimeData changedWithoutNotification;
+    changedWithoutNotification.setText(QStringLiteral("copied while unfocused"));
+    require(tracker.windowFocusGained(&changedWithoutNotification) ==
+                    std::optional<QString>(
+                            QStringLiteral("copied while unfocused")),
+            "refocusing the stream window must recover a missed local clipboard change");
+
+    tracker.expectRemoteText(QStringLiteral("remote"));
+    QMimeData remoteWrite;
+    remoteWrite.setText(QStringLiteral("remote"));
+    require(!tracker.dataChanged(&remoteWrite).has_value(),
+            "a remote clipboard write must not be advertised back to the Mac");
+
+    QMimeData localFile;
+    localFile.setText(QStringLiteral("C:/private.txt"));
+    localFile.setUrls({QUrl::fromLocalFile(QStringLiteral("C:/private.txt"))});
+    require(!tracker.windowFocusGained(&localFile).has_value(),
+            "refocusing the stream window must not turn a file clipboard into text");
+}
+
+void testApplePerformanceOverlayFollowsSharedSettingsAndPlacement()
+{
+    const ApplePerformanceOverlayPolicy hidden =
+            ApplePerformanceOverlayPolicy::fromSettings(false, 0);
+    require(!hidden.visible,
+            "the shared performance-overlay switch must hide Apple stream metrics");
+
+    const ApplePerformanceOverlayPolicy moonlight =
+            ApplePerformanceOverlayPolicy::fromSettings(true, 0);
+    require(moonlight.visible &&
+                    moonlight.style == ApplePerformanceOverlayStyle::Moonlight,
+            "Apple metrics must expose the Moonlight-compatible compact style");
+    require(moonlight.topLeft(QSize(1920, 1080), QSize(420, 180)) ==
+                    QPoint(750, 0),
+            "Apple metrics must use Moonlight's Windows top-center placement");
+
+    const ApplePerformanceOverlayPolicy detailed =
+            ApplePerformanceOverlayPolicy::fromSettings(true, 1);
+    require(detailed.visible &&
+                    detailed.style == ApplePerformanceOverlayStyle::Detailed,
+            "Apple metrics must expose the detailed diagnostic style");
+
+    ApplePerformanceOverlayMetrics metrics;
+    metrics.canvasSize = QSize(3840, 2160);
+    metrics.receivedFramesPerSecond = 59.8;
+    metrics.decodedFramesPerSecond = 59.7;
+    metrics.presentedFramesPerSecond = 59.6;
+    metrics.networkMegabitsPerSecond = 42.3;
+    metrics.decodeMilliseconds = 0.42;
+    metrics.renderMilliseconds = 0.18;
+    metrics.decoderBackend = QStringLiteral("D3D11VA");
+    metrics.hasMediaSample = true;
+    metrics.hasPresentationSample = true;
+    const QStringList compactLines = appleMoonlightPerformanceLines(metrics);
+    require(compactLines.size() == 1 &&
+                    compactLines.at(0).contains(
+                            QStringLiteral(
+                                    "3840x2160@60 HEVC 4:4:4/D3D11VA  FPS 59.8 Rx · 59.7 De · 59.6 Rd")) &&
+                    compactLines.at(0).contains(
+                            QStringLiteral(
+                                    "Network Video UDP 42.3 Mb/s")) &&
+                    compactLines.at(0).contains(
+                            QStringLiteral(
+                                    "Render 0.18 ms · Decode 0.42 ms")),
+            "Moonlight-style Apple metrics must remain on Moonlight's single rendered row");
+    const QList<ApplePerformanceOverlayTextRun> compactRuns =
+            appleMoonlightPerformanceRuns(metrics);
+    require(std::any_of(compactRuns.cbegin(), compactRuns.cend(),
+                        [](const ApplePerformanceOverlayTextRun& run) {
+                            return run.text == QStringLiteral("Rx") &&
+                                    run.pixelSize == 14 && !run.bold;
+                        }) &&
+                    std::any_of(compactRuns.cbegin(), compactRuns.cend(),
+                                [](const ApplePerformanceOverlayTextRun& run) {
+                                    return run.text == QStringLiteral("0.18") &&
+                                            run.pixelSize == 18 && run.bold;
+                                }),
+            "Moonlight-style Apple metrics must preserve Moonlight's label sizing and value emphasis");
+}
+
 void testStageFourAacEldAudioContract()
 {
     QByteArray audio(12, '\0');
@@ -1521,6 +1616,10 @@ int main(int argc, char* argv[])
     testRemoteCursorCacheMatchesSwiftFallbacks();
     std::fprintf(stderr, "testStageFourTextOnlyClipboardExchange\n");
     testStageFourTextOnlyClipboardExchange();
+    std::fprintf(stderr, "testLocalClipboardRefreshesWhenStreamWindowRegainsFocus\n");
+    testLocalClipboardRefreshesWhenStreamWindowRegainsFocus();
+    std::fprintf(stderr, "testApplePerformanceOverlayFollowsSharedSettingsAndPlacement\n");
+    testApplePerformanceOverlayFollowsSharedSettingsAndPlacement();
     std::fprintf(stderr, "testStageFourAacEldAudioContract\n");
     testStageFourAacEldAudioContract();
     std::fprintf(stderr, "testD3d11PresentationUsesPerSwapChainLowLatencyWait\n");

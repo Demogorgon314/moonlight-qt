@@ -690,6 +690,19 @@ Column {
             checked: StreamingPreferences.showPerformanceOverlay
             onToggled: function(value) { StreamingPreferences.showPerformanceOverlay = value }
         }
+
+        ChoiceRow {
+            title: qsTr("Apple performance stats style")
+            description: qsTr("Use Moonlight's compact layout or show the full Apple media and presentation diagnostics.")
+            controlEnabled: StreamingPreferences.showPerformanceOverlay
+            selectedValue: StreamingPreferences.performanceStatsStyle
+            onValueActivated: function(value) { StreamingPreferences.performanceStatsStyle = value }
+
+            model: ListModel {
+                ListElement { text: qsTr("Moonlight style"); val: StreamingPreferences.PSS_MOONLIGHT }
+                ListElement { text: qsTr("Detailed"); val: StreamingPreferences.PSS_DETAILED }
+            }
+        }
     }
 
     SettingsCard {

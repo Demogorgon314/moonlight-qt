@@ -3,6 +3,8 @@
 #include "appleprotocol.h"
 
 #include <QCoreApplication>
+#include <QMimeData>
+#include <QUrl>
 #include <QImage>
 
 #include <QtZlib/zlib.h>
@@ -760,6 +762,172 @@ QList<QByteArray> AppleTextClipboardExchange::fragments(const QByteArray& messag
         result.append(message.mid(offset, FragmentBytes));
     }
     return result;
+}
+
+std::optional<QString> AppleLocalClipboardTracker::dataChanged(
+        const QMimeData* mime)
+{
+    return observe(mime);
+}
+
+std::optional<QString> AppleLocalClipboardTracker::windowFocusGained(
+        const QMimeData* mime)
+{
+    return observe(mime);
+}
+
+void AppleLocalClipboardTracker::expectRemoteText(const QString& text)
+{
+    m_PendingRemoteText = text;
+}
+
+void AppleLocalClipboardTracker::reset()
+{
+    m_PendingRemoteText.reset();
+    m_LastObservedText.reset();
+}
+
+bool AppleLocalClipboardTracker::containsFiles(const QMimeData* mime)
+{
+    if (mime == nullptr) {
+        return false;
+    }
+    if (mime->hasUrls()) {
+        for (const QUrl& url : mime->urls()) {
+            if (url.isLocalFile()) {
+                return true;
+            }
+        }
+    }
+    static const QStringList fileMarkers = {
+        QStringLiteral("public.file-url"),
+        QStringLiteral("NSFilenamesPboardType"),
+        QStringLiteral("promised-file"),
+        QStringLiteral("FileNameW"),
+        QStringLiteral("FileGroupDescriptor"),
+        QStringLiteral("FileContents"),
+        QStringLiteral("Shell IDList Array"),
+    };
+    for (const QString& format : mime->formats()) {
+        for (const QString& marker : fileMarkers) {
+            if (format.contains(marker, Qt::CaseInsensitive)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::optional<QString> AppleLocalClipboardTracker::observe(
+        const QMimeData* mime)
+{
+    if (m_PendingRemoteText.has_value()) {
+        const bool isRemoteWrite = mime != nullptr && mime->hasText() &&
+                mime->text() == *m_PendingRemoteText;
+        m_PendingRemoteText.reset();
+        if (isRemoteWrite) {
+            m_LastObservedText = mime->text();
+            return std::nullopt;
+        }
+    }
+    if (mime == nullptr || !mime->hasText()) {
+        return std::nullopt;
+    }
+    if (containsFiles(mime)) {
+        return std::nullopt;
+    }
+
+    const QString text = mime->text();
+    if (m_LastObservedText == std::optional<QString>(text)) {
+        return std::nullopt;
+    }
+    m_LastObservedText = text;
+    return text;
+}
+
+ApplePerformanceOverlayPolicy ApplePerformanceOverlayPolicy::fromSettings(
+        bool showPerformanceOverlay,
+        int styleValue)
+{
+    ApplePerformanceOverlayPolicy policy;
+    policy.visible = showPerformanceOverlay;
+    policy.style = styleValue ==
+                    static_cast<int>(ApplePerformanceOverlayStyle::Detailed)
+            ? ApplePerformanceOverlayStyle::Detailed
+            : ApplePerformanceOverlayStyle::Moonlight;
+    return policy;
+}
+
+QPoint ApplePerformanceOverlayPolicy::topLeft(
+        const QSize& outputSize,
+        const QSize& overlaySize) const
+{
+    if (!outputSize.isValid() || !overlaySize.isValid()) {
+        return {};
+    }
+    return QPoint(qMax(0, (outputSize.width() - overlaySize.width()) / 2),
+                  0);
+}
+
+QList<ApplePerformanceOverlayTextRun> appleMoonlightPerformanceRuns(
+        const ApplePerformanceOverlayMetrics& metrics)
+{
+    const QString unavailable = QStringLiteral("—");
+    const QString received = metrics.hasMediaSample
+            ? QString::number(metrics.receivedFramesPerSecond, 'f', 1)
+            : unavailable;
+    const QString decoded = metrics.hasMediaSample
+            ? QString::number(metrics.decodedFramesPerSecond, 'f', 1)
+            : unavailable;
+    const QString presented = metrics.hasPresentationSample
+            ? QString::number(metrics.presentedFramesPerSecond, 'f', 1)
+            : unavailable;
+    const QString bandwidth = metrics.hasMediaSample
+            ? QString::number(metrics.networkMegabitsPerSecond, 'f', 1)
+            : unavailable;
+    const QString decode = metrics.hasMediaSample
+            ? QString::number(metrics.decodeMilliseconds, 'f', 2)
+            : unavailable;
+    const QString render = metrics.hasPresentationSample
+            ? QString::number(metrics.renderMilliseconds, 'f', 2)
+            : unavailable;
+    const QString backend = metrics.decoderBackend.isEmpty()
+            ? unavailable : metrics.decoderBackend;
+    const QString sourceFps = metrics.hasMediaSample
+            ? QString::number(metrics.receivedFramesPerSecond, 'f', 0)
+            : unavailable;
+
+    return {
+        {QStringLiteral("%1x%2@%3 HEVC 4:4:4/%4  FPS %5 ")
+                .arg(metrics.canvasSize.width())
+                .arg(metrics.canvasSize.height())
+                .arg(sourceFps)
+                .arg(backend)
+                .arg(received), 18, false},
+        {QStringLiteral("Rx"), 14, false},
+        {QStringLiteral(" · %1 ").arg(decoded), 18, false},
+        {QStringLiteral("De"), 14, false},
+        {QStringLiteral(" · %1 ").arg(presented), 18, false},
+        {QStringLiteral("Rd"), 14, false},
+        {QStringLiteral("  Network Video UDP "), 18, false},
+        {bandwidth, 18, true},
+        {QStringLiteral(" Mb/s  |  Render "), 16, false},
+        {render, 18, true},
+        {QStringLiteral(" ms · Decode "), 18, false},
+        {decode, 18, true},
+        {QStringLiteral(" ms"), 18, false},
+    };
+}
+
+QStringList appleMoonlightPerformanceLines(
+        const ApplePerformanceOverlayMetrics& metrics)
+{
+    QString row;
+    for (const ApplePerformanceOverlayTextRun& run :
+         appleMoonlightPerformanceRuns(metrics)) {
+        row.append(run.text);
+    }
+    return {row};
 }
 
 quint32 AppleTextClipboardExchange::nextSessionId()

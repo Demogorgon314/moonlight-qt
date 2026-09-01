@@ -15,6 +15,7 @@
 #include <QDebug>
 #include <QElapsedTimer>
 #include <QFont>
+#include <QFontDatabase>
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QImage>
@@ -31,7 +32,6 @@
 #include <QThread>
 #include <QThreadPool>
 #include <QTimer>
-#include <QUrl>
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
@@ -218,35 +218,77 @@ quint8 appleButtonForSdl(quint8 button)
     }
 }
 
-bool clipboardContainsFiles(const QMimeData* mime)
+QImage renderMoonlightPerformanceOverlay(
+        const QList<ApplePerformanceOverlayTextRun>& runs,
+        int outputWidth)
 {
-    if (mime == nullptr) {
-        return false;
+    if (runs.isEmpty() || outputWidth <= 0) {
+        return {};
     }
-    if (mime->hasUrls()) {
-        for (const QUrl& url : mime->urls()) {
-            if (url.isLocalFile()) {
-                return true;
-            }
-        }
-    }
-    static const QStringList markers = {
-        QStringLiteral("public.file-url"),
-        QStringLiteral("NSFilenamesPboardType"),
-        QStringLiteral("promised-file"),
-        QStringLiteral("FileNameW"),
-        QStringLiteral("FileGroupDescriptor"),
-        QStringLiteral("FileContents"),
-        QStringLiteral("Shell IDList Array"),
+
+    static const QString moonlightFontFamily = []() {
+        const int fontId = QFontDatabase::addApplicationFont(
+                QStringLiteral(":/data/ModeSeven.ttf"));
+        const QStringList families =
+                QFontDatabase::applicationFontFamilies(fontId);
+        return families.isEmpty()
+                ? QStringLiteral("Consolas") : families.first();
+    }();
+    constexpr int padding = 4;
+    const int availableWidth = qMax(1, outputWidth - padding * 2);
+
+    const auto fontForRun = [](
+            const ApplePerformanceOverlayTextRun& run,
+            double scale) {
+        QFont font(moonlightFontFamily);
+        font.setStyleHint(QFont::Monospace);
+        font.setPixelSize(qMax(8, qRound(run.pixelSize * scale)));
+        font.setBold(run.bold);
+        return font;
     };
-    for (const QString& format : mime->formats()) {
-        for (const QString& marker : markers) {
-            if (format.contains(marker, Qt::CaseInsensitive)) {
-                return true;
-            }
+    const auto measure = [&runs, &fontForRun](
+            double scale, int* width, int* ascent, int* descent) {
+        *width = 0;
+        *ascent = 0;
+        *descent = 0;
+        for (const ApplePerformanceOverlayTextRun& run : runs) {
+            const QFontMetrics metrics(fontForRun(run, scale));
+            *width += metrics.horizontalAdvance(run.text);
+            *ascent = qMax(*ascent, metrics.ascent());
+            *descent = qMax(*descent, metrics.descent());
         }
+    };
+
+    int contentWidth = 0;
+    int maximumAscent = 0;
+    int maximumDescent = 0;
+    measure(1.0, &contentWidth, &maximumAscent, &maximumDescent);
+    double scale = contentWidth > availableWidth
+            ? static_cast<double>(availableWidth) / contentWidth
+            : 1.0;
+    measure(scale, &contentWidth, &maximumAscent, &maximumDescent);
+    while (contentWidth > availableWidth && scale > 0.45) {
+        scale *= 0.97;
+        measure(scale, &contentWidth, &maximumAscent, &maximumDescent);
     }
-    return false;
+
+    QImage image(qMin(outputWidth, contentWidth + padding * 2),
+                 maximumAscent + maximumDescent + padding * 2,
+                 QImage::Format_ARGB32_Premultiplied);
+    image.fill(QColor(0, 0, 0, 102));
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+    painter.setPen(QColor(189, 249, 231));
+    int x = padding;
+    const int baseline = padding + maximumAscent;
+    for (const ApplePerformanceOverlayTextRun& run : runs) {
+        const QFont font = fontForRun(run, scale);
+        painter.setFont(font);
+        painter.drawText(x, baseline, run.text);
+        x += QFontMetrics(font).horizontalAdvance(run.text);
+    }
+    painter.end();
+    return image;
 }
 
 } // namespace
@@ -1549,6 +1591,20 @@ private:
                         .arg(controlLatency.percentile95, 0, 'f', 2)
                         .arg(coalescedPointerMotions / seconds, 0, 'f', 1)
                         .arg(maximumControlDepth);
+                ApplePerformanceOverlayMetrics overlayMetrics;
+                overlayMetrics.canvasSize = QSize(activeCanvas.width,
+                                                   activeCanvas.height);
+                overlayMetrics.receivedFramesPerSecond =
+                        sourceFramesPerSecond;
+                overlayMetrics.decodedFramesPerSecond =
+                        performanceDecodedTiles / seconds /
+                        qMax(1, activeCanvas.tileCount);
+                overlayMetrics.networkMegabitsPerSecond =
+                        performanceBytes * 8.0 / seconds / 1000000.0;
+                overlayMetrics.decodeMilliseconds =
+                        averageDecodeMilliseconds;
+                overlayMetrics.decoderBackend = backend;
+                overlayMetrics.hasMediaSample = true;
                 if (audio != nullptr) {
                     const AppleAudioStatistics audioStatistics =
                             audio->statistics();
@@ -1630,10 +1686,10 @@ private:
                 if (session != nullptr) {
                     QMetaObject::invokeMethod(
                             session,
-                            [session, mediaSummary]() {
+                            [session, mediaSummary, overlayMetrics]() {
                                 if (session != nullptr) {
                                     session->updatePerformanceStatistics(
-                                            mediaSummary);
+                                            mediaSummary, overlayMetrics);
                                 }
                             },
                             Qt::QueuedConnection);
@@ -1758,10 +1814,16 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     }
     m_QtWindow = qtWindow;
     QSettings settings;
-    m_RememberWindowPlacement =
-            StreamingPreferences::get()->rememberWindowPosition;
+    const StreamingPreferences* preferences = StreamingPreferences::get();
+    m_RememberWindowPlacement = preferences->rememberWindowPosition;
     m_ScrollSpeedMultiplier = qBound(
-            25, StreamingPreferences::get()->appleScrollSpeedPercent, 150) / 50.0;
+            25, preferences->appleScrollSpeedPercent, 150) / 50.0;
+    const ApplePerformanceOverlayPolicy overlayPolicy =
+            ApplePerformanceOverlayPolicy::fromSettings(
+                    preferences->showPerformanceOverlay,
+                    static_cast<int>(preferences->performanceStatsStyle));
+    m_PerformanceOverlayVisible.store(overlayPolicy.visible);
+    m_PerformanceOverlayStyle = overlayPolicy.style;
     m_DisplayCount = qBound(1, m_Connection.virtualDisplayCount, 2);
     m_DynamicResolutionEnabled = m_DisplayCount == 1 &&
             settings.value(QStringLiteral(
@@ -2237,6 +2299,11 @@ void AppleScreenSharingSession::applyCanvas(const AppleCanvas& canvas)
         m_AwaitingPresentationBatches = 0;
         m_AwaitingDecodeSubmissions.clear();
     }
+    {
+        QMutexLocker locker(&m_PerformanceMutex);
+        m_PerformanceMetrics.canvasSize = QSize(canvas.width, canvas.height);
+    }
+    requestPerformanceOverlayUpdate();
     m_PresentationNeeded.store(true);
     qInfo().nospace() << "Apple Screen Sharing canvas="
                       << canvas.width << "x" << canvas.height
@@ -2244,14 +2311,25 @@ void AppleScreenSharingSession::applyCanvas(const AppleCanvas& canvas)
 }
 
 void AppleScreenSharingSession::updatePerformanceStatistics(
-        const QString& summary)
+        const QString& summary,
+        const ApplePerformanceOverlayMetrics& metrics)
 {
     {
         QMutexLocker locker(&m_PerformanceMutex);
         m_PerformanceMediaSummary = summary;
+        m_PerformanceMetrics.canvasSize = metrics.canvasSize;
+        m_PerformanceMetrics.receivedFramesPerSecond =
+                metrics.receivedFramesPerSecond;
+        m_PerformanceMetrics.decodedFramesPerSecond =
+                metrics.decodedFramesPerSecond;
+        m_PerformanceMetrics.networkMegabitsPerSecond =
+                metrics.networkMegabitsPerSecond;
+        m_PerformanceMetrics.decodeMilliseconds =
+                metrics.decodeMilliseconds;
+        m_PerformanceMetrics.decoderBackend = metrics.decoderBackend;
+        m_PerformanceMetrics.hasMediaSample = metrics.hasMediaSample;
     }
-    m_PerformanceOverlayUpdateNeeded.store(true);
-    m_PresentationNeeded.store(true);
+    requestPerformanceOverlayUpdate();
 }
 
 void AppleScreenSharingSession::updateSecondaryPerformanceStatistics(
@@ -2261,8 +2339,7 @@ void AppleScreenSharingSession::updateSecondaryPerformanceStatistics(
         QMutexLocker locker(&m_PerformanceMutex);
         m_SecondaryPerformanceSummary = summary;
     }
-    m_PerformanceOverlayUpdateNeeded.store(true);
-    m_PresentationNeeded.store(true);
+    requestPerformanceOverlayUpdate();
 }
 
 void AppleScreenSharingSession::updateAudioStatistics(const QString& summary)
@@ -2271,8 +2348,30 @@ void AppleScreenSharingSession::updateAudioStatistics(const QString& summary)
         QMutexLocker locker(&m_PerformanceMutex);
         m_AudioSummary = summary;
     }
+    requestPerformanceOverlayUpdate();
+}
+
+void AppleScreenSharingSession::requestPerformanceOverlayUpdate()
+{
+    if (!m_PerformanceOverlayVisible.load()) {
+        return;
+    }
     m_PerformanceOverlayUpdateNeeded.store(true);
     m_PresentationNeeded.store(true);
+}
+
+void AppleScreenSharingSession::togglePerformanceOverlay()
+{
+    const bool visible = !m_PerformanceOverlayVisible.load();
+    m_PerformanceOverlayVisible.store(visible);
+    // Clearing and texture upload run on the presentation thread together with
+    // the D3D11 render call, so the stream hotkey cannot race the immediate
+    // context from SDL's GUI-thread event pump.
+    m_PerformanceOverlayUpdateNeeded.store(true);
+    m_PresentationNeeded.store(true);
+    qInfo() << "Apple performance overlay"
+            << (visible ? "enabled" : "disabled")
+            << "for this stream";
 }
 
 void AppleScreenSharingSession::applyControlEvents(
@@ -2394,11 +2493,12 @@ void AppleScreenSharingSession::applyRemoteClipboardText(const QString& text)
         return;
     }
     QClipboard* clipboard = QGuiApplication::clipboard();
-    if (clipboard == nullptr || clipboardContainsFiles(clipboard->mimeData())) {
+    if (clipboard == nullptr ||
+            AppleLocalClipboardTracker::containsFiles(clipboard->mimeData())) {
         qInfo() << "Apple text clipboard preserved a local file clipboard";
         return;
     }
-    m_PendingRemoteClipboardText = text;
+    m_LocalClipboardTracker.expectRemoteText(text);
     clipboard->setText(text);
     qInfo().nospace()
             << "Apple text clipboard received " << text.toUtf8().size()
@@ -2427,32 +2527,35 @@ void AppleScreenSharingSession::updateControlSummary()
                      m_Observing.load() ? tr("Observe") : tr("Control"));
         SDL_SetWindowTitle(m_Runtime->streamWindow(), title.toUtf8().constData());
     }
-    m_PerformanceOverlayUpdateNeeded.store(true);
-    m_PresentationNeeded.store(true);
+    requestPerformanceOverlayUpdate();
 }
 
 void AppleScreenSharingSession::localClipboardChanged()
 {
+    refreshLocalClipboard(false);
+}
+
+void AppleScreenSharingSession::refreshLocalClipboard(bool windowFocusGained)
+{
     const QClipboard* clipboard = QGuiApplication::clipboard();
     const QMimeData* mime = clipboard != nullptr ? clipboard->mimeData() : nullptr;
-    if (m_PendingRemoteClipboardText.has_value()) {
-        const bool isRemoteWrite = mime != nullptr && mime->hasText() &&
-                mime->text() == *m_PendingRemoteClipboardText;
-        m_PendingRemoteClipboardText.reset();
-        if (isRemoteWrite) {
-            return;
-        }
-    }
     if (!m_ControlReady.load() || m_Observing.load()) {
         return;
     }
-    if (mime == nullptr || !mime->hasText() || clipboardContainsFiles(mime)) {
+    const std::optional<QString> text = windowFocusGained
+            ? m_LocalClipboardTracker.windowFocusGained(mime)
+            : m_LocalClipboardTracker.dataChanged(mime);
+    if (!text.has_value()) {
         return;
     }
     AppleOutboundControl outbound;
     outbound.kind = AppleOutboundControl::Kind::LocalClipboardText;
-    outbound.text = mime->text();
+    outbound.text = *text;
     queueControl(std::move(outbound));
+    qInfo().nospace()
+            << "Apple text clipboard advertised " << text->toUtf8().size()
+            << " UTF-8 bytes after "
+            << (windowFocusGained ? "stream-window focus" : "local change");
 }
 
 void AppleScreenSharingSession::toggleControlMode()
@@ -2552,6 +2655,12 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     if (m_D3D11Renderer == nullptr) {
         return;
     }
+    if (!m_PerformanceOverlayVisible.load()) {
+        m_D3D11Renderer->clearOverlay();
+        m_PerformanceOverlaySize = {};
+        m_PresentationNeeded.store(true);
+        return;
+    }
     QElapsedTimer updateTimer;
     updateTimer.start();
 
@@ -2560,6 +2669,7 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     QString presentationSummary;
     QString controlSummary;
     QString audioSummary;
+    ApplePerformanceOverlayMetrics performanceMetrics;
     {
         QMutexLocker locker(&m_PerformanceMutex);
         mediaSummary = m_PerformanceMediaSummary;
@@ -2567,29 +2677,44 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
         presentationSummary = m_PerformancePresentationSummary;
         controlSummary = m_ControlSummary;
         audioSummary = m_AudioSummary;
+        performanceMetrics = m_PerformanceMetrics;
     }
+    if (!performanceMetrics.canvasSize.isValid()) {
+        QMutexLocker locker(&m_FrameMutex);
+        performanceMetrics.canvasSize = QSize(m_Canvas.width, m_Canvas.height);
+    }
+
+    const bool moonlightStyle = m_PerformanceOverlayStyle ==
+            ApplePerformanceOverlayStyle::Moonlight;
+    QList<ApplePerformanceOverlayTextRun> moonlightRuns;
     QStringList lines;
-    if (!controlSummary.isEmpty()) {
-        lines.append(controlSummary);
+    if (moonlightStyle) {
+        moonlightRuns = appleMoonlightPerformanceRuns(performanceMetrics);
     }
-    if (!mediaSummary.isEmpty()) {
-        lines.append(mediaSummary.split('\n', Qt::SkipEmptyParts));
-    }
-    if (!secondaryMediaSummary.isEmpty()) {
-        lines.append(secondaryMediaSummary);
-    }
-    if (!audioSummary.isEmpty()) {
-        lines.append(audioSummary);
-    }
-    if (!presentationSummary.isEmpty()) {
-        lines.append(presentationSummary.split(
-                '\n', Qt::SkipEmptyParts));
-    }
-    if (lines.isEmpty()) {
-        lines.append(QStringLiteral("APPLE HIGH PERFORMANCE   Measuring..."));
-    }
-    while (lines.size() < PerformanceOverlayLineCount) {
-        lines.append(QString());
+    else {
+        if (!controlSummary.isEmpty()) {
+            lines.append(controlSummary);
+        }
+        if (!mediaSummary.isEmpty()) {
+            lines.append(mediaSummary.split('\n', Qt::SkipEmptyParts));
+        }
+        if (!secondaryMediaSummary.isEmpty()) {
+            lines.append(secondaryMediaSummary);
+        }
+        if (!audioSummary.isEmpty()) {
+            lines.append(audioSummary);
+        }
+        if (!presentationSummary.isEmpty()) {
+            lines.append(presentationSummary.split(
+                    '\n', Qt::SkipEmptyParts));
+        }
+        if (lines.isEmpty()) {
+            lines.append(QStringLiteral(
+                    "APPLE HIGH PERFORMANCE   Measuring..."));
+        }
+        while (lines.size() < PerformanceOverlayLineCount) {
+            lines.append(QString());
+        }
     }
 
     int outputWidth = 0;
@@ -2599,48 +2724,64 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
         return;
     }
 
-    QFont font(QStringLiteral("Consolas"));
-    font.setStyleHint(QFont::Monospace);
-    font.setPixelSize(qBound(14, outputHeight / 54, 24));
-    const QFontMetrics metrics(font);
-    const int horizontalPadding = qMax(14, metrics.height());
-    const int verticalPadding = qMax(8, metrics.height() / 2);
-    const int lineSpacing = qMax(2, metrics.height() / 6);
-    int widestLine = 0;
-    for (const QString& line : std::as_const(lines)) {
-        widestLine = qMax(widestLine, metrics.horizontalAdvance(line));
+    QImage image;
+    if (moonlightStyle) {
+        image = renderMoonlightPerformanceOverlay(
+                moonlightRuns, outputWidth);
     }
-    const int reservedContentWidth = metrics.horizontalAdvance(
-            QString(PerformanceOverlayReservedCharacters, QLatin1Char('M')));
-    const int requestedImageWidth = qMax(widestLine, reservedContentWidth) +
-            horizontalPadding * 2;
-    const int imageWidth = qBound(
-            1,
-            qMax(requestedImageWidth, m_PerformanceOverlaySize.first),
-            qMax(1, outputWidth - 32));
-    const int imageHeight = qMin(
-            outputHeight,
-            verticalPadding * 2 + metrics.height() * PerformanceOverlayLineCount +
-                    lineSpacing * (PerformanceOverlayLineCount - 1));
-    QImage image(imageWidth, imageHeight, QImage::Format_ARGB32_Premultiplied);
-    image.fill(Qt::transparent);
-    QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(7, 11, 16, 218));
-    painter.drawRoundedRect(image.rect(), 8, 8);
-    painter.setBrush(QColor(0, 231, 196, 255));
-    painter.drawRoundedRect(QRect(0, 0, 5, imageHeight), 2, 2);
-    painter.setFont(font);
-    int baseline = verticalPadding + metrics.ascent();
-    for (int index = 0; index < lines.size(); ++index) {
-        painter.setPen(index == 0
-                               ? QColor(126, 255, 229)
-                               : QColor(242, 246, 250));
-        painter.drawText(horizontalPadding, baseline, lines.at(index));
-        baseline += metrics.height() + lineSpacing;
+    else {
+        QFont font(QStringLiteral("Consolas"));
+        font.setPixelSize(qBound(14, outputHeight / 54, 24));
+        font.setStyleHint(QFont::Monospace);
+        const QFontMetrics metrics(font);
+        const int horizontalPadding = qMax(14, metrics.height());
+        const int verticalPadding = qMax(8, metrics.height() / 2);
+        const int lineSpacing = qMax(2, metrics.height() / 6);
+        int widestLine = 0;
+        for (const QString& line : std::as_const(lines)) {
+            widestLine = qMax(widestLine,
+                              metrics.horizontalAdvance(line));
+        }
+        const int reservedContentWidth = metrics.horizontalAdvance(
+                QString(PerformanceOverlayReservedCharacters,
+                        QLatin1Char('M')));
+        const int requestedImageWidth =
+                qMax(widestLine, reservedContentWidth) +
+                horizontalPadding * 2;
+        const int imageWidth = qBound(
+                1,
+                qMax(requestedImageWidth,
+                     m_PerformanceOverlaySize.first),
+                qMax(1, outputWidth));
+        const int lineCount = lines.size();
+        const int imageHeight = qMin(
+                outputHeight,
+                verticalPadding * 2 + metrics.height() * lineCount +
+                        lineSpacing * qMax(0, lineCount - 1));
+        image = QImage(imageWidth, imageHeight,
+                       QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(7, 11, 16, 218));
+        painter.drawRoundedRect(image.rect(), 8, 8);
+        painter.setBrush(QColor(0, 231, 196, 255));
+        painter.drawRoundedRect(QRect(0, 0, 5, imageHeight), 2, 2);
+        painter.setFont(font);
+        int baseline = verticalPadding + metrics.ascent();
+        for (int index = 0; index < lines.size(); ++index) {
+            painter.setPen(index == 0
+                                   ? QColor(126, 255, 229)
+                                   : QColor(242, 246, 250));
+            painter.drawText(horizontalPadding, baseline, lines.at(index));
+            baseline += metrics.height() + lineSpacing;
+        }
+        painter.end();
     }
-    painter.end();
+    if (image.isNull()) {
+        return;
+    }
 
     QString overlayError;
     if (!m_D3D11Renderer->uploadOverlay(image, &overlayError)) {
@@ -2722,6 +2863,14 @@ void AppleScreenSharingSession::pollSdlEvents()
         }
         case SDL_KEYDOWN:
         case SDL_KEYUP:
+            if (event.key.keysym.sym == SDLK_s &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    togglePerformanceOverlay();
+                }
+                break;
+            }
             if (event.key.keysym.sym == SDLK_o &&
                     (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
                             (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
@@ -2760,6 +2909,14 @@ void AppleScreenSharingSession::pollSdlEvents()
                     event.window.event == SDL_WINDOWEVENT_MOVED ||
                     event.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED) {
                 refreshRemoteCursor(changedWindow, false);
+            }
+            if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                // Match the native client: copying normally occurs while the
+                // stream window is inactive, so becoming key is the reliable
+                // point to sample the current pasteboard. QClipboard's native
+                // notification can be missed while SDL owns the foreground
+                // window and must remain only the fast path.
+                refreshLocalClipboard(true);
             }
             switch (event.window.event) {
             case SDL_WINDOWEVENT_EXPOSED:
@@ -3162,6 +3319,10 @@ void AppleScreenSharingSession::renderLatestFrames()
         {
             QMutexLocker locker(&m_PerformanceMutex);
             m_PerformancePresentationSummary = presentationSummary;
+            m_PerformanceMetrics.presentedFramesPerSecond =
+                    m_DisplayedFrameBatches / seconds;
+            m_PerformanceMetrics.renderMilliseconds = renderCalls.average;
+            m_PerformanceMetrics.hasPresentationSample = true;
         }
         qInfo().nospace()
                 << "Apple High Performance presentation: "
@@ -3198,7 +3359,7 @@ void AppleScreenSharingSession::renderLatestFrames()
         m_RenderCallDurations.clear();
         m_MaxRenderLoopGapMilliseconds = 0.0;
         m_MaxOverlayUpdateMilliseconds = 0.0;
-        updatePerformanceOverlayTexture();
+        requestPerformanceOverlayUpdate();
     }
 }
 
@@ -3282,7 +3443,7 @@ void AppleScreenSharingSession::prepareForReconnect(
     m_SecondaryMediaReady = false;
     m_DisplayLayout = {};
     m_MediaDisplayIds.clear();
-    m_PendingRemoteClipboardText.reset();
+    m_LocalClipboardTracker.reset();
     m_PendingDynamicResolution = {};
     m_LastRequestedDynamicResolution = {};
     m_LastDynamicResolutionRequestAt = 0;

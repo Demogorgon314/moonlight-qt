@@ -56,6 +56,7 @@
 #define SER_PACKETSIZE "packetsize"
 #define SER_DETECTNETBLOCKING "detectnetblocking"
 #define SER_SHOWPERFOVERLAY "showperfoverlay"
+#define SER_PERFORMANCESTATSSTYLE "performancestatsstyle"
 #define SER_SWAPMOUSEBUTTONS "swapmousebuttons"
 #define SER_SWAPWINALTKEYS "swapwinaltkeys"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
@@ -120,6 +121,18 @@ static StreamingPreferences::BackgroundSource decodeBackgroundSource(int value)
         return static_cast<StreamingPreferences::BackgroundSource>(value);
     default:
         return StreamingPreferences::BGS_PHOTOGRAPHY;
+    }
+}
+
+static StreamingPreferences::PerformanceStatsStyle decodePerformanceStatsStyle(
+        int value)
+{
+    switch (value) {
+    case StreamingPreferences::PSS_MOONLIGHT:
+    case StreamingPreferences::PSS_DETAILED:
+        return static_cast<StreamingPreferences::PerformanceStatsStyle>(value);
+    default:
+        return StreamingPreferences::PSS_MOONLIGHT;
     }
 }
 
@@ -281,6 +294,9 @@ void StreamingPreferences::reload()
     gamepadMouse = settings.value(SER_GAMEPADMOUSE, true).toBool();
     detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, true).toBool();
     showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
+    performanceStatsStyle = decodePerformanceStatsStyle(
+            settings.value(SER_PERFORMANCESTATSSTYLE,
+                           PSS_MOONLIGHT).toInt());
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
     swapWinAltKeys = settings.value(SER_SWAPWINALTKEYS, false).toBool();
@@ -689,6 +705,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_PACKETSIZE, packetSize);
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
     settings.setValue(SER_SHOWPERFOVERLAY, showPerformanceOverlay);
+    settings.setValue(SER_PERFORMANCESTATSSTYLE,
+                      static_cast<int>(performanceStatsStyle));
     settings.setValue(SER_AUDIOCFG, static_cast<int>(audioConfig));
     settings.setValue(SER_HDR, enableHdr);
     settings.setValue(SER_HDRMODE, static_cast<int>(hdrMode));
