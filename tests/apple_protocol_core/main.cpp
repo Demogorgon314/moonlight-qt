@@ -1266,6 +1266,67 @@ void testRemoteCursorScalesForClientDpi()
             unscaled.hotspotY == cursor.hotspotY &&
             unscaled.rgba == cursor.rgba,
             "low client DPI must not shrink a remote cursor below its sender size");
+
+    AppleCursorImage edge;
+    edge.width = 2;
+    edge.height = 1;
+    edge.hotspotX = 0;
+    edge.hotspotY = 0;
+    edge.rgba = QByteArray::fromHex("ffffffff00000000");
+    const AppleCursorImage scaledEdge = edge.scaledForDpi(2.0);
+    bool foundFractionalAlpha = false;
+    for (int pixel = 0; pixel < scaledEdge.width * scaledEdge.height; ++pixel) {
+        const int offset = pixel * 4;
+        const quint8 alpha = static_cast<quint8>(scaledEdge.rgba.at(offset + 3));
+        if (alpha > 0 && alpha < 255) {
+            foundFractionalAlpha = true;
+            require(static_cast<quint8>(scaledEdge.rgba.at(offset)) >= 250 &&
+                    static_cast<quint8>(scaledEdge.rgba.at(offset + 1)) >= 250 &&
+                    static_cast<quint8>(scaledEdge.rgba.at(offset + 2)) >= 250,
+                    "cursor scaling must not blend transparent black into visible edges");
+        }
+    }
+    require(foundFractionalAlpha,
+            "smooth cursor scaling fixture must exercise a fractional-alpha edge");
+}
+
+void testRemoteCursorCacheMatchesSwiftFallbacks()
+{
+    auto image = [](quint8 value) {
+        AppleCursorImage cursor;
+        cursor.width = 1;
+        cursor.height = 1;
+        cursor.rgba = QByteArray(4, Qt::Uninitialized);
+        cursor.rgba[0] = static_cast<char>(value);
+        cursor.rgba[1] = static_cast<char>(value);
+        cursor.rgba[2] = static_cast<char>(value);
+        cursor.rgba[3] = static_cast<char>(255);
+        return cursor;
+    };
+
+    AppleCursorStore store;
+    const AppleCursorImage first = image(7);
+    require(store.apply({AppleCursorUpdate::Kind::Store, 42, first})
+                    .value_or(AppleCursorImage()).rgba == first.rgba,
+            "a stored cursor must become selected immediately");
+    require(!store.apply({AppleCursorUpdate::Kind::Select, 99, {}}).has_value(),
+            "an unknown cursor selection must fall back instead of retaining a stale shape");
+    require(store.apply({AppleCursorUpdate::Kind::Select, 42, {}})
+                    .value_or(AppleCursorImage()).rgba == first.rgba,
+            "a cached cursor selection must restore its exact source image");
+
+    store.clear();
+    for (int id = 0; id <= AppleCursorStore::MaximumEntries; ++id) {
+        store.apply({AppleCursorUpdate::Kind::Store,
+                     static_cast<quint32>(id), image(static_cast<quint8>(id))});
+    }
+    require(!store.apply({AppleCursorUpdate::Kind::Select, 0, {}}).has_value(),
+            "selecting an evicted cursor must use the same fallback as Swift");
+    require(store.apply({AppleCursorUpdate::Kind::Select,
+                         AppleCursorStore::MaximumEntries, {}})
+                    .value_or(AppleCursorImage()).rgba ==
+                    image(AppleCursorStore::MaximumEntries).rgba,
+            "the newest cached cursor must remain selectable");
 }
 
 void testStageFourTextOnlyClipboardExchange()
@@ -1403,6 +1464,8 @@ int main(int argc, char* argv[])
     testStageFourCursorAndDisplayLayoutEvents();
     std::fprintf(stderr, "testRemoteCursorScalesForClientDpi\n");
     testRemoteCursorScalesForClientDpi();
+    std::fprintf(stderr, "testRemoteCursorCacheMatchesSwiftFallbacks\n");
+    testRemoteCursorCacheMatchesSwiftFallbacks();
     std::fprintf(stderr, "testStageFourTextOnlyClipboardExchange\n");
     testStageFourTextOnlyClipboardExchange();
     std::fprintf(stderr, "testStageFourAacEldAudioContract\n");

@@ -33,6 +33,25 @@ struct AppleCursorUpdate
     AppleCursorImage image;
 };
 
+// Mirrors the host's cursor cache while keeping the selected source image
+// independent from any platform cursor created for a particular display DPI.
+class AppleCursorStore
+{
+public:
+    static constexpr int MaximumEntries = 64;
+
+    std::optional<AppleCursorImage> apply(const AppleCursorUpdate& update);
+    std::optional<AppleCursorImage> selectedImage() const;
+    std::optional<quint32> selectedId() const;
+    void clear();
+
+private:
+    QHash<quint32, AppleCursorImage> m_Cache;
+    QList<quint32> m_CacheOrder;
+    std::optional<AppleCursorImage> m_SelectedImage;
+    std::optional<quint32> m_SelectedId;
+};
+
 struct AppleDisplayRect
 {
     quint32 id = 0;

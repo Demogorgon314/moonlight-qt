@@ -2175,71 +2175,12 @@ void AppleScreenSharingSession::updateAudioStatistics(const QString& summary)
 void AppleScreenSharingSession::applyControlEvents(
         const AppleControlEvents& events)
 {
-    const auto freeRemoteCursor = [this](SDL_Cursor* cursor) {
-        if (cursor == nullptr) {
-            return;
-        }
-        if (cursor == m_ActiveRemoteCursor) {
-            SDL_SetCursor(SDL_GetDefaultCursor());
-            m_ActiveRemoteCursor = nullptr;
-        }
-        SDL_FreeCursor(cursor);
-    };
     for (const AppleCursorUpdate& update : events.cursorUpdates) {
         ++m_RemoteCursorUpdateCount;
-        SDL_Cursor* selected = nullptr;
-        if (update.kind == AppleCursorUpdate::Kind::Store &&
-                update.image.isUsable()) {
-            SDL_Window* cursorWindow = m_Runtime != nullptr
-                    ? m_Runtime->streamWindow() : nullptr;
-            if (cursorWindow == nullptr) {
-                cursorWindow = m_SecondaryWindow;
-            }
-            const double dpiScale = cursorDpiScale(cursorWindow);
-            const AppleCursorImage cursorImage =
-                    update.image.scaledForDpi(dpiScale);
-            SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(
-                    const_cast<char*>(cursorImage.rgba.constData()),
-                    cursorImage.width,
-                    cursorImage.height,
-                    32,
-                    cursorImage.width * 4,
-                    SDL_PIXELFORMAT_RGBA32);
-            if (surface != nullptr) {
-                selected = SDL_CreateColorCursor(
-                        surface,
-                        cursorImage.hotspotX,
-                        cursorImage.hotspotY);
-                SDL_FreeSurface(surface);
-            }
-            if (selected != nullptr) {
-                qInfo().nospace()
-                        << "Apple remote cursor " << update.image.width << "x"
-                        << update.image.height << " @ "
-                        << QString::number(dpiScale, 'f', 2) << "x -> "
-                        << cursorImage.width << "x" << cursorImage.height;
-                if (SDL_Cursor* previous = m_RemoteCursorCache.take(update.id)) {
-                    freeRemoteCursor(previous);
-                }
-                m_RemoteCursorCache.insert(update.id, selected);
-                m_RemoteCursorOrder.removeAll(update.id);
-                m_RemoteCursorOrder.append(update.id);
-                while (m_RemoteCursorOrder.size() > 64) {
-                    const quint32 evicted = m_RemoteCursorOrder.takeFirst();
-                    if (SDL_Cursor* cursor = m_RemoteCursorCache.take(evicted)) {
-                        freeRemoteCursor(cursor);
-                    }
-                }
-            }
-        }
-        else if (update.kind == AppleCursorUpdate::Kind::Select) {
-            selected = m_RemoteCursorCache.value(update.id, nullptr);
-        }
-        if (selected != nullptr) {
-            SDL_SetCursor(selected);
-            m_ActiveRemoteCursor = selected;
-            SDL_ShowCursor(SDL_ENABLE);
-        }
+        m_RemoteCursorStore.apply(update);
+    }
+    if (!events.cursorUpdates.isEmpty()) {
+        refreshRemoteCursor(cursorWindow(), true);
     }
     for (const AppleDisplayLayout& layout : events.displayLayouts) {
         if (m_MediaDisplayIds.isEmpty()) {
@@ -2256,6 +2197,90 @@ void AppleScreenSharingSession::applyControlEvents(
     if (!events.cursorUpdates.isEmpty()) {
         updateControlSummary();
     }
+}
+
+SDL_Window* AppleScreenSharingSession::cursorWindow() const
+{
+    SDL_Window* primaryWindow = m_Runtime != nullptr
+            ? m_Runtime->streamWindow() : nullptr;
+    SDL_Window* focusedWindow = SDL_GetMouseFocus();
+    if (focusedWindow == primaryWindow || focusedWindow == m_SecondaryWindow) {
+        return focusedWindow;
+    }
+    return primaryWindow != nullptr ? primaryWindow : m_SecondaryWindow;
+}
+
+void AppleScreenSharingSession::refreshRemoteCursor(
+        SDL_Window* window,
+        bool force)
+{
+    const std::optional<AppleCursorImage> source =
+            m_RemoteCursorStore.selectedImage();
+    if (!source.has_value()) {
+        useDefaultRemoteCursor();
+        return;
+    }
+
+    const double dpiScale = cursorDpiScale(window);
+    if (!force && m_ActiveRemoteCursor != nullptr &&
+            qFuzzyCompare(dpiScale, m_ActiveRemoteCursorScale)) {
+        return;
+    }
+
+    const AppleCursorImage cursorImage = source->scaledForDpi(dpiScale);
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(
+            const_cast<char*>(cursorImage.rgba.constData()),
+            cursorImage.width,
+            cursorImage.height,
+            32,
+            cursorImage.width * 4,
+            SDL_PIXELFORMAT_RGBA32);
+    SDL_Cursor* cursor = nullptr;
+    if (surface != nullptr) {
+        cursor = SDL_CreateColorCursor(
+                surface,
+                cursorImage.hotspotX,
+                cursorImage.hotspotY);
+        SDL_FreeSurface(surface);
+    }
+    if (cursor == nullptr) {
+        qWarning().nospace()
+                << "Failed to create Apple remote cursor: " << SDL_GetError();
+        useDefaultRemoteCursor();
+        return;
+    }
+
+    SDL_Cursor* previous = m_ActiveRemoteCursor;
+    SDL_SetCursor(cursor);
+    m_ActiveRemoteCursor = cursor;
+    m_ActiveRemoteCursorScale = dpiScale;
+    SDL_ShowCursor(SDL_ENABLE);
+    if (previous != nullptr) {
+        SDL_FreeCursor(previous);
+    }
+
+    const std::optional<quint32> selectedId = m_RemoteCursorStore.selectedId();
+    qInfo().nospace()
+            << "Apple remote cursor id="
+            << (selectedId.has_value() ? QString::number(*selectedId)
+                                       : QStringLiteral("none"))
+            << ", points=" << source->width << "x" << source->height
+            << ", dpi=" << QString::number(dpiScale, 'f', 2)
+            << "x, raster=" << cursorImage.width << "x"
+            << cursorImage.height;
+}
+
+void AppleScreenSharingSession::useDefaultRemoteCursor()
+{
+    SDL_Cursor* previous = m_ActiveRemoteCursor;
+    m_ActiveRemoteCursor = nullptr;
+    m_ActiveRemoteCursorScale = 0.0;
+    if (previous == nullptr) {
+        return;
+    }
+    SDL_SetCursor(SDL_GetDefaultCursor());
+    SDL_ShowCursor(SDL_ENABLE);
+    SDL_FreeCursor(previous);
 }
 
 void AppleScreenSharingSession::applyRemoteClipboardText(const QString& text)
@@ -2594,15 +2619,20 @@ void AppleScreenSharingSession::pollSdlEvents()
             break;
         case SDL_WINDOWEVENT: {
             const int displayIndex = displayIndexForWindow(event.window.windowID);
+            SDL_Window* changedWindow = displayIndex == 1
+                    ? m_SecondaryWindow : m_Runtime->streamWindow();
             if (event.window.event == SDL_WINDOWEVENT_MOVED ||
                     event.window.event == SDL_WINDOWEVENT_RESTORED ||
                     event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                SDL_Window* changedWindow = displayIndex == 1
-                        ? m_SecondaryWindow : m_Runtime->streamWindow();
                 captureWindowGeometry(
                         changedWindow,
                         displayIndex == 1 ? AppleWindowRole::Secondary
                                           : AppleWindowRole::Primary);
+            }
+            if (event.window.event == SDL_WINDOWEVENT_ENTER ||
+                    event.window.event == SDL_WINDOWEVENT_MOVED ||
+                    event.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED) {
+                refreshRemoteCursor(changedWindow, false);
             }
             switch (event.window.event) {
             case SDL_WINDOWEVENT_EXPOSED:
@@ -3092,18 +3122,8 @@ void AppleScreenSharingSession::destroyPresentation()
     m_PerformanceOverlayTexture = nullptr;
     m_PerformanceOverlaySize = {};
     m_Renderer = nullptr;
-    if (!m_RemoteCursorCache.isEmpty()) {
-        SDL_SetCursor(SDL_GetDefaultCursor());
-        m_ActiveRemoteCursor = nullptr;
-        for (SDL_Cursor* cursor : std::as_const(m_RemoteCursorCache)) {
-            SDL_FreeCursor(cursor);
-        }
-        m_RemoteCursorCache.clear();
-        m_RemoteCursorOrder.clear();
-    }
-    else {
-        m_ActiveRemoteCursor = nullptr;
-    }
+    useDefaultRemoteCursor();
+    m_RemoteCursorStore.clear();
     if (m_Runtime) {
         m_Runtime->shutdown();
     }

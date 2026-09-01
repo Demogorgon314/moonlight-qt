@@ -261,9 +261,11 @@ AppleCursorImage AppleCursorImage::scaledForDpi(double scale) const
     const QImage source(
             reinterpret_cast<const uchar*>(rgba.constData()),
             width, height, width * 4, QImage::Format_RGBA8888);
-    const QImage scaled = source.scaled(
+    const QImage scaled = source.convertToFormat(
+            QImage::Format_RGBA8888_Premultiplied).scaled(
             result.width, result.height,
-            Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(
+                    QImage::Format_RGBA8888);
     if (scaled.isNull()) {
         return *this;
     }
@@ -278,6 +280,54 @@ AppleCursorImage AppleCursorImage::scaledForDpi(double scale) const
     result.hotspotY = qBound(
             0, qRound(hotspotY * effectiveScale), result.height - 1);
     return result;
+}
+
+std::optional<AppleCursorImage> AppleCursorStore::apply(
+        const AppleCursorUpdate& update)
+{
+    if (update.kind == AppleCursorUpdate::Kind::Store) {
+        if (!update.image.isUsable()) {
+            return m_SelectedImage;
+        }
+        m_Cache.insert(update.id, update.image);
+        m_CacheOrder.removeAll(update.id);
+        m_CacheOrder.append(update.id);
+        while (m_CacheOrder.size() > MaximumEntries) {
+            m_Cache.remove(m_CacheOrder.takeFirst());
+        }
+        m_SelectedId = update.id;
+        m_SelectedImage = update.image;
+    }
+    else {
+        const auto selected = m_Cache.constFind(update.id);
+        if (selected != m_Cache.cend()) {
+            m_SelectedId = update.id;
+            m_SelectedImage = selected.value();
+        }
+        else {
+            m_SelectedId.reset();
+            m_SelectedImage.reset();
+        }
+    }
+    return m_SelectedImage;
+}
+
+std::optional<AppleCursorImage> AppleCursorStore::selectedImage() const
+{
+    return m_SelectedImage;
+}
+
+std::optional<quint32> AppleCursorStore::selectedId() const
+{
+    return m_SelectedId;
+}
+
+void AppleCursorStore::clear()
+{
+    m_Cache.clear();
+    m_CacheOrder.clear();
+    m_SelectedImage.reset();
+    m_SelectedId.reset();
 }
 
 bool AppleDisplayLayout::isUsable() const

@@ -95,6 +95,9 @@ private:
     void updateSecondaryPerformanceStatistics(const QString& summary);
     void updateAudioStatistics(const QString& summary);
     void applyControlEvents(const AppleControlEvents& events);
+    SDL_Window* cursorWindow() const;
+    void refreshRemoteCursor(SDL_Window* window, bool force);
+    void useDefaultRemoteCursor();
     void applyRemoteClipboardText(const QString& text);
     void updateControlSummary();
     void localClipboardChanged();
@@ -188,9 +191,9 @@ private:
     QString m_PerformancePresentationSummary;
     QString m_ControlSummary;
     QString m_AudioSummary;
-    QHash<quint32, SDL_Cursor*> m_RemoteCursorCache;
-    QList<quint32> m_RemoteCursorOrder;
+    AppleCursorStore m_RemoteCursorStore;
     SDL_Cursor* m_ActiveRemoteCursor = nullptr;
+    double m_ActiveRemoteCursorScale = 0.0;
     quint64 m_RemoteCursorUpdateCount = 0;
     std::optional<QString> m_PendingRemoteClipboardText;
     QSize m_PendingDynamicResolution;
