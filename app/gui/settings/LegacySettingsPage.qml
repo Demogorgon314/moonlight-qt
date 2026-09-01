@@ -410,6 +410,44 @@ Column {
             checked: StreamingPreferences.reverseScrollDirection
             onToggled: function(value) { StreamingPreferences.reverseScrollDirection = value }
         }
+
+        SettingsRow {
+            id: appleScrollSpeedRow
+            title: qsTr("Apple Screen Sharing scroll speed")
+            description: qsTr("Adjusts mouse-wheel distance for Mac screen-sharing sessions. 1.00× matches the macOS scrolling baseline. Changes apply to the next connection.")
+
+            Row {
+                width: Math.min(360, Math.max(220, appleScrollSpeedRow.width - Theme.spaceMd * 2))
+                height: Math.max(appleScrollSpeedSlider.implicitHeight,
+                                 appleScrollSpeedValue.implicitHeight)
+                spacing: Theme.spaceSm
+
+                HardSlider {
+                    id: appleScrollSpeedSlider
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - appleScrollSpeedValue.width - parent.spacing
+                    from: 25
+                    to: 150
+                    stepSize: 5
+                    snapMode: Slider.SnapAlways
+                    value: StreamingPreferences.appleScrollSpeedPercent
+                    Accessible.name: appleScrollSpeedRow.title
+                    onMoved: StreamingPreferences.appleScrollSpeedPercent = Math.round(value / 5) * 5
+                }
+
+                Text {
+                    id: appleScrollSpeedValue
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 58
+                    horizontalAlignment: Text.AlignRight
+                    text: (appleScrollSpeedSlider.value / 100).toFixed(2) + "×"
+                    color: Theme.accent
+                    font.family: Theme.fontMono
+                    font.pointSize: Theme.fontBody
+                    font.weight: Font.DemiBold
+                }
+            }
+        }
     }
 
     SettingsCard {

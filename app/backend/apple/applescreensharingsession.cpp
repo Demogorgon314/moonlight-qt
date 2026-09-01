@@ -5,6 +5,7 @@
 #include "applecredentialstore.h"
 #include "appled3d11renderer.h"
 #include "applemediatransport.h"
+#include "settings/streamingpreferences.h"
 #include "streaming/localstreamruntime.h"
 
 #include "SDL.h"
@@ -1722,6 +1723,8 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     }
     m_QtWindow = qtWindow;
     QSettings settings;
+    m_ScrollSpeedMultiplier = qBound(
+            25, StreamingPreferences::get()->appleScrollSpeedPercent, 150) / 50.0;
     m_DisplayCount = qBound(1, m_Connection.virtualDisplayCount, 2);
     m_DynamicResolutionEnabled = m_DisplayCount == 1 &&
             settings.value(QStringLiteral(
@@ -2542,7 +2545,8 @@ void AppleScreenSharingSession::queueScroll(
                     preciseDeltaX,
                     preciseDeltaY,
                     flipped,
-                    ++m_ScrollEventCount),
+                    ++m_ScrollEventCount,
+                    m_ScrollSpeedMultiplier),
             point->first,
             point->second);
     m_PendingControls.append(std::move(input));

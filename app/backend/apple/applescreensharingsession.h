@@ -191,6 +191,7 @@ private:
     quint64 m_LastDynamicResolutionRequestAt = 0;
     int m_DisplayCount = 1;
     bool m_DynamicResolutionEnabled = true;
+    double m_ScrollSpeedMultiplier = 1.0;
     std::atomic_bool m_PerformanceOverlayUpdateNeeded{false};
     std::atomic_bool m_PresentationNeeded{true};
     std::atomic_bool m_SecondaryPresentationNeeded{true};

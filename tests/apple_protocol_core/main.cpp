@@ -856,7 +856,7 @@ void testNativePrecisionScrollWireAndDeltas()
             "native precision scrolling must match the Swift Apple wire vector");
 
     const AppleScrollWheelEvent mapped = AppleMediaWire::scrollWheelDeltas(
-            -3, 5, -2.5, 4.25, false, 7);
+            -3, 5, -2.5, 4.25, false, 7, 1.0);
     require(mapped.deltaX == -3 && mapped.deltaY == 5 &&
             mapped.fixedDeltaX == -163840 && mapped.fixedDeltaY == 278528 &&
             mapped.pointDeltaX == -25 && mapped.pointDeltaY == 43 &&
@@ -864,11 +864,19 @@ void testNativePrecisionScrollWireAndDeltas()
             "SDL precision scrolling must preserve both tick magnitude and fractional deltas");
 
     const AppleScrollWheelEvent flipped = AppleMediaWire::scrollWheelDeltas(
-            -3, 5, -2.5, 4.25, true, 8);
+            -3, 5, -2.5, 4.25, true, 8, 1.0);
     require(flipped.deltaX == 3 && flipped.deltaY == -5 &&
             flipped.fixedDeltaX == 163840 && flipped.fixedDeltaY == -278528 &&
             flipped.pointDeltaX == 25 && flipped.pointDeltaY == -43,
             "SDL flipped scrolling must reverse every Apple delta representation");
+
+    const AppleScrollWheelEvent accelerated = AppleMediaWire::scrollWheelDeltas(
+            -4, 2, -1.5, 2.0, false, 9, 1.25);
+    require(accelerated.deltaX == -5 && accelerated.deltaY == 3 &&
+            accelerated.fixedDeltaX == -122880 && accelerated.fixedDeltaY == 163840 &&
+            accelerated.pointDeltaX == -19 && accelerated.pointDeltaY == 25 &&
+            accelerated.scrollCount == 9,
+            "Apple scroll speed must scale every delta representation consistently");
 }
 
 void testHevcDecoderBackendFallback()

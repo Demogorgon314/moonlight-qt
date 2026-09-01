@@ -62,6 +62,7 @@
 #define SER_BACKGROUNDGAMEPAD "backgroundgamepad"
 #define SER_GAMEPADQUITCOMBO "gamepadquitcombo"
 #define SER_REVERSESCROLL "reversescroll"
+#define SER_APPLESCROLLSPEEDPERCENT "applescrollspeedpercentv2"
 #define SER_SWAPFACEBUTTONS "swapfacebuttons"
 #define SER_CAPTURESYSKEYS "capturesyskeys"
 #define SER_KEEPAWAKE "keepawake"
@@ -288,6 +289,8 @@ void StreamingPreferences::reload()
     gamepadQuitCombo = static_cast<GamepadQuitCombo>(settings.value(SER_GAMEPADQUITCOMBO,
                                                      static_cast<int>(GamepadQuitCombo::GQC_DEFAULT)).toInt());
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
+    appleScrollSpeedPercent = qBound(
+            25, settings.value(SER_APPLESCROLLSPEEDPERCENT, 100).toInt(), 150);
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
     enableHdr = settings.value(SER_HDR, false).toBool();
@@ -713,6 +716,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_BACKGROUNDGAMEPAD, backgroundGamepad);
     settings.setValue(SER_GAMEPADQUITCOMBO, static_cast<int>(gamepadQuitCombo));
     settings.setValue(SER_REVERSESCROLL, reverseScrollDirection);
+    settings.setValue(SER_APPLESCROLLSPEEDPERCENT, appleScrollSpeedPercent);
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);

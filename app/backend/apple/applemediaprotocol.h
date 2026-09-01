@@ -149,7 +149,8 @@ AppleScrollWheelEvent scrollWheelDeltas(qint32 deltaX,
                                         double preciseDeltaX,
                                         double preciseDeltaY,
                                         bool flipped,
-                                        quint32 scrollCount);
+                                        quint32 scrollCount,
+                                        double speedMultiplier);
 QByteArray scrollWheelEvent(const AppleScrollWheelEvent& event,
                             quint16 x,
                             quint16 y);

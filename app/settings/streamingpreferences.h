@@ -259,6 +259,7 @@ public:
     Q_PROPERTY(bool backgroundGamepad MEMBER backgroundGamepad NOTIFY backgroundGamepadChanged)
     Q_PROPERTY(GamepadQuitCombo gamepadQuitCombo MEMBER gamepadQuitCombo NOTIFY gamepadQuitComboChanged)
     Q_PROPERTY(bool reverseScrollDirection MEMBER reverseScrollDirection NOTIFY reverseScrollDirectionChanged)
+    Q_PROPERTY(int appleScrollSpeedPercent MEMBER appleScrollSpeedPercent NOTIFY appleScrollSpeedPercentChanged)
     Q_PROPERTY(bool swapFaceButtons MEMBER swapFaceButtons NOTIFY swapFaceButtonsChanged)
     Q_PROPERTY(bool keepAwake MEMBER keepAwake NOTIFY keepAwakeChanged)
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
@@ -310,6 +311,7 @@ public:
     bool backgroundGamepad;
     GamepadQuitCombo gamepadQuitCombo;
     bool reverseScrollDirection;
+    int appleScrollSpeedPercent;
     bool swapFaceButtons;
     bool keepAwake;
     int packetSize;
@@ -388,6 +390,7 @@ signals:
     void backgroundGamepadChanged();
     void gamepadQuitComboChanged();
     void reverseScrollDirectionChanged();
+    void appleScrollSpeedPercentChanged();
     void swapFaceButtonsChanged();
     void captureSysKeysModeChanged();
     void keepAwakeChanged();

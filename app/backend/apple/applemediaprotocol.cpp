@@ -944,9 +944,12 @@ AppleScrollWheelEvent scrollWheelDeltas(qint32 deltaX,
                                         double preciseDeltaX,
                                         double preciseDeltaY,
                                         bool flipped,
-                                        quint32 scrollCount)
+                                        quint32 scrollCount,
+                                        double speedMultiplier)
 {
     const qint64 direction = flipped ? -1 : 1;
+    const double speed = std::isfinite(speedMultiplier)
+            ? std::clamp(speedMultiplier, 0.5, 3.0) : 1.0;
     const auto clampInt16 = [](qint64 value) {
         return static_cast<qint16>(std::clamp<qint64>(
                 value, std::numeric_limits<qint16>::min(),
@@ -968,12 +971,12 @@ AppleScrollWheelEvent scrollWheelDeltas(qint32 deltaX,
     };
 
     const double normalizedPreciseX = effectivePrecision(
-            preciseDeltaX, deltaX) * direction;
+            preciseDeltaX, deltaX) * direction * speed;
     const double normalizedPreciseY = effectivePrecision(
-            preciseDeltaY, deltaY) * direction;
+            preciseDeltaY, deltaY) * direction * speed;
     AppleScrollWheelEvent event;
-    event.deltaX = clampInt16(static_cast<qint64>(deltaX) * direction);
-    event.deltaY = clampInt16(static_cast<qint64>(deltaY) * direction);
+    event.deltaX = clampInt16(std::llround(deltaX * direction * speed));
+    event.deltaY = clampInt16(std::llround(deltaY * direction * speed));
     event.fixedDeltaX = scaledInt32(normalizedPreciseX, 65536.0);
     event.fixedDeltaY = scaledInt32(normalizedPreciseY, 65536.0);
     event.pointDeltaX = scaledInt32(normalizedPreciseX, 10.0);
