@@ -96,6 +96,8 @@ namespace AppleDynamicResolution {
 // constrain the virtual display to 1920x1080, request at least 320x200 when
 // the aspect ratio permits it, and keep HEVC dimensions even.
 QSize normalizedSize(int width, int height);
+QSize normalizedSizeForDpi(int width, int height, double dpiScale);
+QSize initialDisplaySize(const std::optional<QSize>& storedViewport);
 
 } // namespace AppleDynamicResolution
 

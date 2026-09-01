@@ -204,9 +204,11 @@ AppleDisplayLayout parseDisplayLayout(const QByteArray& payload)
 
 } // namespace
 
-QSize AppleDynamicResolution::normalizedSize(int width, int height)
+namespace {
+QSize normalizedDynamicResolutionSize(double width, double height)
 {
-    if (width <= 0 || height <= 0) {
+    if (!std::isfinite(width) || !std::isfinite(height) ||
+            width <= 0 || height <= 0) {
         return {};
     }
     const double maximumScale = std::min({
@@ -229,6 +231,33 @@ QSize AppleDynamicResolution::normalizedSize(int width, int height)
     const int normalizedHeight = qMax(
             2, static_cast<int>(std::floor(boundedHeight * finalScale)) & ~1);
     return QSize(normalizedWidth, normalizedHeight);
+}
+}
+
+QSize AppleDynamicResolution::normalizedSize(int width, int height)
+{
+    return normalizedDynamicResolutionSize(width, height);
+}
+
+QSize AppleDynamicResolution::normalizedSizeForDpi(
+        int width,
+        int height,
+        double dpiScale)
+{
+    if (!std::isfinite(dpiScale) || dpiScale <= 0) {
+        return {};
+    }
+    return normalizedDynamicResolutionSize(
+            width / dpiScale, height / dpiScale);
+}
+
+QSize AppleDynamicResolution::initialDisplaySize(
+        const std::optional<QSize>& storedViewport)
+{
+    const QSize normalized = storedViewport.has_value()
+            ? normalizedSize(storedViewport->width(), storedViewport->height())
+            : QSize();
+    return normalized.isValid() ? normalized : QSize(1440, 900);
 }
 
 bool AppleCursorImage::isUsable() const

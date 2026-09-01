@@ -637,6 +637,16 @@ void testStageFourDisplayConfigurationAndDynamicResolution()
             !AppleDynamicResolution::normalizedSize(0, 1080).isValid(),
             "dynamic resolution must preserve aspect ratio within the Mac client's even 1920x1080 bounds");
 
+    require(AppleDynamicResolution::initialDisplaySize(
+                    QSize(1280, 720)) ==
+                    QSize(1280, 720),
+            "initial dynamic resolution must restore the last stream viewport instead of the launcher window size");
+    require(AppleDynamicResolution::initialDisplaySize(std::nullopt) ==
+                    QSize(1440, 900) &&
+            AppleDynamicResolution::normalizedSizeForDpi(
+                    3577, 1746, 2.0) == QSize(1788, 872),
+            "dynamic resolution must use Swift's default and logical content size on HiDPI displays");
+
     require(AppleMediaWire::selectCombinedDisplays() ==
                     QByteArray::fromHex("0d01000000000000") &&
             AppleMediaWire::selectDisplay(0x12345678) ==
@@ -894,6 +904,11 @@ void testAppleStreamWindowPlacementPersistence()
             "primary Apple window geometry must persist");
     require(store.save(AppleWindowRole::Secondary, QRect(100, 80, 960, 640)),
             "secondary Apple window geometry must persist independently");
+    require(store.saveViewport(QStringLiteral("connection-a"), 0,
+                               QSize(1280, 720)) &&
+            store.saveViewport(QStringLiteral("connection-a"), 1,
+                               QSize(900, 700)),
+            "logical stream viewports must persist per connection and display");
 
     AppleWindowPlacementStore reopened(path);
     require(reopened.load(AppleWindowRole::Primary) ==
@@ -901,6 +916,13 @@ void testAppleStreamWindowPlacementPersistence()
             reopened.load(AppleWindowRole::Secondary) ==
                     std::optional<QRect>(QRect(100, 80, 960, 640)),
             "saved Apple window geometries must survive store recreation");
+    require(reopened.loadViewport(QStringLiteral("connection-a"), 0) ==
+                    std::optional<QSize>(QSize(1280, 720)) &&
+            reopened.loadViewport(QStringLiteral("connection-a"), 1) ==
+                    std::optional<QSize>(QSize(900, 700)) &&
+            !reopened.loadViewport(QStringLiteral("connection-b"), 0)
+                     .has_value(),
+            "restored stream viewports must not leak across connections or displays");
 
     const QList<QRect> displays{
         QRect(0, 0, 1920, 1040),

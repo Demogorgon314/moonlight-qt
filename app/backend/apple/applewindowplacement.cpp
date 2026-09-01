@@ -16,6 +16,13 @@ QString geometryKey(AppleWindowRole role)
             : QStringLiteral("secondary/geometry");
 }
 
+QString viewportKey(const QString& connectionId, int displayIndex)
+{
+    return QStringLiteral("viewports/%1/display%2")
+            .arg(connectionId)
+            .arg(displayIndex + 1);
+}
+
 qint64 intersectionArea(const QRect& first, const QRect& second)
 {
     const QRect intersection = first.intersected(second);
@@ -90,6 +97,34 @@ bool AppleWindowPlacementStore::save(AppleWindowRole role,
 
     m_Settings.setValue(QLatin1String(LocalStateVersionKey), LocalStateVersion);
     m_Settings.setValue(geometryKey(role), geometry);
+    m_Settings.sync();
+    return m_Settings.status() == QSettings::NoError;
+}
+
+std::optional<QSize> AppleWindowPlacementStore::loadViewport(
+        const QString& connectionId,
+        int displayIndex) const
+{
+    if (connectionId.isEmpty() || displayIndex < 0 ||
+            m_Settings.value(QLatin1String(LocalStateVersionKey), 0).toInt() !=
+                    LocalStateVersion) {
+        return std::nullopt;
+    }
+    const QSize size = m_Settings.value(
+            viewportKey(connectionId, displayIndex)).toSize();
+    return size.isValid() ? std::optional<QSize>(size) : std::nullopt;
+}
+
+bool AppleWindowPlacementStore::saveViewport(
+        const QString& connectionId,
+        int displayIndex,
+        const QSize& size)
+{
+    if (connectionId.isEmpty() || displayIndex < 0 || !size.isValid()) {
+        return false;
+    }
+    m_Settings.setValue(QLatin1String(LocalStateVersionKey), LocalStateVersion);
+    m_Settings.setValue(viewportKey(connectionId, displayIndex), size);
     m_Settings.sync();
     return m_Settings.status() == QSettings::NoError;
 }

@@ -30,6 +30,11 @@ public:
 
     std::optional<QRect> load(AppleWindowRole role) const;
     bool save(AppleWindowRole role, const QRect& geometry);
+    std::optional<QSize> loadViewport(const QString& connectionId,
+                                      int displayIndex = 0) const;
+    bool saveViewport(const QString& connectionId,
+                      int displayIndex,
+                      const QSize& size);
 
 private:
     QSettings m_Settings;

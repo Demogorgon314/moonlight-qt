@@ -103,7 +103,10 @@ private:
     void localClipboardChanged();
     void toggleControlMode();
     void toggleAudioMute();
-    void scheduleDynamicResolution(int width, int height);
+    void scheduleDynamicResolution(SDL_Window* window,
+                                   int width,
+                                   int height,
+                                   bool waitsForViewportToSettle = true);
     void sendPendingDynamicResolution();
     void pollSdlEvents();
     void renderLatestFrames();
@@ -138,6 +141,8 @@ private:
     AppleWindowPlacementStore m_WindowPlacementStore;
     std::optional<QRect> m_PrimaryWindowGeometry;
     std::optional<QRect> m_SecondaryWindowGeometry;
+    std::optional<QSize> m_PrimaryViewportSize;
+    std::optional<QSize> m_SecondaryViewportSize;
     QList<QSize> m_InitialDisplaySizes;
     QTimer* m_EventTimer = nullptr;
     QTimer* m_DynamicResolutionTimer = nullptr;
@@ -201,6 +206,7 @@ private:
     quint64 m_LastDynamicResolutionRequestAt = 0;
     int m_DisplayCount = 1;
     bool m_DynamicResolutionEnabled = true;
+    bool m_LiveResizing = false;
     bool m_RememberWindowPlacement = false;
     double m_ScrollSpeedMultiplier = 1.0;
     std::atomic_bool m_PerformanceOverlayUpdateNeeded{false};

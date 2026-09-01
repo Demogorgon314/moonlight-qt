@@ -146,6 +146,20 @@ double cursorDpiScale(SDL_Window* window)
     return 1.0;
 }
 
+#ifdef Q_OS_WIN
+bool nativeHandleMatchesWindow(SDL_Window* window, HWND nativeHandle)
+{
+    if (window == nullptr || nativeHandle == nullptr) {
+        return false;
+    }
+    SDL_SysWMinfo windowInfo = {};
+    SDL_VERSION(&windowInfo.version);
+    return SDL_GetWindowWMInfo(window, &windowInfo) == SDL_TRUE &&
+            windowInfo.subsystem == SDL_SYSWM_WINDOWS &&
+            windowInfo.info.win.window == nativeHandle;
+}
+#endif
+
 void recordMaximum(std::atomic<quint64>& value, quint64 candidate)
 {
     quint64 previous = value.load(std::memory_order_relaxed);
@@ -1750,20 +1764,52 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     m_DynamicResolutionEnabled = m_DisplayCount == 1 &&
             settings.value(QStringLiteral(
                     "appleScreenSharing/dynamicResolution"), true).toBool();
-    QSize initialDisplaySize(1440, 900);
-    if (m_DisplayCount == 1) {
-        if (m_DynamicResolutionEnabled) {
-            const QSize viewportSize = AppleDynamicResolution::normalizedSize(
-                    qtWindow->width(), qtWindow->height());
-            if (viewportSize.isValid()) {
-                initialDisplaySize = viewportSize;
-            }
+    const auto loadInitialViewport = [this, qtWindow](int displayIndex) {
+        std::optional<QSize> viewport = m_WindowPlacementStore.loadViewport(
+                m_Connection.id, displayIndex);
+        if (viewport.has_value() || !m_RememberWindowPlacement) {
+            return viewport;
         }
-        else {
-            initialDisplaySize = QSize(1920, 1080);
+
+        // Older builds stored SDL's native-pixel window geometry only. This
+        // one-time conversion is replaced with the exact per-window DPI value
+        // as soon as the first updated session viewport is persisted.
+        const AppleWindowRole role = displayIndex == 0
+                ? AppleWindowRole::Primary : AppleWindowRole::Secondary;
+        const std::optional<QRect> legacyGeometry =
+                m_WindowPlacementStore.load(role);
+        const double dpiScale = qtWindow->devicePixelRatio();
+        if (!legacyGeometry.has_value() || !std::isfinite(dpiScale) ||
+                dpiScale <= 0) {
+            return viewport;
         }
+        viewport = QSize(
+                qMax(1, qRound(legacyGeometry->width() / dpiScale)),
+                qMax(1, qRound(legacyGeometry->height() / dpiScale)));
+        m_WindowPlacementStore.saveViewport(
+                m_Connection.id, displayIndex, *viewport);
+        return viewport;
+    };
+    const std::optional<QSize> primaryViewport = loadInitialViewport(0);
+    const QSize fallbackDisplaySize =
+            AppleDynamicResolution::initialDisplaySize(primaryViewport);
+    m_InitialDisplaySizes.clear();
+    for (int displayIndex = 0; displayIndex < m_DisplayCount; ++displayIndex) {
+        const std::optional<QSize> storedViewport =
+                loadInitialViewport(displayIndex);
+        m_InitialDisplaySizes.append(storedViewport.has_value()
+                ? AppleDynamicResolution::initialDisplaySize(storedViewport)
+                : fallbackDisplaySize);
     }
-    m_InitialDisplaySizes = QList<QSize>(m_DisplayCount, initialDisplaySize);
+    if (m_DisplayCount == 1 && !m_DynamicResolutionEnabled) {
+        m_InitialDisplaySizes[0] = QSize(1920, 1080);
+    }
+    const QSize initialDisplaySize = m_InitialDisplaySizes.first();
+    qInfo().nospace()
+            << "Apple Screen Sharing initial display size="
+            << initialDisplaySize.width() << "x" << initialDisplaySize.height()
+            << (primaryViewport.has_value() ? " (stored viewport)"
+                                            : " (Swift default)");
     LocalStreamRuntimeConfig runtimeConfig;
     runtimeConfig.streamWidth = initialDisplaySize.width();
     runtimeConfig.streamHeight = initialDisplaySize.height();
@@ -1815,10 +1861,30 @@ void AppleScreenSharingSession::captureWindowGeometry(
         SDL_Window* window,
         AppleWindowRole role)
 {
-    if (!m_RememberWindowPlacement || window == nullptr) {
+    if (window == nullptr) {
         return;
     }
 
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSize(window, &width, &height);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    const double dpiScale = cursorDpiScale(window);
+    const QSize viewportSize(
+            qMax(1, qRound(width / dpiScale)),
+            qMax(1, qRound(height / dpiScale)));
+    if (role == AppleWindowRole::Primary) {
+        m_PrimaryViewportSize = viewportSize;
+    }
+    else {
+        m_SecondaryViewportSize = viewportSize;
+    }
+
+    if (!m_RememberWindowPlacement) {
+        return;
+    }
     const quint32 flags = SDL_GetWindowFlags(window);
     if ((flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED |
                   SDL_WINDOW_FULLSCREEN)) != 0) {
@@ -1827,10 +1893,7 @@ void AppleScreenSharingSession::captureWindowGeometry(
 
     int x = 0;
     int y = 0;
-    int width = 0;
-    int height = 0;
     SDL_GetWindowPosition(window, &x, &y);
-    SDL_GetWindowSize(window, &width, &height);
     const QRect geometry(x, y, width, height);
     if (!geometry.isValid()) {
         return;
@@ -1847,10 +1910,19 @@ void AppleScreenSharingSession::persistWindowGeometry(
         SDL_Window* window,
         AppleWindowRole role)
 {
+    captureWindowGeometry(window, role);
+    const int displayIndex = role == AppleWindowRole::Primary ? 0 : 1;
+    const auto& viewportSize = role == AppleWindowRole::Primary
+            ? m_PrimaryViewportSize : m_SecondaryViewportSize;
+    if (viewportSize.has_value() &&
+            !m_WindowPlacementStore.saveViewport(
+                    m_Connection.id, displayIndex, *viewportSize)) {
+        qWarning() << "Could not save Apple Screen Sharing"
+                   << appleWindowRoleName(role) << "viewport size";
+    }
     if (!m_RememberWindowPlacement) {
         return;
     }
-    captureWindowGeometry(window, role);
     const auto& geometry = role == AppleWindowRole::Primary
             ? m_PrimaryWindowGeometry : m_SecondaryWindowGeometry;
     if (!geometry.has_value()) {
@@ -1899,6 +1971,25 @@ bool AppleScreenSharingSession::nativeEventFilter(
 #ifdef Q_OS_WIN
     if (eventType == "windows_generic_MSG" && message != nullptr) {
         const MSG* nativeMessage = static_cast<const MSG*>(message);
+        SDL_Window* streamWindow = m_Runtime != nullptr
+                ? m_Runtime->streamWindow() : nullptr;
+        if (nativeHandleMatchesWindow(streamWindow, nativeMessage->hwnd)) {
+            if (nativeMessage->message == WM_ENTERSIZEMOVE) {
+                m_LiveResizing = true;
+                if (m_DynamicResolutionTimer != nullptr) {
+                    m_DynamicResolutionTimer->stop();
+                }
+            }
+            else if (nativeMessage->message == WM_EXITSIZEMOVE) {
+                m_LiveResizing = false;
+                int width = 0;
+                int height = 0;
+                SDL_GetWindowSize(streamWindow, &width, &height);
+                persistWindowGeometry(streamWindow, AppleWindowRole::Primary);
+                scheduleDynamicResolution(
+                        streamWindow, width, height, false);
+            }
+        }
         if (nativeMessage->message == WM_POWERBROADCAST) {
             switch (nativeMessage->wParam) {
             case PBT_APMSUSPEND:
@@ -2100,6 +2191,10 @@ void AppleScreenSharingSession::mediaReady(
         m_DynamicResolutionTimer->setTimerType(Qt::CoarseTimer);
         connect(m_DynamicResolutionTimer, &QTimer::timeout,
                 this, &AppleScreenSharingSession::sendPendingDynamicResolution);
+        int width = 0;
+        int height = 0;
+        SDL_GetWindowSize(window, &width, &height);
+        scheduleDynamicResolution(window, width, height);
     }
     m_MediaReady = true;
     m_EverMediaReady.store(true);
@@ -2378,32 +2473,54 @@ void AppleScreenSharingSession::toggleAudioMute()
             << (muted ? "muted" : "unmuted");
 }
 
-void AppleScreenSharingSession::scheduleDynamicResolution(int width, int height)
+void AppleScreenSharingSession::scheduleDynamicResolution(
+        SDL_Window* window,
+        int width,
+        int height,
+        bool waitsForViewportToSettle)
 {
     if (!m_DynamicResolutionEnabled || m_DisplayCount != 1 ||
             m_DynamicResolutionTimer == nullptr) {
         return;
     }
-    const QSize size = AppleDynamicResolution::normalizedSize(width, height);
-    if (!size.isValid() || size == m_PendingDynamicResolution ||
-            size == m_LastRequestedDynamicResolution ||
+    const QSize size = AppleDynamicResolution::normalizedSizeForDpi(
+            width, height, cursorDpiScale(window));
+    if (!size.isValid()) {
+        return;
+    }
+    if (size == m_LastRequestedDynamicResolution ||
             (m_Canvas.width == size.width() * 2 &&
              m_Canvas.height == size.height() * 2)) {
+        m_PendingDynamicResolution = {};
+        m_DynamicResolutionTimer->stop();
+        return;
+    }
+    if (size == m_PendingDynamicResolution &&
+            m_DynamicResolutionTimer->isActive()) {
         return;
     }
     m_PendingDynamicResolution = size;
+    if (m_LiveResizing) {
+        m_DynamicResolutionTimer->stop();
+        return;
+    }
     const quint64 now = steadyNanoseconds() / 1000000ULL;
     const quint64 earliest = m_LastDynamicResolutionRequestAt == 0
             ? now : m_LastDynamicResolutionRequestAt + 2500;
+    const quint64 debounce = waitsForViewportToSettle ? 500 : 0;
     const int interval = static_cast<int>(qMax<quint64>(
-            500, earliest > now ? earliest - now : 0));
+            debounce, earliest > now ? earliest - now : 0));
     m_DynamicResolutionTimer->start(interval);
 }
 
 void AppleScreenSharingSession::sendPendingDynamicResolution()
 {
-    if (!m_DynamicResolutionEnabled || !m_ControlReady.load() ||
+    if (!m_DynamicResolutionEnabled ||
             !m_PendingDynamicResolution.isValid()) {
+        return;
+    }
+    if (!m_ControlReady.load()) {
+        m_DynamicResolutionTimer->start(100);
         return;
     }
     const QSize size = m_PendingDynamicResolution;
@@ -2646,8 +2763,10 @@ void AppleScreenSharingSession::pollSdlEvents()
                     m_SecondaryPresentationNeeded.store(true);
                 }
                 else if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    scheduleDynamicResolution(event.window.data1,
-                                              event.window.data2);
+                    scheduleDynamicResolution(
+                            changedWindow,
+                            event.window.data1,
+                            event.window.data2);
                 }
                 break;
             default:
@@ -3087,6 +3206,7 @@ void AppleScreenSharingSession::destroyPresentation()
         m_DynamicResolutionTimer->deleteLater();
         m_DynamicResolutionTimer = nullptr;
     }
+    m_LiveResizing = false;
     if (m_PresentationThread != nullptr) {
         m_PresentationThread->requestInterruption();
         m_PresentationThread->wait();
