@@ -513,10 +513,15 @@ bool AppleD3D11Renderer::initialize(SDL_Window* window,
     return true;
 }
 
-bool AppleD3D11Renderer::usesFrameLatencyWaitableObject() const
+QString AppleD3D11Renderer::name() const
+{
+    return QStringLiteral("D3D11VA/DXGI");
+}
+
+bool AppleD3D11Renderer::usesLowLatencyPresentation() const
 {
     return m_Implementation != nullptr &&
-            m_Implementation->frameLatencyWaitableObject != nullptr;
+           m_Implementation->frameLatencyWaitableObject != nullptr;
 }
 
 bool AppleD3D11Renderer::outputSize(int* width, int* height) const
@@ -731,14 +736,15 @@ bool AppleD3D11Renderer::uploadOverlay(const QImage& image, QString* error)
 AppleD3D11Renderer::RenderResult AppleD3D11Renderer::render(
         const AppleCanvas& canvas,
         const QList<int>& tileHeights,
-        const QList<int>& tileBoundaries,
-        int left,
-        int top,
-        int contentWidth,
-        int outputWidth,
-        int outputHeight,
         QString* error)
 {
+    if (m_Implementation == nullptr || !canvas.isUsable() ||
+            tileHeights.size() < canvas.tileCount) {
+        setError(error, QCoreApplication::translate(
+                "AppleD3D11Renderer",
+                "The D3D11 presentation layout is invalid."));
+        return RenderResult::Failed;
+    }
     Implementation& implementation = *m_Implementation;
     if (!implementation.resizeIfNeeded(error)) {
         return RenderResult::Failed;
@@ -749,16 +755,20 @@ AppleD3D11Renderer::RenderResult AppleD3D11Renderer::render(
                     WAIT_OBJECT_0) {
         return RenderResult::Busy;
     }
-    // Use the actual back-buffer dimensions after a resize. The caller's
-    // values normally match, but DXGI may round during a DPI transition.
-    outputWidth = implementation.outputWidth;
-    outputHeight = implementation.outputHeight;
+    // Use the actual back-buffer dimensions after a resize. DXGI may round
+    // these during a DPI transition, so presentation geometry belongs here
+    // rather than in the protocol session.
+    const int outputWidth = implementation.outputWidth;
+    const int outputHeight = implementation.outputHeight;
     const double scale = qMin(static_cast<double>(outputWidth) / canvas.width,
                               static_cast<double>(outputHeight) / canvas.height);
-    contentWidth = qRound(canvas.width * scale);
+    const int contentWidth = qRound(canvas.width * scale);
     const int contentHeight = qRound(canvas.height * scale);
-    left = (outputWidth - contentWidth) / 2;
-    top = (outputHeight - contentHeight) / 2;
+    const int left = (outputWidth - contentWidth) / 2;
+    const int top = (outputHeight - contentHeight) / 2;
+    const QList<int> tileBoundaries =
+            AppleMediaLayout::verticalTileBoundaries(
+                    canvas, tileHeights, contentHeight);
 
     ID3D11RenderTargetView* renderTarget = implementation.renderTarget.Get();
     implementation.context->OMSetRenderTargets(1, &renderTarget, nullptr);

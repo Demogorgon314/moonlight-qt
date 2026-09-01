@@ -2,18 +2,22 @@ QT += core quick network quickcontrols2 svg gui-private
 !config_SL: QT += multimedia
 CONFIG += c++17
 
-# Apple Screen Sharing is isolated behind both a Windows x64 compile option and
-# a runtime gate. With either gate off, no Apple adapter, discovery, connection,
-# or credential access is registered.
+# Apple Screen Sharing is isolated behind a supported-platform compile option
+# and a runtime gate. With either gate off, no Apple adapter, discovery,
+# connection, or credential access is registered.
 MOONLIGHT_APPLE_SCREEN_SHARING_BUILD = $$(MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING)
-win32:contains(QT_ARCH, x86_64):equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 1) {
-    CONFIG += apple-screen-sharing
+equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 1) {
+    win32:contains(QT_ARCH, x86_64) {
+        CONFIG += apple-screen-sharing
+    }
+    macx {
+        CONFIG += apple-screen-sharing
+    }
 }
 
 apple-screen-sharing {
     QT += zlib-private
     DEFINES += MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
-    LIBS += -ladvapi32
     SOURCES += \
         backend/apple/applefeaturegate.cpp \
         backend/apple/appleconnectionstore.cpp \
@@ -25,7 +29,7 @@ apple-screen-sharing {
         backend/apple/applemediaprotocol.cpp \
         backend/apple/applemediatransport.cpp \
         backend/apple/applevideodecoder.cpp \
-        backend/apple/appled3d11renderer.cpp \
+        backend/apple/applevideorenderer.cpp \
         backend/apple/applewindowplacement.cpp \
         backend/apple/appleprotocoladapter.cpp \
         backend/apple/applescreensharingsession.cpp
@@ -40,11 +44,25 @@ apple-screen-sharing {
         backend/apple/applemediaprotocol.h \
         backend/apple/applemediatransport.h \
         backend/apple/applevideodecoder.h \
-        backend/apple/appled3d11renderer.h \
+        backend/apple/applevideorenderer.h \
         backend/apple/applewindowplacement.h \
         backend/apple/appleprotocoladapter.h \
         backend/apple/applescreensharingsession.h
     DISTFILES += backend/apple/LICENSE.ScreenSharingProtocol
+
+    win32 {
+        LIBS += -ladvapi32
+        SOURCES += backend/apple/appled3d11renderer.cpp
+        HEADERS += backend/apple/appled3d11renderer.h
+    }
+
+    macx {
+        LIBS += -framework Security -framework AudioToolbox
+        SOURCES += \
+            backend/apple/applemetalrenderer.mm \
+            backend/apple/appleaudiodecoder_macos.mm
+        HEADERS += backend/apple/applemetalrenderer.h
+    }
 }
 
 unix:!macx {

@@ -4,25 +4,23 @@
 
 #include <memory>
 
-class QImage;
-struct SDL_Window;
-
-// Owns the low-latency D3D11 presentation path for Apple High Performance
-// sessions. SDL owns only the native window and event handling; keeping the
-// swap chain here lets us preserve 4:4:4 video and cap DXGI's presentation
-// queue at one frame.
-class AppleD3D11Renderer final : public AppleVideoRenderer
+// VideoToolbox/Metal adapter for Apple High Performance streams on macOS.
+// It composites the sender's NV24 tiles atomically into a synchronized
+// CAMetalLayer while admitting at most one GPU presentation at a time.
+class AppleMetalRenderer final : public AppleVideoRenderer
 {
 public:
-    AppleD3D11Renderer();
-    ~AppleD3D11Renderer() override;
+    AppleMetalRenderer();
+    ~AppleMetalRenderer() override;
 
-    AppleD3D11Renderer(const AppleD3D11Renderer&) = delete;
-    AppleD3D11Renderer& operator=(const AppleD3D11Renderer&) = delete;
+    AppleMetalRenderer(const AppleMetalRenderer&) = delete;
+    AppleMetalRenderer& operator=(const AppleMetalRenderer&) = delete;
 
-    bool initialize(SDL_Window* window,
-                    void* decoderDevice = nullptr,
-                    QString* error = nullptr);
+    bool initialize(
+            SDL_Window* window,
+            const std::shared_ptr<AppleVideoBackendContext>& decoderContext,
+            QString* error = nullptr);
+
     QString name() const override;
     bool usesLowLatencyPresentation() const override;
     bool outputSize(int* width, int* height) const override;

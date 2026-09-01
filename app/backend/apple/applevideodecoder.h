@@ -15,6 +15,22 @@ struct AVFrame;
 struct AVPacket;
 struct SwsContext;
 
+enum class AppleVideoDecoderBackend
+{
+    Software,
+    D3D11va,
+    VideoToolbox,
+};
+
+// Opaque lifetime token shared between a hardware decoder and its matching
+// presentation adapter. Platform handles never need to be interpreted by the
+// session or media transport.
+struct AppleVideoBackendContext
+{
+    AppleVideoDecoderBackend backend = AppleVideoDecoderBackend::Software;
+    std::shared_ptr<void> nativeDevice;
+};
+
 struct AppleDecodedTile
 {
     enum class PixelFormat
@@ -23,6 +39,7 @@ struct AppleDecodedTile
         Nv24,
         Vuya,
         D3d11Ayuv,
+        VideoToolboxNv24,
     };
 
     enum class ColorSpace
@@ -57,7 +74,8 @@ struct AppleDecodedTile
 
     bool isValid() const
     {
-        if (pixelFormat == PixelFormat::D3d11Ayuv) {
+        if (pixelFormat == PixelFormat::D3d11Ayuv ||
+                pixelFormat == PixelFormat::VideoToolboxNv24) {
             return tileIndex >= 0 && width > 0 && height > 0 &&
                    hardwareFrame != nullptr;
         }
@@ -111,11 +129,7 @@ private:
 class AppleHevcDecoder
 {
 public:
-    enum class Backend
-    {
-        Software,
-        D3D11va,
-    };
+    using Backend = AppleVideoDecoderBackend;
 
     explicit AppleHevcDecoder(bool preferHardware);
     ~AppleHevcDecoder();
@@ -134,7 +148,7 @@ public:
     bool isOpen() const { return m_Context != nullptr; }
     Backend backend() const { return m_Backend; }
     bool hardwareFallbackOccurred() const { return m_HardwareFallbackOccurred; }
-    void* nativeD3D11Device() const;
+    std::shared_ptr<AppleVideoBackendContext> presentationContext() const;
 
 private:
     bool openBackend(bool hardware, QString* error);

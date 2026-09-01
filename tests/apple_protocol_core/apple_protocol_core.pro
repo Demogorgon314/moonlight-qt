@@ -5,13 +5,30 @@ TEMPLATE = app
 TARGET = apple_protocol_core
 
 INCLUDEPATH += \
-    ../../app \
-    ../../libs/windows/include/x64 \
-    ../../libs/windows/include
+    ../../app
 
 win32 {
-    INCLUDEPATH += ../../libs/windows/include/x64/SDL2
+    INCLUDEPATH += \
+        ../../libs/windows/include/x64 \
+        ../../libs/windows/include/x64/SDL2 \
+        ../../libs/windows/include
     LIBS += -L../../libs/windows/lib/x64 -llibcrypto -lavcodec -lavutil -lswscale -lSDL2 -ladvapi32 -ld3d11 -ldxgi -luser32 -lws2_32
+    SOURCES += ../../app/backend/apple/appled3d11renderer.cpp
+    HEADERS += ../../app/backend/apple/appled3d11renderer.h
+}
+
+macx {
+    INCLUDEPATH += \
+        ../../libs/mac/include \
+        ../../libs/mac/include/SDL2
+    LIBS += -L../../libs/mac/lib \
+        -lcrypto.3 -lavcodec.63 -lavutil.61 -lswscale.10 -lSDL2 \
+        -framework Security -framework AudioToolbox -framework CoreVideo \
+        -framework Metal -framework QuartzCore -framework AppKit
+    SOURCES += \
+        ../../app/backend/apple/applemetalrenderer.mm \
+        ../../app/backend/apple/appleaudiodecoder_macos.mm
+    HEADERS += ../../app/backend/apple/applemetalrenderer.h
 }
 
 SOURCES += \
@@ -25,7 +42,7 @@ SOURCES += \
     ../../app/backend/apple/appleauthenticator.cpp \
     ../../app/backend/apple/applemediatransport.cpp \
     ../../app/backend/apple/applemediaprotocol.cpp \
-    ../../app/backend/apple/appled3d11renderer.cpp \
+    ../../app/backend/apple/applevideorenderer.cpp \
     ../../app/backend/apple/applevideodecoder.cpp \
     ../../app/backend/apple/applewindowplacement.cpp \
     ../../app/settings/devicelocalsettings.cpp
@@ -40,7 +57,7 @@ HEADERS += \
     ../../app/backend/apple/appleauthenticator.h \
     ../../app/backend/apple/applemediatransport.h \
     ../../app/backend/apple/applemediaprotocol.h \
-    ../../app/backend/apple/appled3d11renderer.h \
+    ../../app/backend/apple/applevideorenderer.h \
     ../../app/backend/apple/applevideodecoder.h \
     ../../app/backend/apple/applewindowplacement.h \
     ../../app/settings/devicelocalsettings.h

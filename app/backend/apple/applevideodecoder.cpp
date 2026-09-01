@@ -9,6 +9,8 @@
 #ifdef Q_OS_WIN
 #include <d3d10_1.h>
 #include <d3d11.h>
+#elif defined(Q_OS_DARWIN)
+#include <CoreVideo/CoreVideo.h>
 #endif
 
 extern "C" {
@@ -25,6 +27,11 @@ extern "C" {
 }
 
 namespace {
+
+#ifdef Q_OS_DARWIN
+constexpr OSType VideoToolboxNv24FullRange = 0x34343466; // '444f'
+constexpr OSType VideoToolboxNv24VideoRange = 0x34343476; // '444v'
+#endif
 
 struct AppleDecodedFrameMetadata
 {
@@ -212,7 +219,7 @@ bool AppleHevcDecoder::open(QString* error)
     if (isOpen()) {
         return true;
     }
-#ifdef Q_OS_WIN
+#if defined(Q_OS_WIN) || defined(Q_OS_DARWIN)
     if (m_PreferHardware && openBackend(true, nullptr)) {
         return true;
     }
@@ -246,8 +253,9 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
     // FFmpeg's automatic frame threading intentionally keeps several frames
     // in flight. That throughput-oriented policy adds hundreds of milliseconds
     // to an interactive desktop stream even when decode itself takes only a
-    // few milliseconds. D3D11VA already executes asynchronously on the GPU,
-    // and Apple's stream is low-delay, so submit one access unit at a time.
+    // few milliseconds. Native hardware backends already execute
+    // asynchronously, and Apple's stream is low-delay, so submit one access
+    // unit at a time.
     m_Context->thread_count = 1;
     m_Context->thread_type = 0;
     // VideoToolbox associates each asynchronous output callback with the
@@ -286,6 +294,20 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
         m_Context->get_format = reinterpret_cast<AVPixelFormat (*)(
                 AVCodecContext*, const AVPixelFormat*)>(&AppleHevcDecoder::selectHardwareFormat);
     }
+#elif defined(Q_OS_DARWIN)
+    if (hardware) {
+        const int hardwareResult = av_hwdevice_ctx_create(
+                &m_HardwareDevice, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                nullptr, nullptr, 0);
+        if (hardwareResult < 0 || m_HardwareDevice == nullptr) {
+            close();
+            return false;
+        }
+        m_Context->hw_device_ctx = av_buffer_ref(m_HardwareDevice);
+        m_Context->opaque = this;
+        m_Context->get_format = reinterpret_cast<AVPixelFormat (*)(
+                AVCodecContext*, const AVPixelFormat*)>(&AppleHevcDecoder::selectHardwareFormat);
+    }
 #else
     Q_UNUSED(hardware);
 #endif
@@ -300,7 +322,18 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
         close();
         return false;
     }
-    m_Backend = hardware ? Backend::D3D11va : Backend::Software;
+    if (!hardware) {
+        m_Backend = Backend::Software;
+    }
+#ifdef Q_OS_WIN
+    else {
+        m_Backend = Backend::D3D11va;
+    }
+#elif defined(Q_OS_DARWIN)
+    else {
+        m_Backend = Backend::VideoToolbox;
+    }
+#endif
     m_ParameterSetsSubmitted = false;
     return true;
 }
@@ -323,11 +356,19 @@ int AppleHevcDecoder::selectHardwareFormat(AVCodecContext* context,
                 decoder->m_Backend = Backend::Software;
             }
         }
+#elif defined(Q_OS_DARWIN)
+        if (*format == AV_PIX_FMT_VIDEOTOOLBOX) {
+            return *format;
+        }
 #endif
     }
     for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
 #ifdef Q_OS_WIN
         if (*format == AV_PIX_FMT_D3D11) {
+            continue;
+        }
+#elif defined(Q_OS_DARWIN)
+        if (*format == AV_PIX_FMT_VIDEOTOOLBOX) {
             continue;
         }
 #endif
@@ -371,20 +412,31 @@ bool AppleHevcDecoder::prepareHardwareFramesContext(AVCodecContext* context,
 #endif
 }
 
-void* AppleHevcDecoder::nativeD3D11Device() const
+std::shared_ptr<AppleVideoBackendContext>
+AppleHevcDecoder::presentationContext() const
 {
+    auto context = std::make_shared<AppleVideoBackendContext>();
+    context->backend = m_Backend;
 #ifdef Q_OS_WIN
     if (m_Backend != Backend::D3D11va || m_HardwareDevice == nullptr) {
-        return nullptr;
+        return context;
     }
     AVHWDeviceContext* deviceContext =
             reinterpret_cast<AVHWDeviceContext*>(m_HardwareDevice->data);
     AVD3D11VADeviceContext* d3d11Context =
             reinterpret_cast<AVD3D11VADeviceContext*>(deviceContext->hwctx);
-    return d3d11Context != nullptr ? d3d11Context->device : nullptr;
-#else
-    return nullptr;
+    ID3D11Device* device = d3d11Context != nullptr
+            ? d3d11Context->device : nullptr;
+    if (device != nullptr) {
+        device->AddRef();
+        context->nativeDevice = std::shared_ptr<void>(
+                device,
+                [](void* value) {
+                    static_cast<ID3D11Device*>(value)->Release();
+                });
+    }
 #endif
+    return context;
 }
 
 QByteArray AppleHevcDecoder::annexB(
@@ -420,7 +472,7 @@ QList<AppleDecodedTile> AppleHevcDecoder::decode(
     QList<AppleDecodedTile> frames = decodePacket(
             packet, tileIndex, accessUnit.timestamp,
             accessUnit.frameSequenceNumber, &decodeError);
-    if (decodeError.isEmpty() || m_Backend != Backend::D3D11va) {
+    if (decodeError.isEmpty() || m_Backend == Backend::Software) {
         if (!decodeError.isEmpty()) {
             setError(error, decodeError);
         }
@@ -428,9 +480,9 @@ QList<AppleDecodedTile> AppleHevcDecoder::decode(
         return frames;
     }
 
-    // D3D11VA availability can change after creation (driver reset, remote
-    // session, unsupported profile). Rebuild only this decoder as software and
-    // resubmit the same access unit with parameter sets.
+    // Native decoder availability can change after creation (driver reset,
+    // unsupported profile or pixel-buffer format). Rebuild only this decoder
+    // as software and resubmit the same access unit with parameter sets.
     m_HardwareFallbackOccurred = true;
     if (!openBackend(false, error)) {
         return {};
@@ -542,6 +594,54 @@ AppleDecodedTile AppleHevcDecoder::convertFrame(
         QString* error)
 {
     AVFrame* source = frame;
+#ifdef Q_OS_DARWIN
+    if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
+        CVPixelBufferRef pixelBuffer = reinterpret_cast<CVPixelBufferRef>(
+                frame->data[3]);
+        const OSType pixelFormat = pixelBuffer != nullptr
+                ? CVPixelBufferGetPixelFormatType(pixelBuffer) : 0;
+        if (pixelBuffer != nullptr && CVPixelBufferGetPlaneCount(pixelBuffer) >= 2 &&
+                (pixelFormat == VideoToolboxNv24FullRange ||
+                 pixelFormat == VideoToolboxNv24VideoRange)) {
+            AVFrame* retainedFrame = av_frame_clone(frame);
+            if (retainedFrame == nullptr) {
+                setError(error, QCoreApplication::translate(
+                        "AppleVideoDecoder",
+                        "The VideoToolbox NV24 surface could not be retained."));
+                return {};
+            }
+            AppleDecodedTile output;
+            output.tileIndex = tileIndex;
+            output.width = frame->width;
+            output.height = frame->height;
+            output.rtpTimestamp = timestamp;
+            output.pixelFormat = AppleDecodedTile::PixelFormat::VideoToolboxNv24;
+            output.colorSpace = decodedColorSpace(frame);
+            output.colorRange = pixelFormat == VideoToolboxNv24FullRange
+                    ? AppleDecodedTile::ColorRange::Full
+                    : AppleDecodedTile::ColorRange::Limited;
+            output.hardwareFrame = std::shared_ptr<AVFrame>(
+                    retainedFrame,
+                    [](AVFrame* value) { av_frame_free(&value); });
+            return output;
+        }
+
+        // FFmpeg may select a different CVPixelBuffer type on hardware that
+        // cannot expose native NV24. Preserve a usable 4:4:4 software path
+        // instead of passing a 4:2:0 surface to the Metal NV24 shader.
+        av_frame_unref(m_TransferFrame);
+        const int transfer = av_hwframe_transfer_data(m_TransferFrame, frame, 0);
+        if (transfer < 0) {
+            setError(error, QCoreApplication::translate(
+                    "AppleVideoDecoder",
+                    "VideoToolbox frame transfer failed: %1")
+                    .arg(ffmpegError(transfer)));
+            return {};
+        }
+        av_frame_copy_props(m_TransferFrame, frame);
+        source = m_TransferFrame;
+    }
+#endif
 #ifdef Q_OS_WIN
     if (frame->format == AV_PIX_FMT_D3D11) {
         ID3D11Texture2D* texture =
@@ -603,7 +703,7 @@ AppleDecodedTile AppleHevcDecoder::convertFrame(
     output.pixels.resize(output.stride * output.height);
 
     // Keep one luma and one chroma sample for every source pixel. VUYA is a
-    // convenient packed 4:4:4 upload format for the D3D11 shader and avoids
+    // convenient packed 4:4:4 upload format for the native shaders and avoids
     // both the former NV12 chroma loss and a costly CPU YUV-to-RGB conversion.
     m_SwsContext = sws_getCachedContext(
             m_SwsContext,

@@ -4,6 +4,7 @@
 #include "applecontrolfeatures.h"
 #include "applemediaprotocol.h"
 #include "applevideodecoder.h"
+#include "applevideorenderer.h"
 #include "applewindowplacement.h"
 #include "streaming/streamsession.h"
 
@@ -24,7 +25,6 @@ class QTimer;
 class AppleHighPerformanceSessionTask;
 class AppleSecondaryVideoStream;
 class ApplePresentationThread;
-class AppleD3D11Renderer;
 struct SDL_Renderer;
 struct SDL_Texture;
 struct SDL_Cursor;
@@ -86,9 +86,9 @@ private:
                             int displayIndex = 0);
     QList<AppleOutboundControl> takePendingControls();
     void mediaReady(const AppleCanvas& canvas,
-                    bool hardwareDecoderActive,
+                    AppleVideoDecoderBackend decoderBackend,
                     bool hardwareFallbackOccurred,
-                    void* decoderDevice,
+                    std::shared_ptr<AppleVideoBackendContext> decoderContext,
                     int displayIndex = 0);
     void applyCanvas(const AppleCanvas& canvas);
     void updatePerformanceStatistics(
@@ -153,9 +153,9 @@ private:
     QTimer* m_DynamicResolutionTimer = nullptr;
     std::unique_ptr<ApplePresentationThread> m_PresentationThread;
     SDL_Renderer* m_Renderer = nullptr;
-    std::unique_ptr<AppleD3D11Renderer> m_D3D11Renderer;
+    std::unique_ptr<AppleVideoRenderer> m_VideoRenderer;
     SDL_Window* m_SecondaryWindow = nullptr;
-    std::unique_ptr<AppleD3D11Renderer> m_SecondaryD3D11Renderer;
+    std::unique_ptr<AppleVideoRenderer> m_SecondaryVideoRenderer;
     QHash<int, SDL_Texture*> m_Textures;
     QHash<int, QPair<int, int>> m_TextureSizes;
     QHash<int, quint32> m_TextureFormats;

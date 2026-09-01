@@ -72,6 +72,8 @@ QString fdkError(FdkError code)
 
 } // namespace
 
+#ifndef Q_OS_DARWIN
+
 struct AppleAacEldDecoder::Private
 {
     QLibrary library;
@@ -242,6 +244,8 @@ bool AppleAacEldDecoder::isOpen() const
 {
     return d->handle != nullptr;
 }
+
+#endif // !Q_OS_DARWIN
 
 struct AppleAudioStream::Private
 {

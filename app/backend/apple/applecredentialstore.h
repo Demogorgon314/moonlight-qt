@@ -16,6 +16,7 @@ public:
     static QString referenceForConnection(const QString& connectionId);
     static bool isReferenceForConnection(const QString& reference,
                                          const QString& connectionId);
+    static QString displayName();
 
     bool store(const QString& reference,
                const AppleCredentials& credentials,

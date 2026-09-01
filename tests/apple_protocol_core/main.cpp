@@ -2,12 +2,12 @@
 #include "backend/apple/appleaudiostream.h"
 #include "backend/apple/appleconnectionstore.h"
 #include "backend/apple/applecontrolfeatures.h"
-#include "backend/apple/appled3d11renderer.h"
 #include "backend/apple/applefeaturegate.h"
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
 #include "backend/apple/appleprotocol.h"
 #include "backend/apple/applevideodecoder.h"
+#include "backend/apple/applevideorenderer.h"
 #include "backend/apple/applewindowplacement.h"
 
 #include <QCoreApplication>
@@ -343,6 +343,8 @@ void testMalformedWireInputs()
             !AppleCredentialStore::isReferenceForConnection(
                 QStringLiteral("arbitrary-target"), QStringLiteral("saved-id")),
             "opaque credential bindings must be scoped to the saved connection UUID");
+    require(!AppleCredentialStore::displayName().isEmpty(),
+            "the active platform credential adapter must expose a user-facing name");
 }
 
 void testTrustPrecedesCredentialRead()
@@ -953,14 +955,32 @@ void testHevcDecoderBackendFallback()
     QString error;
     AppleHevcDecoder preferred(true);
     require(preferred.open(&error),
-            "the preferred HEVC decoder must open with D3D11VA or software fallback");
+            "the preferred HEVC decoder must open with a native backend or software fallback");
+#ifdef Q_OS_WIN
     require(preferred.backend() == AppleHevcDecoder::Backend::D3D11va ||
             (preferred.backend() == AppleHevcDecoder::Backend::Software &&
              preferred.hardwareFallbackOccurred()),
             "hardware decoder failure must be explicit when software fallback is selected");
+#elif defined(Q_OS_DARWIN)
+    require(preferred.backend() == AppleHevcDecoder::Backend::VideoToolbox ||
+            (preferred.backend() == AppleHevcDecoder::Backend::Software &&
+             preferred.hardwareFallbackOccurred()),
+            "VideoToolbox failure must be explicit when software fallback is selected");
+#endif
+    const std::shared_ptr<AppleVideoBackendContext> preferredContext =
+            preferred.presentationContext();
+    require(preferredContext != nullptr &&
+            preferredContext->backend == preferred.backend() &&
+            (preferred.backend() != AppleHevcDecoder::Backend::D3D11va ||
+             preferredContext->nativeDevice != nullptr),
+            "the decoder must expose its platform-neutral presentation lifetime token");
+    const char* preferredBackend =
+            preferred.backend() == AppleHevcDecoder::Backend::D3D11va
+                    ? "D3D11VA"
+                    : preferred.backend() == AppleHevcDecoder::Backend::VideoToolbox
+                            ? "VideoToolbox" : "software fallback";
     std::fprintf(stderr, "preferred HEVC decoder backend: %s\n",
-                 preferred.backend() == AppleHevcDecoder::Backend::D3D11va
-                         ? "D3D11VA" : "software fallback");
+                 preferredBackend);
 
     AppleHevcDecoder software(false);
     error.clear();
@@ -968,6 +988,12 @@ void testHevcDecoderBackendFallback()
             software.backend() == AppleHevcDecoder::Backend::Software &&
             !software.hardwareFallbackOccurred(),
             "the software HEVC decoder must remain independently usable");
+    const std::shared_ptr<AppleVideoBackendContext> softwareContext =
+            software.presentationContext();
+    require(softwareContext != nullptr &&
+            softwareContext->backend == AppleVideoDecoderBackend::Software &&
+            softwareContext->nativeDevice == nullptr,
+            "software decoding must not leak a native presentation device");
 }
 
 void testScaledTileBoundariesRemainContiguous()
@@ -1532,31 +1558,44 @@ void testStageFourAacEldAudioContract()
             qPrintable(QStringLiteral("AAC-ELD decoder probe failed: %1").arg(error)));
 }
 
-void testD3d11PresentationUsesPerSwapChainLowLatencyWait()
+void testNativePresentationFactoryUsesLowLatencyAdapter()
 {
     require(SDL_InitSubSystem(SDL_INIT_VIDEO) == 0,
             qPrintable(QStringLiteral("SDL video initialization failed: %1")
                                .arg(QString::fromUtf8(SDL_GetError()))));
     const auto quitVideo = qScopeGuard([]() { SDL_QuitSubSystem(SDL_INIT_VIDEO); });
+    Uint32 windowFlags = SDL_WINDOW_HIDDEN;
+#ifdef Q_OS_DARWIN
+    windowFlags |= SDL_WINDOW_METAL;
+#endif
     SDL_Window* window = SDL_CreateWindow(
             "Apple low-latency presentation test",
             SDL_WINDOWPOS_UNDEFINED,
             SDL_WINDOWPOS_UNDEFINED,
             640,
             360,
-            SDL_WINDOW_HIDDEN);
+            windowFlags);
     require(window != nullptr,
             qPrintable(QStringLiteral("SDL test window creation failed: %1")
                                .arg(QString::fromUtf8(SDL_GetError()))));
     const auto destroyWindow = qScopeGuard([window]() { SDL_DestroyWindow(window); });
 
-    AppleD3D11Renderer renderer;
+    auto decoderContext = std::make_shared<AppleVideoBackendContext>();
+    decoderContext->backend = AppleVideoDecoderBackend::Software;
     QString error;
-    require(renderer.initialize(window, nullptr, &error),
-            qPrintable(QStringLiteral("D3D11 renderer initialization failed: %1")
+    std::unique_ptr<AppleVideoRenderer> renderer = createAppleVideoRenderer(
+            window, decoderContext, &error);
+    require(renderer != nullptr,
+            qPrintable(QStringLiteral("native renderer initialization failed: %1")
                                .arg(error)));
-    require(renderer.usesFrameLatencyWaitableObject(),
-            "D3D11 presentation must use a per-swap-chain latency-1 waitable object");
+    require(!renderer->name().isEmpty() &&
+            renderer->usesLowLatencyPresentation(),
+            "the selected native adapter must expose latency-1 synchronized presentation");
+    error.clear();
+    require(renderer->render(AppleCanvas{}, {}, &error) ==
+                    AppleVideoRenderer::RenderResult::Failed &&
+            !error.isEmpty(),
+            "the native adapter must reject an invalid canvas at its public boundary");
 }
 
 } // namespace
@@ -1622,8 +1661,8 @@ int main(int argc, char* argv[])
     testApplePerformanceOverlayFollowsSharedSettingsAndPlacement();
     std::fprintf(stderr, "testStageFourAacEldAudioContract\n");
     testStageFourAacEldAudioContract();
-    std::fprintf(stderr, "testD3d11PresentationUsesPerSwapChainLowLatencyWait\n");
-    testD3d11PresentationUsesPerSwapChainLowLatencyWait();
+    std::fprintf(stderr, "testNativePresentationFactoryUsesLowLatencyAdapter\n");
+    testNativePresentationFactoryUsesLowLatencyAdapter();
     std::fprintf(stderr, "Apple Screen Sharing stage 3 and 4 protocol tests passed\n");
     return 0;
 }

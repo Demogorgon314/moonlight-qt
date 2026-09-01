@@ -513,7 +513,8 @@ std::unique_ptr<ResolvedLaunchPlan> AppleProtocolAdapter::resolveLaunch(
     }
     if (!AppleCredentialStore::isReferenceForConnection(
                 connection.credentialReference, connection.id)) {
-        setError(error, tr("No Windows Credential Manager binding exists for this Mac."));
+        setError(error, tr("No %1 binding exists for this Mac.")
+                        .arg(AppleCredentialStore::displayName()));
         return nullptr;
     }
     connection.endpoint = currentEndpoint(connection);
@@ -755,7 +756,8 @@ CatalogConnectionView AppleProtocolAdapter::savedView(
                  currentEndpoint(connection).displayAddress(),
                  connection.id,
                  connection.isTrusted() ? connection.trustedHostFingerprint : tr("Not trusted"),
-                 hasCredentialBinding ? tr("Windows Credential Manager") : tr("Not saved"));
+                 hasCredentialBinding ? AppleCredentialStore::displayName()
+                                      : tr("Not saved"));
     return view;
 }
 

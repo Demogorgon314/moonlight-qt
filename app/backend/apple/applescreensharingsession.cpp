@@ -3,7 +3,7 @@
 #include "appleauthenticator.h"
 #include "appleaudiostream.h"
 #include "applecredentialstore.h"
-#include "appled3d11renderer.h"
+#include "applevideorenderer.h"
 #include "applemediatransport.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/localstreamruntime.h"
@@ -57,6 +57,29 @@ constexpr int PerformanceOverlayLineCount = 9;
 constexpr int PerformanceOverlayReservedCharacters = 96;
 constexpr quint32 FixedLanBandwidthKilobitsPerSecond = 60001;
 constexpr int MaximumReconnectAttempts = 3;
+
+QString appleVideoDecoderBackendName(AppleVideoDecoderBackend backend)
+{
+    switch (backend) {
+    case AppleVideoDecoderBackend::D3D11va:
+        return QStringLiteral("D3D11VA");
+    case AppleVideoDecoderBackend::VideoToolbox:
+        return QStringLiteral("VideoToolbox");
+    case AppleVideoDecoderBackend::Software:
+    default:
+        return QStringLiteral("software");
+    }
+}
+
+Uint32 appleVideoWindowFlags()
+{
+    Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+                   SDL_WINDOW_HIDDEN;
+#ifdef Q_OS_DARWIN
+    flags |= SDL_WINDOW_METAL;
+#endif
+    return flags;
+}
 
 QList<QRect> sdlUsableDisplayBounds()
 {
@@ -139,6 +162,23 @@ double cursorDpiScale(SDL_Window* window)
             if (dpi > 0) {
                 return static_cast<double>(dpi) / USER_DEFAULT_SCREEN_DPI;
             }
+        }
+    }
+#elif defined(Q_OS_DARWIN)
+    if (window != nullptr) {
+        int pointWidth = 0;
+        int pointHeight = 0;
+        int pixelWidth = 0;
+        int pixelHeight = 0;
+        SDL_GetWindowSize(window, &pointWidth, &pointHeight);
+        SDL_Metal_GetDrawableSize(window, &pixelWidth, &pixelHeight);
+        if (pointWidth > 0 && pointHeight > 0 &&
+                pixelWidth > 0 && pixelHeight > 0) {
+            const double horizontalScale =
+                    static_cast<double>(pixelWidth) / pointWidth;
+            const double verticalScale =
+                    static_cast<double>(pixelHeight) / pointHeight;
+            return qMax(1.0, (horizontalScale + verticalScale) / 2.0);
         }
     }
 #else
@@ -459,31 +499,22 @@ private:
                     m_Session->m_EverMediaReady.store(true);
                     const QPointer<AppleScreenSharingSession> session = m_Session;
                     const AppleCanvas canvas = m_Negotiation.canvas;
-                    const bool hardware = m_Decoder->backend() ==
-                            AppleHevcDecoder::Backend::D3D11va;
+                    const AppleVideoDecoderBackend backend =
+                            m_Decoder->backend();
                     const bool fallback =
                             m_Decoder->hardwareFallbackOccurred();
-                    void* device = m_Decoder->nativeD3D11Device();
-#ifdef Q_OS_WIN
-                    if (device != nullptr) {
-                        static_cast<IUnknown*>(device)->AddRef();
-                    }
-#endif
+                    const std::shared_ptr<AppleVideoBackendContext> context =
+                            m_Decoder->presentationContext();
                     const int displayIndex = m_Negotiation.displayIndex;
                     QMetaObject::invokeMethod(
                             session,
-                            [session, canvas, hardware, fallback,
-                             device, displayIndex]() {
+                            [session, canvas, backend, fallback,
+                             context, displayIndex]() {
                                 if (session != nullptr) {
-                                    session->mediaReady(canvas, hardware,
-                                                        fallback, device,
+                                    session->mediaReady(canvas, backend,
+                                                        fallback, context,
                                                         displayIndex);
                                 }
-#ifdef Q_OS_WIN
-                                if (device != nullptr) {
-                                    static_cast<IUnknown*>(device)->Release();
-                                }
-#endif
                             },
                             Qt::QueuedConnection);
                 }
@@ -626,9 +657,9 @@ private:
                 m_PerformanceDecodeCalls == 0 ? 0.0
                 : m_PerformanceDecodeNanoseconds / 1000000.0 /
                   m_PerformanceDecodeCalls;
-        const QString backend = m_Decoder != nullptr &&
-                m_Decoder->backend() == AppleHevcDecoder::Backend::D3D11va
-                ? QStringLiteral("D3D11VA") : QStringLiteral("software");
+        const QString backend = m_Decoder != nullptr
+                ? appleVideoDecoderBackendName(m_Decoder->backend())
+                : QStringLiteral("software");
         const QString summary = QStringLiteral(
                 "DISPLAY 2 SOURCE %1 FPS   RX %2 Mbps   HEVC 4:4:4 %3 tiles/s @ %4 ms   %5   NACK %6   FIR %7")
                 .arg(sourceFramesPerSecond, 0, 'f', 1)
@@ -970,7 +1001,8 @@ private:
         bool hasPreviousTimestamp = false;
         quint8 keyFrameSequence = 0;
         bool notifiedMediaReady = false;
-        bool hardwareActive = false;
+        AppleVideoDecoderBackend decoderBackend =
+                AppleVideoDecoderBackend::Software;
         bool hardwareFallback = false;
         bool awaitingRandomAccessPicture = true;
         bool hasEnteredDecodeRefreshState = false;
@@ -1302,8 +1334,7 @@ private:
                                     return false;
                                 }
                             }
-                            hardwareActive = decoder->backend() ==
-                                    AppleHevcDecoder::Backend::D3D11va;
+                            decoderBackend = decoder->backend();
                             hardwareFallback = decoder->hardwareFallbackOccurred();
                             if (!requestKeyFrames(media, feedback,
                                                   negotiation.offers.videoSynchronizationSource,
@@ -1376,8 +1407,7 @@ private:
                                 }
                             }
                             hardwareFallback = decoder->hardwareFallbackOccurred();
-                            hardwareActive = decoder->backend() ==
-                                    AppleHevcDecoder::Backend::D3D11va;
+                            decoderBackend = decoder->backend();
                             if (!frames.isEmpty()) {
                                 lastDecodedAt = clock.elapsed();
                                 frameBatcher.recordDecodedFrames(std::move(frames));
@@ -1390,28 +1420,21 @@ private:
                                     m_Session->m_EverMediaReady.store(true);
                                     const QPointer<AppleScreenSharingSession> session = m_Session;
                                     const AppleCanvas canvas = activeCanvas;
-                                    void* decoderDevice =
-                                            decoder->nativeD3D11Device();
-#ifdef Q_OS_WIN
-                                    if (decoderDevice != nullptr) {
-                                        static_cast<IUnknown*>(decoderDevice)->AddRef();
-                                    }
-#endif
+                                    const AppleVideoDecoderBackend decoderBackend =
+                                            decoder->backend();
+                                    const std::shared_ptr<AppleVideoBackendContext>
+                                            decoderContext =
+                                                    decoder->presentationContext();
                                     QMetaObject::invokeMethod(
                                             session,
-                                            [session, canvas, hardwareActive,
-                                             hardwareFallback, decoderDevice]() {
+                                            [session, canvas, decoderBackend,
+                                             hardwareFallback, decoderContext]() {
                                                 if (session != nullptr) {
                                                     session->mediaReady(canvas,
-                                                                        hardwareActive,
+                                                                        decoderBackend,
                                                                         hardwareFallback,
-                                                                        decoderDevice);
+                                                                        decoderContext);
                                                 }
-#ifdef Q_OS_WIN
-                                                if (decoderDevice != nullptr) {
-                                                    static_cast<IUnknown*>(decoderDevice)->Release();
-                                                }
-#endif
                                             },
                                             Qt::QueuedConnection);
                                 }
@@ -1567,9 +1590,8 @@ private:
                 const quint64 maximumControlDepth =
                         m_Session->m_MaxPendingControlDepth.exchange(
                                 0, std::memory_order_relaxed);
-                const QString backend = hardwareActive
-                        ? QStringLiteral("D3D11VA")
-                        : QStringLiteral("software");
+                const QString backend =
+                        appleVideoDecoderBackendName(decoderBackend);
                 const QString mediaSummary = QStringLiteral(
                         "SOURCE %1 FPS   RX %2 Mbps   HEVC 4:4:4 %3 tiles/s @ %4 ms   %5\n"
                         "ARRIVAL %6/%7 ms avg/p95   RTP %8/%9 ms avg/p95   JITTER %10 ms   NACK %11   FIR %12\n"
@@ -1664,7 +1686,7 @@ private:
                         << " fps, avg decode="
                         << QString::number(averageDecodeMilliseconds, 'f', 2)
                         << " ms, backend="
-                        << (hardwareActive ? "D3D11VA" : "software")
+                        << appleVideoDecoderBackendName(decoderBackend)
                         << ", source cadence avg/p95/jitter="
                         << QString::number(sourceCadence.average, 'f', 1) << "/"
                         << QString::number(sourceCadence.percentile95, 'f', 1) << "/"
@@ -1757,7 +1779,7 @@ public:
     explicit ApplePresentationThread(AppleScreenSharingSession* session)
         : m_Session(session)
     {
-        setObjectName(QStringLiteral("Apple D3D11 presentation"));
+        setObjectName(QStringLiteral("Apple video presentation"));
     }
 
 protected:
@@ -1766,8 +1788,8 @@ protected:
         // Keep presentation independent from Qt's main event loop. Native
         // window moves, resizes, and unrelated UI work can temporarily suspend
         // main-thread timers, while Swift's display-link path continues in a
-        // common run-loop mode. The one-millisecond poll also bounds a
-        // DXGI_PRESENT_DO_NOT_WAIT retry without adding a frame of buffering.
+        // common run-loop mode. The one-millisecond poll also bounds a native
+        // non-blocking presentation retry without adding a frame of buffering.
         while (!isInterruptionRequested()) {
             m_Session->renderLatestFrames();
             m_Session->renderSecondaryFrames();
@@ -2118,9 +2140,9 @@ QList<AppleOutboundControl> AppleScreenSharingSession::takePendingControls()
 
 void AppleScreenSharingSession::mediaReady(
         const AppleCanvas& canvas,
-        bool hardwareDecoderActive,
+        AppleVideoDecoderBackend decoderBackend,
         bool hardwareFallbackOccurred,
-        void* decoderDevice,
+        std::shared_ptr<AppleVideoBackendContext> decoderContext,
         int displayIndex)
 {
     if (displayIndex == 1) {
@@ -2149,8 +2171,7 @@ void AppleScreenSharingSession::mediaReady(
                 y,
                 width,
                 height,
-                SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
-                        SDL_WINDOW_HIDDEN);
+                appleVideoWindowFlags());
         if (m_SecondaryWindow == nullptr) {
             m_Cancelled.store(true);
             emit displayLaunchError(tr(
@@ -2159,10 +2180,9 @@ void AppleScreenSharingSession::mediaReady(
         }
         captureWindowGeometry(m_SecondaryWindow, AppleWindowRole::Secondary);
         QString rendererError;
-        m_SecondaryD3D11Renderer = std::make_unique<AppleD3D11Renderer>();
-        if (!m_SecondaryD3D11Renderer->initialize(
-                    m_SecondaryWindow, decoderDevice, &rendererError)) {
-            m_SecondaryD3D11Renderer.reset();
+        m_SecondaryVideoRenderer = createAppleVideoRenderer(
+                m_SecondaryWindow, decoderContext, &rendererError);
+        if (m_SecondaryVideoRenderer == nullptr) {
             SDL_DestroyWindow(m_SecondaryWindow);
             m_SecondaryWindow = nullptr;
             m_Cancelled.store(true);
@@ -2174,10 +2194,11 @@ void AppleScreenSharingSession::mediaReady(
         m_SecondaryMediaReady = true;
         m_EverMediaReady.store(true);
         qInfo().nospace()
-                << "Apple High Performance display 2 renderer=direct3d11-owned, "
+                << "Apple High Performance display 2 renderer="
+                << m_SecondaryVideoRenderer->name() << ", "
                    "canvas=" << canvas.width << "x" << canvas.height
                 << ", decoder="
-                << (hardwareDecoderActive ? "D3D11VA" : "software")
+                << appleVideoDecoderBackendName(decoderBackend)
                 << (hardwareFallbackOccurred ? " (fallback)" : "");
         SDL_ShowWindow(m_SecondaryWindow);
         SDL_RaiseWindow(m_SecondaryWindow);
@@ -2203,37 +2224,37 @@ void AppleScreenSharingSession::mediaReady(
             y,
             width,
             height,
-            SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN);
+            appleVideoWindowFlags());
     if (window == nullptr) {
         m_Cancelled.store(true);
         emit displayLaunchError(tr("Couldn’t create the Apple Screen Sharing video window."));
         return;
     }
     captureWindowGeometry(window, AppleWindowRole::Primary);
-    QString d3d11Error;
-    m_D3D11Renderer = std::make_unique<AppleD3D11Renderer>();
-    if (!m_D3D11Renderer->initialize(window, decoderDevice, &d3d11Error)) {
-        m_D3D11Renderer.reset();
+    QString rendererError;
+    m_VideoRenderer = createAppleVideoRenderer(
+            window, decoderContext, &rendererError);
+    if (m_VideoRenderer == nullptr) {
         m_Cancelled.store(true);
         emit displayLaunchError(tr(
                 "Couldn’t initialize lossless 4:4:4 presentation: %1")
-                                        .arg(d3d11Error));
+                                        .arg(rendererError));
         return;
     }
     qInfo().nospace()
-            << "Apple High Performance renderer=direct3d11-owned, "
-               "vsync=true, maximum-frame-latency=1, format="
-            << (decoderDevice != nullptr
-                        ? "AYUV 4:4:4 GPU-native"
-                        : "VUYA 4:4:4 upload")
-            << ", frame-latency-waitable="
-            << (m_D3D11Renderer->usesFrameLatencyWaitableObject()
+            << "Apple High Performance renderer="
+            << m_VideoRenderer->name()
+            << ", vsync=true, maximum-frame-latency=1, decoder="
+            << appleVideoDecoderBackendName(decoderBackend)
+            << ", low-latency-presentation="
+            << (m_VideoRenderer->usesLowLatencyPresentation()
                         ? "true" : "false");
     if (hardwareFallbackOccurred) {
-        addLaunchWarning(tr("D3D11VA HEVC decoding was unavailable or failed; the session continued with software decoding."));
+        addLaunchWarning(tr("Hardware HEVC decoding was unavailable or failed; the session continued with software decoding."));
     }
-    else if (hardwareDecoderActive) {
-        addLaunchWarning(tr("D3D11VA HEVC hardware decoding is active."));
+    else if (decoderBackend != AppleVideoDecoderBackend::Software) {
+        addLaunchWarning(tr("Hardware HEVC decoding is active (%1).")
+                         .arg(appleVideoDecoderBackendName(decoderBackend)));
     }
     else {
         addLaunchWarning(tr("HEVC software decoding is active."));
@@ -2365,7 +2386,7 @@ void AppleScreenSharingSession::togglePerformanceOverlay()
     const bool visible = !m_PerformanceOverlayVisible.load();
     m_PerformanceOverlayVisible.store(visible);
     // Clearing and texture upload run on the presentation thread together with
-    // the D3D11 render call, so the stream hotkey cannot race the immediate
+    // the native render call, so the stream hotkey cannot race the immediate
     // context from SDL's GUI-thread event pump.
     m_PerformanceOverlayUpdateNeeded.store(true);
     m_PresentationNeeded.store(true);
@@ -2652,11 +2673,11 @@ void AppleScreenSharingSession::sendPendingDynamicResolution()
 
 void AppleScreenSharingSession::updatePerformanceOverlayTexture()
 {
-    if (m_D3D11Renderer == nullptr) {
+    if (m_VideoRenderer == nullptr) {
         return;
     }
     if (!m_PerformanceOverlayVisible.load()) {
-        m_D3D11Renderer->clearOverlay();
+        m_VideoRenderer->clearOverlay();
         m_PerformanceOverlaySize = {};
         m_PresentationNeeded.store(true);
         return;
@@ -2719,7 +2740,7 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
 
     int outputWidth = 0;
     int outputHeight = 0;
-    if (!m_D3D11Renderer->outputSize(&outputWidth, &outputHeight) ||
+    if (!m_VideoRenderer->outputSize(&outputWidth, &outputHeight) ||
             outputWidth <= 0 || outputHeight <= 0) {
         return;
     }
@@ -2784,7 +2805,7 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     }
 
     QString overlayError;
-    if (!m_D3D11Renderer->uploadOverlay(image, &overlayError)) {
+    if (!m_VideoRenderer->uploadOverlay(image, &overlayError)) {
         qWarning().nospace()
                 << "Apple High Performance overlay upload failed: "
                 << overlayError;
@@ -3141,7 +3162,7 @@ std::optional<QPair<quint16, quint16>> AppleScreenSharingSession::remotePoint(
 
 void AppleScreenSharingSession::renderLatestFrames()
 {
-    if (m_D3D11Renderer == nullptr) {
+    if (m_VideoRenderer == nullptr) {
         return;
     }
     const quint64 renderLoopAtNanoseconds = steadyNanoseconds();
@@ -3175,14 +3196,12 @@ void AppleScreenSharingSession::renderLatestFrames()
     }
     for (auto iterator = frames.begin(); iterator != frames.end(); ++iterator) {
         AppleDecodedTile& frame = iterator.value();
-        if (frame.pixelFormat == AppleDecodedTile::PixelFormat::Vuya ||
-                frame.pixelFormat ==
-                        AppleDecodedTile::PixelFormat::D3d11Ayuv) {
+        if (frame.isValid()) {
             QString uploadError;
-            if (!m_D3D11Renderer ||
-                    !m_D3D11Renderer->upload(frame, &uploadError)) {
+            if (!m_VideoRenderer ||
+                    !m_VideoRenderer->upload(frame, &uploadError)) {
                 qWarning().nospace()
-                        << "Apple High Performance VUYA upload failed: "
+                        << "Apple High Performance tile upload failed: "
                         << uploadError;
                 continue;
             }
@@ -3208,18 +3227,6 @@ void AppleScreenSharingSession::renderLatestFrames()
         return;
     }
 
-    int outputWidth = 0;
-    int outputHeight = 0;
-    if (!m_D3D11Renderer->outputSize(&outputWidth, &outputHeight)) {
-        return;
-    }
-    const double scale = qMin(static_cast<double>(outputWidth) / canvas.width,
-                              static_cast<double>(outputHeight) / canvas.height);
-    const int contentWidth = qRound(canvas.width * scale);
-    const int contentHeight = qRound(canvas.height * scale);
-    const int left = (outputWidth - contentWidth) / 2;
-    const int top = (outputHeight - contentHeight) / 2;
-
     const int fallbackHeight = (canvas.height + canvas.tileCount - 1) /
             canvas.tileCount;
     QList<int> tileHeights;
@@ -3227,30 +3234,21 @@ void AppleScreenSharingSession::renderLatestFrames()
     for (int tile = 0; tile < canvas.tileCount; ++tile) {
         tileHeights.append(m_TileHeights.value(tile, fallbackHeight));
     }
-    const QList<int> tileBoundaries =
-            AppleMediaLayout::verticalTileBoundaries(
-                    canvas, tileHeights, contentHeight);
     QString renderError;
     QElapsedTimer renderTimer;
     renderTimer.start();
-    const AppleD3D11Renderer::RenderResult renderResult =
-            m_D3D11Renderer->render(
+    const AppleVideoRenderer::RenderResult renderResult =
+            m_VideoRenderer->render(
                     canvas,
                     tileHeights,
-                    tileBoundaries,
-                    left,
-                    top,
-                    contentWidth,
-                    outputWidth,
-                    outputHeight,
                     &renderError);
     m_RenderCallDurations.append(renderTimer.nsecsElapsed() / 1000000.0);
-    if (renderResult == AppleD3D11Renderer::RenderResult::Busy) {
+    if (renderResult == AppleVideoRenderer::RenderResult::Busy) {
         ++m_PresentationBusyCount;
         m_PresentationNeeded.store(true);
         return;
     }
-    if (renderResult == AppleD3D11Renderer::RenderResult::Failed) {
+    if (renderResult == AppleVideoRenderer::RenderResult::Failed) {
         qWarning().nospace()
                 << "Apple High Performance 4:4:4 render failed: "
                 << renderError;
@@ -3401,8 +3399,8 @@ void AppleScreenSharingSession::destroyPresentation()
     persistWindowGeometry(m_Runtime ? m_Runtime->streamWindow() : nullptr,
                           AppleWindowRole::Primary);
     persistWindowGeometry(m_SecondaryWindow, AppleWindowRole::Secondary);
-    m_D3D11Renderer.reset();
-    m_SecondaryD3D11Renderer.reset();
+    m_VideoRenderer.reset();
+    m_SecondaryVideoRenderer.reset();
     if (m_SecondaryWindow != nullptr) {
         SDL_DestroyWindow(m_SecondaryWindow);
         m_SecondaryWindow = nullptr;
@@ -3487,7 +3485,7 @@ void AppleScreenSharingSession::prepareForReconnect(
 
 void AppleScreenSharingSession::renderSecondaryFrames()
 {
-    if (m_SecondaryD3D11Renderer == nullptr) {
+    if (m_SecondaryVideoRenderer == nullptr) {
         return;
     }
     QHash<int, AppleDecodedTile> frames;
@@ -3504,13 +3502,11 @@ void AppleScreenSharingSession::renderSecondaryFrames()
     }
     for (auto iterator = frames.begin(); iterator != frames.end(); ++iterator) {
         AppleDecodedTile& frame = iterator.value();
-        if ((frame.pixelFormat != AppleDecodedTile::PixelFormat::Vuya &&
-             frame.pixelFormat != AppleDecodedTile::PixelFormat::D3d11Ayuv) ||
-                !frame.isValid()) {
+        if (!frame.isValid()) {
             continue;
         }
         QString uploadError;
-        if (m_SecondaryD3D11Renderer->upload(frame, &uploadError)) {
+        if (m_SecondaryVideoRenderer->upload(frame, &uploadError)) {
             m_SecondaryTileHeights.insert(frame.tileIndex, frame.height);
             m_SecondaryPresentationNeeded.store(true);
         }
@@ -3523,17 +3519,6 @@ void AppleScreenSharingSession::renderSecondaryFrames()
     if (!m_SecondaryPresentationNeeded.exchange(false)) {
         return;
     }
-    int outputWidth = 0;
-    int outputHeight = 0;
-    if (!m_SecondaryD3D11Renderer->outputSize(
-                &outputWidth, &outputHeight)) {
-        return;
-    }
-    const double scale = qMin(
-            static_cast<double>(outputWidth) / canvas.width,
-            static_cast<double>(outputHeight) / canvas.height);
-    const int contentWidth = qRound(canvas.width * scale);
-    const int contentHeight = qRound(canvas.height * scale);
     const int fallbackHeight = (canvas.height + canvas.tileCount - 1) /
             canvas.tileCount;
     QList<int> tileHeights;
@@ -3542,25 +3527,16 @@ void AppleScreenSharingSession::renderSecondaryFrames()
         tileHeights.append(m_SecondaryTileHeights.value(
                 tile, fallbackHeight));
     }
-    const QList<int> boundaries =
-            AppleMediaLayout::verticalTileBoundaries(
-                    canvas, tileHeights, contentHeight);
     QString renderError;
-    const AppleD3D11Renderer::RenderResult result =
-            m_SecondaryD3D11Renderer->render(
+    const AppleVideoRenderer::RenderResult result =
+            m_SecondaryVideoRenderer->render(
                     canvas,
                     tileHeights,
-                    boundaries,
-                    (outputWidth - contentWidth) / 2,
-                    (outputHeight - contentHeight) / 2,
-                    contentWidth,
-                    outputWidth,
-                    outputHeight,
                     &renderError);
-    if (result == AppleD3D11Renderer::RenderResult::Busy) {
+    if (result == AppleVideoRenderer::RenderResult::Busy) {
         m_SecondaryPresentationNeeded.store(true);
     }
-    else if (result == AppleD3D11Renderer::RenderResult::Failed) {
+    else if (result == AppleVideoRenderer::RenderResult::Failed) {
         qWarning().nospace()
                 << "Apple High Performance display 2 render failed: "
                 << renderError;
