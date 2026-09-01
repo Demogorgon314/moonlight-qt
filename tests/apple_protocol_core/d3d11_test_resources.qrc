@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/data">
+        <file alias="d3d11_vertex.fxc">../../app/shaders/d3d11_vertex.fxc</file>
+        <file alias="d3d11_ayuv_pixel.fxc">../../app/shaders/d3d11_ayuv_pixel.fxc</file>
+        <file alias="d3d11_overlay_pixel.fxc">../../app/shaders/d3d11_overlay_pixel.fxc</file>
+    </qresource>
+</RCC>

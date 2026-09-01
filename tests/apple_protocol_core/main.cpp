@@ -2,6 +2,7 @@
 #include "backend/apple/appleaudiostream.h"
 #include "backend/apple/appleconnectionstore.h"
 #include "backend/apple/applecontrolfeatures.h"
+#include "backend/apple/appled3d11renderer.h"
 #include "backend/apple/applefeaturegate.h"
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -21,6 +22,9 @@
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
+
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
 
 #include <atomic>
 #include <cstdio>
@@ -1433,6 +1437,33 @@ void testStageFourAacEldAudioContract()
             qPrintable(QStringLiteral("AAC-ELD decoder probe failed: %1").arg(error)));
 }
 
+void testD3d11PresentationUsesPerSwapChainLowLatencyWait()
+{
+    require(SDL_InitSubSystem(SDL_INIT_VIDEO) == 0,
+            qPrintable(QStringLiteral("SDL video initialization failed: %1")
+                               .arg(QString::fromUtf8(SDL_GetError()))));
+    const auto quitVideo = qScopeGuard([]() { SDL_QuitSubSystem(SDL_INIT_VIDEO); });
+    SDL_Window* window = SDL_CreateWindow(
+            "Apple low-latency presentation test",
+            SDL_WINDOWPOS_UNDEFINED,
+            SDL_WINDOWPOS_UNDEFINED,
+            640,
+            360,
+            SDL_WINDOW_HIDDEN);
+    require(window != nullptr,
+            qPrintable(QStringLiteral("SDL test window creation failed: %1")
+                               .arg(QString::fromUtf8(SDL_GetError()))));
+    const auto destroyWindow = qScopeGuard([window]() { SDL_DestroyWindow(window); });
+
+    AppleD3D11Renderer renderer;
+    QString error;
+    require(renderer.initialize(window, nullptr, &error),
+            qPrintable(QStringLiteral("D3D11 renderer initialization failed: %1")
+                               .arg(error)));
+    require(renderer.usesFrameLatencyWaitableObject(),
+            "D3D11 presentation must use a per-swap-chain latency-1 waitable object");
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -1492,6 +1523,8 @@ int main(int argc, char* argv[])
     testStageFourTextOnlyClipboardExchange();
     std::fprintf(stderr, "testStageFourAacEldAudioContract\n");
     testStageFourAacEldAudioContract();
+    std::fprintf(stderr, "testD3d11PresentationUsesPerSwapChainLowLatencyWait\n");
+    testD3d11PresentationUsesPerSwapChainLowLatencyWait();
     std::fprintf(stderr, "Apple Screen Sharing stage 3 and 4 protocol tests passed\n");
     return 0;
 }

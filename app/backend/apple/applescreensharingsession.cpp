@@ -52,6 +52,7 @@ constexpr qint64 RateControlIntervalMs = 50;
 constexpr qint64 KeyFrameRetryIntervalMs = 1500;
 constexpr qint64 DecoderStallMs = 5000;
 constexpr qint64 PerformanceReportIntervalMs = 1000;
+constexpr int RealtimeMediaPollTimeoutMs = 1;
 constexpr int PerformanceOverlayLineCount = 9;
 constexpr int PerformanceOverlayReservedCharacters = 96;
 constexpr quint32 FixedLanBandwidthKilobitsPerSecond = 60001;
@@ -1204,7 +1205,8 @@ private:
             QString receiveError;
             bool primaryReceived = false;
             if (media.receiveVideo(&datagram,
-                                   secondaryVideo ? 0 : 20,
+                                   secondaryVideo ? 0 :
+                                                    RealtimeMediaPollTimeoutMs,
                                    m_Cancelled,
                                    &receiveError)) {
                 primaryReceived = true;
@@ -2161,7 +2163,10 @@ void AppleScreenSharingSession::mediaReady(
                "vsync=true, maximum-frame-latency=1, format="
             << (decoderDevice != nullptr
                         ? "AYUV 4:4:4 GPU-native"
-                        : "VUYA 4:4:4 upload");
+                        : "VUYA 4:4:4 upload")
+            << ", frame-latency-waitable="
+            << (m_D3D11Renderer->usesFrameLatencyWaitableObject()
+                        ? "true" : "false");
     if (hardwareFallbackOccurred) {
         addLaunchWarning(tr("D3D11VA HEVC decoding was unavailable or failed; the session continued with software decoding."));
     }
@@ -2175,7 +2180,10 @@ void AppleScreenSharingSession::mediaReady(
     updatePerformanceOverlayTexture();
     m_PresentationThread = std::make_unique<ApplePresentationThread>(this);
     m_PresentationThread->start(QThread::HighPriority);
-    qInfo() << "Apple High Performance presentation scheduler=dedicated-high-priority";
+    qInfo().nospace()
+            << "Apple High Performance presentation scheduler="
+               "dedicated-high-priority, media-poll-max="
+            << RealtimeMediaPollTimeoutMs << "ms";
 
     m_EventTimer = new QTimer(this);
     m_EventTimer->setTimerType(Qt::PreciseTimer);
@@ -3137,7 +3145,7 @@ void AppleScreenSharingSession::renderLatestFrames()
         const QString presentationSummary = QStringLiteral(
                 "DISPLAY %1 FPS   VSYNC %2 Hz   TILE UPDATES %3/s   COALESCED %4\n"
                 "FRAME TIME %5 ms avg   %6 p95   JITTER %7 ms\n"
-                "SUBMIT TO DISPLAY %8 ms avg   %9 p95\n"
+                        "DECODE TO PRESENT %8 ms avg   %9 p95\n"
                 "PRESENT CALL %10 ms avg   %11 p95   BUSY %12")
                 .arg(m_DisplayedFrameBatches / seconds, 0, 'f', 1)
                 .arg(m_PresentationCount / seconds, 0, 'f', 1)
@@ -3167,7 +3175,7 @@ void AppleScreenSharingSession::renderLatestFrames()
                 << QString::number(displayCadence.average, 'f', 1) << "/"
                 << QString::number(displayCadence.percentile95, 'f', 1) << "/"
                 << QString::number(displayCadence.jitter, 'f', 1)
-                << " ms, submit-to-display avg/p95="
+                << " ms, decode-to-present avg/p95="
                 << QString::number(submitToDisplay.average, 'f', 1) << "/"
                 << QString::number(submitToDisplay.percentile95, 'f', 1)
                 << " ms, present-call avg/p95="

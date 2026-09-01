@@ -1,4 +1,4 @@
-QT += core network zlib-private
+QT += core gui network zlib-private
 CONFIG += console c++17
 CONFIG -= app_bundle
 TEMPLATE = app
@@ -11,7 +11,7 @@ INCLUDEPATH += \
 
 win32 {
     INCLUDEPATH += ../../libs/windows/include/x64/SDL2
-    LIBS += -L../../libs/windows/lib/x64 -llibcrypto -lavcodec -lavutil -lswscale -lSDL2 -ladvapi32 -lws2_32
+    LIBS += -L../../libs/windows/lib/x64 -llibcrypto -lavcodec -lavutil -lswscale -lSDL2 -ladvapi32 -ld3d11 -ldxgi -luser32 -lws2_32
 }
 
 SOURCES += \
@@ -25,6 +25,7 @@ SOURCES += \
     ../../app/backend/apple/appleauthenticator.cpp \
     ../../app/backend/apple/applemediatransport.cpp \
     ../../app/backend/apple/applemediaprotocol.cpp \
+    ../../app/backend/apple/appled3d11renderer.cpp \
     ../../app/backend/apple/applevideodecoder.cpp \
     ../../app/backend/apple/applewindowplacement.cpp \
     ../../app/settings/devicelocalsettings.cpp
@@ -39,6 +40,9 @@ HEADERS += \
     ../../app/backend/apple/appleauthenticator.h \
     ../../app/backend/apple/applemediatransport.h \
     ../../app/backend/apple/applemediaprotocol.h \
+    ../../app/backend/apple/appled3d11renderer.h \
     ../../app/backend/apple/applevideodecoder.h \
     ../../app/backend/apple/applewindowplacement.h \
     ../../app/settings/devicelocalsettings.h
+
+RESOURCES += d3d11_test_resources.qrc

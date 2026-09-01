@@ -34,6 +34,7 @@ public:
     bool initialize(SDL_Window* window,
                     void* decoderDevice = nullptr,
                     QString* error = nullptr);
+    bool usesFrameLatencyWaitableObject() const;
     bool outputSize(int* width, int* height) const;
     bool upload(const AppleDecodedTile& frame, QString* error = nullptr);
     bool uploadOverlay(const QImage& image, QString* error = nullptr);

@@ -15,6 +15,7 @@
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <wrl/client.h>
 
 extern "C" {
@@ -119,6 +120,13 @@ ColorConversionConstants colorConversion(
 class AppleD3D11Renderer::Implementation
 {
 public:
+    ~Implementation()
+    {
+        if (frameLatencyWaitableObject != nullptr) {
+            CloseHandle(frameLatencyWaitableObject);
+        }
+    }
+
     struct TileTexture
     {
         int width = 0;
@@ -140,6 +148,9 @@ public:
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swapChain;
+    ComPtr<IDXGISwapChain2> lowLatencySwapChain;
+    HANDLE frameLatencyWaitableObject = nullptr;
+    UINT swapChainFlags = 0;
     ComPtr<ID3D11RenderTargetView> renderTarget;
     ComPtr<ID3D11VertexShader> vertexShader;
     ComPtr<ID3D11PixelShader> videoPixelShader;
@@ -210,7 +221,8 @@ public:
         renderTarget.Reset();
         const HRESULT result = swapChain->ResizeBuffers(
                 0, static_cast<UINT>(outputWidth),
-                static_cast<UINT>(outputHeight), DXGI_FORMAT_UNKNOWN, 0);
+                static_cast<UINT>(outputHeight), DXGI_FORMAT_UNKNOWN,
+                swapChainFlags);
         if (FAILED(result)) {
             setError(error, d3dError(QStringLiteral("ResizeBuffers"), result));
             return false;
@@ -288,12 +300,6 @@ bool AppleD3D11Renderer::initialize(SDL_Window* window,
         return false;
     }
 
-    ComPtr<IDXGIDevice1> dxgiDevice;
-    if (SUCCEEDED(implementation.device.As(&dxgiDevice))) {
-        // Replace stale desktop frames instead of allowing the default DXGI
-        // multi-frame render-ahead queue to grow input latency.
-        dxgiDevice->SetMaximumFrameLatency(1);
-    }
     ComPtr<IDXGIDevice> baseDxgiDevice;
     ComPtr<IDXGIAdapter> adapter;
     ComPtr<IDXGIFactory2> factory;
@@ -311,13 +317,35 @@ bool AppleD3D11Renderer::initialize(SDL_Window* window,
     swapChainDescription.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swapChainDescription.BufferCount = 2;
     swapChainDescription.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    swapChainDescription.Flags =
+            DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     ComPtr<IDXGISwapChain1> swapChain;
     result = factory->CreateSwapChainForHwnd(
             implementation.device.Get(), implementation.window,
             &swapChainDescription, nullptr, nullptr, &swapChain);
+    if (SUCCEEDED(result) &&
+            SUCCEEDED(swapChain.As(&implementation.lowLatencySwapChain)) &&
+            SUCCEEDED(implementation.lowLatencySwapChain->SetMaximumFrameLatency(1))) {
+        implementation.frameLatencyWaitableObject =
+                implementation.lowLatencySwapChain->GetFrameLatencyWaitableObject();
+    }
+    if (FAILED(result) || implementation.frameLatencyWaitableObject == nullptr) {
+        if (implementation.frameLatencyWaitableObject != nullptr) {
+            CloseHandle(implementation.frameLatencyWaitableObject);
+            implementation.frameLatencyWaitableObject = nullptr;
+        }
+        implementation.lowLatencySwapChain.Reset();
+        swapChain.Reset();
+        swapChainDescription.Flags = 0;
+        result = factory->CreateSwapChainForHwnd(
+                implementation.device.Get(), implementation.window,
+                &swapChainDescription, nullptr, nullptr, &swapChain);
+    }
     if (FAILED(result)) {
+        swapChain.Reset();
         swapChainDescription.BufferCount = 1;
         swapChainDescription.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        swapChainDescription.Flags = 0;
         result = factory->CreateSwapChainForHwnd(
                 implementation.device.Get(), implementation.window,
                 &swapChainDescription, nullptr, nullptr, &swapChain);
@@ -326,6 +354,15 @@ bool AppleD3D11Renderer::initialize(SDL_Window* window,
         setError(error, d3dError(QStringLiteral("CreateSwapChainForHwnd"),
                                  result));
         return false;
+    }
+    implementation.swapChainFlags = swapChainDescription.Flags;
+    if (implementation.frameLatencyWaitableObject == nullptr) {
+        ComPtr<IDXGIDevice1> dxgiDevice;
+        if (SUCCEEDED(implementation.device.As(&dxgiDevice))) {
+            // Legacy swap chains have only the device-wide queue limit. The
+            // waitable path uses the per-swap-chain latency contract instead.
+            dxgiDevice->SetMaximumFrameLatency(1);
+        }
     }
     factory->MakeWindowAssociation(implementation.window,
                                    DXGI_MWA_NO_ALT_ENTER);
@@ -472,6 +509,12 @@ bool AppleD3D11Renderer::initialize(SDL_Window* window,
         return false;
     }
     return true;
+}
+
+bool AppleD3D11Renderer::usesFrameLatencyWaitableObject() const
+{
+    return m_Implementation != nullptr &&
+            m_Implementation->frameLatencyWaitableObject != nullptr;
 }
 
 bool AppleD3D11Renderer::outputSize(int* width, int* height) const
@@ -698,6 +741,12 @@ AppleD3D11Renderer::RenderResult AppleD3D11Renderer::render(
     if (!implementation.resizeIfNeeded(error)) {
         return RenderResult::Failed;
     }
+    if (implementation.frameLatencyWaitableObject != nullptr &&
+            WaitForSingleObjectEx(
+                    implementation.frameLatencyWaitableObject, 0, FALSE) !=
+                    WAIT_OBJECT_0) {
+        return RenderResult::Busy;
+    }
     // Use the actual back-buffer dimensions after a resize. The caller's
     // values normally match, but DXGI may round during a DPI transition.
     outputWidth = implementation.outputWidth;
@@ -820,13 +869,14 @@ AppleD3D11Renderer::RenderResult AppleD3D11Renderer::render(
 
     ID3D11ShaderResourceView* noResource = nullptr;
     implementation.context->PSSetShaderResources(0, 1, &noResource);
-    // The renderer and D3D11VA decoder intentionally share a device so decoded
-    // AYUV textures stay GPU-native. A blocking Present() would therefore hold
-    // the same immediate context until vblank and delay subsequent decoder
-    // submissions. Swift's Metal path queues presentation asynchronously; use
-    // the DXGI equivalent while retaining sync interval 1 (no tearing).
+    // A latency-1 waitable swap chain admits rendering only after the previous
+    // frame has left the queue. This mirrors Swift's two-drawable asynchronous
+    // Metal path: the newest desktop state reaches the next vblank without an
+    // older rendered frame in front of it, while sync interval 1 prevents tears.
+    const UINT presentFlags = implementation.frameLatencyWaitableObject != nullptr
+            ? 0 : DXGI_PRESENT_DO_NOT_WAIT;
     const HRESULT presentResult = implementation.swapChain->Present(
-            1, DXGI_PRESENT_DO_NOT_WAIT);
+            1, presentFlags);
     if (presentResult == DXGI_ERROR_WAS_STILL_DRAWING) {
         return RenderResult::Busy;
     }
