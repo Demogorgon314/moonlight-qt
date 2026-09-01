@@ -109,6 +109,11 @@ public:
                    const QByteArray& masterKey,
                    std::atomic_bool* cancelled,
                    QString* error);
+    bool negotiate(AppleByteTransport& transport,
+                   const QByteArray& masterKey,
+                   const QByteArray& displayConfiguration,
+                   std::atomic_bool* cancelled,
+                   QString* error);
     bool sendEncrypted(AppleByteTransport& transport,
                        const QByteArray& message,
                        std::atomic_bool* cancelled,

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QByteArray>
+#include <QList>
+#include <QSize>
 #include <QString>
 
 #include <atomic>
@@ -14,6 +16,9 @@ QByteArray setEncryption();
 QByteArray setEncodings();
 QByteArray postEncryptionToggle();
 QByteArray displayConfiguration(int width = 1440, int height = 900);
+QByteArray displayConfiguration(const QList<QSize>& displaySizes,
+                                double backingScale = 2.0,
+                                bool hdr = false);
 
 bool parseVersionBanner(const QByteArray& data);
 bool parsePublicKeyResponse(const QByteArray& packet,

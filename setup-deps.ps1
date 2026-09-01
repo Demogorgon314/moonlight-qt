@@ -28,4 +28,8 @@ foreach ($AssetName in $Assets) {
     Remove-Item $ArchivePath
 }
 
+if ($env:MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING -eq '1') {
+    & (Join-Path $PSScriptRoot 'scripts\setup-apple-audio.ps1')
+}
+
 Write-Host "Dependencies successfully deployed" -ForegroundColor Green

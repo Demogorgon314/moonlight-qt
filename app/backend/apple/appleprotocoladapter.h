@@ -61,6 +61,10 @@ public:
     bool selectEndpoint(const ConnectionIdentity&, const QString&, int) override { return false; }
     bool selectAutomaticEndpoint(const ConnectionIdentity&) override { return false; }
     QVariantMap activeEndpoint(const ConnectionIdentity& identity) const override;
+    QVariantMap sessionOptions(const ConnectionIdentity& identity) const override;
+    bool setSessionOptions(const ConnectionIdentity& identity,
+                           const QVariantMap& options,
+                           QString* error) override;
 
     std::unique_ptr<ResolvedLaunchPlan> resolveLaunch(const LaunchRequest& request,
                                                        QString* error) const override;

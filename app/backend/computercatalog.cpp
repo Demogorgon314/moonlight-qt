@@ -263,6 +263,35 @@ QVariantMap ComputerCatalog::activeEndpoint(const QString& connectionId) const
     return adapter != nullptr ? adapter->activeEndpoint(identity) : QVariantMap();
 }
 
+QVariantMap ComputerCatalog::connectionSessionOptions(
+        const QString& connectionId) const
+{
+    bool valid = false;
+    const ConnectionIdentity identity = ConnectionIdentity::fromString(
+            connectionId, &valid);
+    ProtocolAdapter* adapter = valid ? adapterFor(identity) : nullptr;
+    return adapter != nullptr ? adapter->sessionOptions(identity)
+                              : QVariantMap();
+}
+
+bool ComputerCatalog::setConnectionSessionOptions(
+        const QString& connectionId,
+        const QVariantMap& options,
+        QString* error)
+{
+    bool valid = false;
+    const ConnectionIdentity identity = ConnectionIdentity::fromString(
+            connectionId, &valid);
+    ProtocolAdapter* adapter = valid ? adapterFor(identity) : nullptr;
+    if (adapter == nullptr) {
+        if (error != nullptr) {
+            *error = tr("The selected connection is unavailable.");
+        }
+        return false;
+    }
+    return adapter->setSessionOptions(identity, options, error);
+}
+
 std::unique_ptr<ResolvedLaunchPlan> ComputerCatalog::resolveLaunch(
         const QString& connectionId,
         const QString& activityId,

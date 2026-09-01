@@ -9,8 +9,10 @@
 #include <openssl/rand.h>
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace {
 
@@ -243,7 +245,23 @@ QByteArray postEncryptionToggle()
 
 QByteArray displayConfiguration(int width, int height)
 {
-    if (width <= 0 || height <= 0) {
+    return displayConfiguration({QSize(width, height)});
+}
+
+QByteArray displayConfiguration(const QList<QSize>& displaySizes,
+                                double backingScale,
+                                bool hdr)
+{
+    if (displaySizes.isEmpty() || displaySizes.size() > 2 ||
+            !std::isfinite(backingScale) || backingScale <= 0.0 ||
+            std::any_of(displaySizes.cbegin(), displaySizes.cend(),
+                        [backingScale](const QSize& size) {
+        return size.width() <= 0 || size.height() <= 0 ||
+                size.width() * backingScale >
+                        std::numeric_limits<quint32>::max() ||
+                size.height() * backingScale >
+                        std::numeric_limits<quint32>::max();
+    })) {
         return {};
     }
     constexpr int DescriptorHeaderSize = 0x9c;
@@ -258,54 +276,64 @@ QByteArray displayConfiguration(int width, int height)
         {{2624, 1696, 1312, 848}},
     }};
 
-    QByteArray descriptor(DescriptorSize, '\0');
-    writeUInt16(descriptor, 0, DescriptorSize);
-    const QByteArray displayName = QByteArrayLiteral("Moonlight V+ Virtual Display");
-    std::memcpy(descriptor.data() + 2,
-                displayName.constData(),
-                static_cast<size_t>(qMin(displayName.size(), 119)));
-    writeUInt32(descriptor, 0x7a, 1);
-    writeUInt32(descriptor, 0x7e, 4);
-    float physicalWidth = 369.4545593261719f;
-    float physicalHeight = 207.81817626953125f;
-    quint32 physicalWidthBits = 0;
-    quint32 physicalHeightBits = 0;
-    std::memcpy(&physicalWidthBits, &physicalWidth, sizeof(physicalWidthBits));
-    std::memcpy(&physicalHeightBits, &physicalHeight, sizeof(physicalHeightBits));
-    writeUInt32(descriptor, 0x82, physicalWidthBits);
-    writeUInt32(descriptor, 0x86, physicalHeightBits);
-    writeUInt32(descriptor, 0x8a, 3840);
-    writeUInt32(descriptor, 0x8e, 2160);
-    writeUInt32(descriptor, 0x96, 7);
-    writeUInt16(descriptor, 0x9a, ModeCount);
+    QList<QByteArray> descriptors;
+    descriptors.reserve(displaySizes.size());
+    for (const QSize& size : displaySizes) {
+        QByteArray descriptor(DescriptorSize, '\0');
+        writeUInt16(descriptor, 0, DescriptorSize);
+        const QByteArray displayName = QByteArrayLiteral("Moonlight V+ Virtual Display");
+        std::memcpy(descriptor.data() + 2,
+                    displayName.constData(),
+                    static_cast<size_t>(qMin(displayName.size(), 119)));
+        writeUInt32(descriptor, 0x7a, 1);
+        writeUInt32(descriptor, 0x7e, 4);
+        float physicalWidth = 369.4545593261719f;
+        float physicalHeight = 207.81817626953125f;
+        quint32 physicalWidthBits = 0;
+        quint32 physicalHeightBits = 0;
+        std::memcpy(&physicalWidthBits, &physicalWidth, sizeof(physicalWidthBits));
+        std::memcpy(&physicalHeightBits, &physicalHeight, sizeof(physicalHeightBits));
+        writeUInt32(descriptor, 0x82, physicalWidthBits);
+        writeUInt32(descriptor, 0x86, physicalHeightBits);
+        writeUInt32(descriptor, 0x8a, 3840);
+        writeUInt32(descriptor, 0x8e, 2160);
+        writeUInt32(descriptor, 0x96, 7);
+        writeUInt16(descriptor, 0x9a, ModeCount);
 
-    for (int index = 0; index < ModeCount; ++index) {
-        const double horizontalScale = static_cast<double>(width) / 1920.0;
-        const double verticalScale = static_cast<double>(height) / 1080.0;
-        const quint32 pointWidth = static_cast<quint32>(
-                qRound(modes[index][2] * horizontalScale));
-        const quint32 pointHeight = static_cast<quint32>(
-                qRound(modes[index][3] * verticalScale));
-        const int offset = DescriptorHeaderSize + ModeSize * index;
-        writeUInt32(descriptor, offset, pointWidth * 2);
-        writeUInt32(descriptor, offset + 4, pointHeight * 2);
-        writeUInt32(descriptor, offset + 8, pointWidth);
-        writeUInt32(descriptor, offset + 12, pointHeight);
-        const double refreshRate = 60.0;
-        quint64 refreshBits = 0;
-        std::memcpy(&refreshBits, &refreshRate, sizeof(refreshBits));
-        writeUInt64(descriptor, offset + 16, refreshBits);
-        writeUInt32(descriptor, offset + 24, 0);
+        for (int index = 0; index < ModeCount; ++index) {
+            const double horizontalScale = static_cast<double>(size.width()) / 1920.0;
+            const double verticalScale = static_cast<double>(size.height()) / 1080.0;
+            const quint32 pointWidth = static_cast<quint32>(
+                    qRound(modes[index][2] * horizontalScale));
+            const quint32 pointHeight = static_cast<quint32>(
+                    qRound(modes[index][3] * verticalScale));
+            const int offset = DescriptorHeaderSize + ModeSize * index;
+            writeUInt32(descriptor, offset, static_cast<quint32>(
+                    qRound(pointWidth * backingScale)));
+            writeUInt32(descriptor, offset + 4, static_cast<quint32>(
+                    qRound(pointHeight * backingScale)));
+            writeUInt32(descriptor, offset + 8, pointWidth);
+            writeUInt32(descriptor, offset + 12, pointHeight);
+            const double refreshRate = 60.0;
+            quint64 refreshBits = 0;
+            std::memcpy(&refreshBits, &refreshRate, sizeof(refreshBits));
+            writeUInt64(descriptor, offset + 16, refreshBits);
+            writeUInt32(descriptor, offset + 24, hdr ? 1 : 0);
+        }
+        descriptors.append(std::move(descriptor));
     }
 
     QByteArray message;
     message.append(char(0x1d));
     message.append(char(0));
-    appendUInt16(message, static_cast<quint16>(8 + DescriptorSize));
+    appendUInt16(message, static_cast<quint16>(
+            8 + DescriptorSize * descriptors.size()));
     appendUInt16(message, 1);
-    appendUInt16(message, 1);
+    appendUInt16(message, static_cast<quint16>(descriptors.size()));
     appendUInt32(message, 0);
-    message.append(descriptor);
+    for (const QByteArray& descriptor : std::as_const(descriptors)) {
+        message.append(descriptor);
+    }
     return message;
 }
 

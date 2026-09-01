@@ -57,6 +57,9 @@ public:
                                                  QString address,
                                                  int port);
     Q_INVOKABLE bool resetToAutomaticAddressForComputer(QString connectionId);
+    Q_INVOKABLE QVariantMap getSessionOptions(QString connectionId) const;
+    Q_INVOKABLE bool setSessionOptions(QString connectionId,
+                                       QVariantMap options);
 
 signals:
     void pairingCompleted(QVariant error);

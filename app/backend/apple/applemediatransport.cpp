@@ -1,6 +1,7 @@
 #include "applemediatransport.h"
 
 #include "appleauthenticator.h"
+#include "applecontrolfeatures.h"
 #include "appleprotocol.h"
 
 #include <QCoreApplication>
@@ -93,10 +94,13 @@ AppleMediaTransport::~AppleMediaTransport()
 
 bool AppleMediaTransport::open(const QHostAddress& remoteAddress,
                                quint16 basePort,
+                               int displayCount,
                                QString* error)
 {
     close();
-    if (remoteAddress.isNull() || basePort == 0 || basePort == 65535) {
+    if (remoteAddress.isNull() || basePort == 0 ||
+            displayCount < 1 || displayCount > 2 ||
+            basePort > 65535 - displayCount) {
         setError(error, QCoreApplication::translate(
                 "AppleMediaTransport", "The Mac has an invalid media address."));
         return false;
@@ -104,10 +108,16 @@ bool AppleMediaTransport::open(const QHostAddress& remoteAddress,
     m_RemoteAddress = remoteAddress;
     m_ControlRemotePort = basePort;
     m_VideoRemotePort = basePort + 1;
+    m_SecondaryVideoRemotePort = displayCount > 1 ? basePort + 2 : 0;
     m_ControlSocket = std::make_unique<QUdpSocket>();
     m_VideoSocket = std::make_unique<QUdpSocket>();
+    if (displayCount > 1) {
+        m_SecondaryVideoSocket = std::make_unique<QUdpSocket>();
+    }
     if (!bindSocket(m_ControlSocket.get(), basePort, error) ||
-            !bindSocket(m_VideoSocket.get(), basePort + 1, error)) {
+            !bindSocket(m_VideoSocket.get(), basePort + 1, error) ||
+            (m_SecondaryVideoSocket &&
+             !bindSocket(m_SecondaryVideoSocket.get(), basePort + 2, error))) {
         close();
         return false;
     }
@@ -150,12 +160,24 @@ bool AppleMediaTransport::bindSocket(QUdpSocket* socket,
     return false;
 }
 
-void AppleMediaTransport::configureRemotePorts(const AppleMediaPorts& ports)
+bool AppleMediaTransport::configureRemotePorts(const AppleMediaPorts& ports,
+                                               QString* error)
 {
-    if (ports.isUsable()) {
-        m_ControlRemotePort = ports.audio;
-        m_VideoRemotePort = ports.video;
+    const QList<quint16> videoPorts = ports.videoPorts();
+    const int expectedVideoCount = m_SecondaryVideoSocket ? 2 : 1;
+    if (!isOpen() || !ports.isUsable() ||
+            videoPorts.size() != expectedVideoCount) {
+        setError(error, QCoreApplication::translate(
+                "AppleMediaTransport",
+                "The Mac returned an invalid set of media ports."));
+        return false;
     }
+    m_ControlRemotePort = ports.audio;
+    m_VideoRemotePort = videoPorts.at(0);
+    if (m_SecondaryVideoSocket) {
+        m_SecondaryVideoRemotePort = videoPorts.at(1);
+    }
+    return true;
 }
 
 void AppleMediaTransport::punchIfDue()
@@ -170,6 +192,10 @@ void AppleMediaTransport::punchIfDue()
     const QByteArray byte(1, '\0');
     m_ControlSocket->writeDatagram(byte, m_RemoteAddress, m_ControlRemotePort);
     m_VideoSocket->writeDatagram(byte, m_RemoteAddress, m_VideoRemotePort);
+    if (m_SecondaryVideoSocket) {
+        m_SecondaryVideoSocket->writeDatagram(
+                byte, m_RemoteAddress, m_SecondaryVideoRemotePort);
+    }
     m_LastPunchMilliseconds = now;
 }
 
@@ -183,31 +209,43 @@ bool AppleMediaTransport::receiveVideo(QByteArray* datagram,
                                        std::atomic_bool* cancelled,
                                        QString* error)
 {
-    if (!isOpen() || datagram == nullptr) {
+    return receiveVideo(0, datagram, timeoutMilliseconds,
+                        cancelled, error);
+}
+
+bool AppleMediaTransport::receiveVideo(int mediaStreamIndex,
+                                       QByteArray* datagram,
+                                       int timeoutMilliseconds,
+                                       std::atomic_bool* cancelled,
+                                       QString* error)
+{
+    QUdpSocket* socket = mediaStreamIndex == 0 ? m_VideoSocket.get()
+            : mediaStreamIndex == 1 ? m_SecondaryVideoSocket.get() : nullptr;
+    if (!isOpen() || datagram == nullptr || socket == nullptr) {
         return false;
     }
-    if (m_VideoSocket->state() != QAbstractSocket::BoundState) {
+    if (socket->state() != QAbstractSocket::BoundState) {
         setError(error, QCoreApplication::translate(
                 "AppleMediaTransport", "The video UDP socket became unavailable: %1")
-                .arg(m_VideoSocket->errorString()));
+                .arg(socket->errorString()));
         return false;
     }
     punchIfDue();
-    if (!m_VideoSocket->hasPendingDatagrams() &&
-            !m_VideoSocket->waitForReadyRead(qMax(0, timeoutMilliseconds))) {
-        if (m_VideoSocket->error() != QAbstractSocket::SocketTimeoutError &&
+    if (!socket->hasPendingDatagrams() &&
+            !socket->waitForReadyRead(qMax(0, timeoutMilliseconds))) {
+        if (socket->error() != QAbstractSocket::SocketTimeoutError &&
                 !isCancelled(cancelled)) {
             setError(error, QCoreApplication::translate(
                     "AppleMediaTransport", "The video socket failed: %1")
-                    .arg(m_VideoSocket->errorString()));
+                    .arg(socket->errorString()));
         }
         return false;
     }
-    if (isCancelled(cancelled) || !m_VideoSocket->hasPendingDatagrams()) {
+    if (isCancelled(cancelled) || !socket->hasPendingDatagrams()) {
         return false;
     }
     QByteArray buffer(MaximumDatagramLength, Qt::Uninitialized);
-    const qint64 received = m_VideoSocket->readDatagram(buffer.data(), buffer.size());
+    const qint64 received = socket->readDatagram(buffer.data(), buffer.size());
     if (received <= 0) {
         return false;
     }
@@ -238,9 +276,20 @@ QList<QByteArray> AppleMediaTransport::drainControl()
 bool AppleMediaTransport::sendVideoControl(const QByteArray& datagram,
                                            QString* error)
 {
-    if (!m_VideoSocket || datagram.isEmpty() ||
-            m_VideoSocket->writeDatagram(datagram, m_RemoteAddress,
-                                         m_VideoRemotePort) != datagram.size()) {
+    return sendVideoControl(0, datagram, error);
+}
+
+bool AppleMediaTransport::sendVideoControl(int mediaStreamIndex,
+                                           const QByteArray& datagram,
+                                           QString* error)
+{
+    QUdpSocket* socket = mediaStreamIndex == 0 ? m_VideoSocket.get()
+            : mediaStreamIndex == 1 ? m_SecondaryVideoSocket.get() : nullptr;
+    const quint16 port = mediaStreamIndex == 0 ? m_VideoRemotePort
+            : mediaStreamIndex == 1 ? m_SecondaryVideoRemotePort : 0;
+    if (socket == nullptr || port == 0 || datagram.isEmpty() ||
+            socket->writeDatagram(datagram, m_RemoteAddress, port) !=
+                    datagram.size()) {
         setError(error, QCoreApplication::translate(
                 "AppleMediaTransport", "Screen Sharing recovery feedback could not be sent."));
         return false;
@@ -259,9 +308,14 @@ void AppleMediaTransport::close()
         m_VideoSocket->abort();
         m_VideoSocket.reset();
     }
+    if (m_SecondaryVideoSocket) {
+        m_SecondaryVideoSocket->abort();
+        m_SecondaryVideoSocket.reset();
+    }
     m_RemoteAddress.clear();
     m_ControlRemotePort = 0;
     m_VideoRemotePort = 0;
+    m_SecondaryVideoRemotePort = 0;
 }
 
 bool AppleMediaTransport::isOpen() const
@@ -276,11 +330,14 @@ bool AppleMediaNegotiator::negotiate(
         AppleMediaTransport& media,
         quint16 basePort,
         bool audioEnabled,
+        int displayCount,
         AppleMediaNegotiationResult* result,
         std::atomic_bool* cancelled,
         QString* error) const
 {
-    if (result == nullptr || !media.open(tcp.peerAddress(), basePort, error)) {
+    displayCount = qBound(1, displayCount, 2);
+    if (result == nullptr ||
+            !media.open(tcp.peerAddress(), basePort, displayCount, error)) {
         return false;
     }
     tcp.setWaitCallback([&media]() { media.punchIfDue(); });
@@ -288,12 +345,25 @@ bool AppleMediaNegotiator::negotiate(
     AppleMediaNegotiationResult candidate;
     candidate.offers = AppleMediaWire::createOffers(
             audioEnabled, QSysInfo::prettyProductName(), error);
+    AppleMediaOffers secondaryOffers;
+    if (displayCount > 1) {
+        secondaryOffers = AppleMediaWire::createOffers(
+                audioEnabled, QSysInfo::prettyProductName(), error);
+    }
     candidate.keys.audioViewer = randomBytes(AppleMediaKeys::BlobLength, error);
     candidate.keys.audioServer = randomBytes(AppleMediaKeys::BlobLength, error);
     candidate.keys.videoViewer = randomBytes(AppleMediaKeys::BlobLength, error);
     candidate.keys.videoServer = randomBytes(AppleMediaKeys::BlobLength, error);
+    if (displayCount > 1) {
+        candidate.keys.secondaryVideoViewer = randomBytes(
+                AppleMediaKeys::BlobLength, error);
+        candidate.keys.secondaryVideoServer = randomBytes(
+                AppleMediaKeys::BlobLength, error);
+    }
     candidate.configuration = AppleMediaWire::configuration(
-            candidate.offers, candidate.keys, QUuid::createUuid(), error);
+            candidate.offers,
+            displayCount > 1 ? &secondaryOffers : nullptr,
+            candidate.keys, QUuid::createUuid(), error);
     if (!candidate.keys.isValid() || candidate.configuration.isEmpty()) {
         tcp.setWaitCallback({});
         return false;
@@ -310,6 +380,25 @@ bool AppleMediaNegotiator::negotiate(
             return false;
         }
     }
+    if (displayCount > 1) {
+        bool receivedLayout = false;
+        while (!isCancelled(cancelled) && !receivedLayout) {
+            QByteArray response;
+            if (!control.receiveEncrypted(tcp, &response, cancelled, error)) {
+                tcp.setWaitCallback({});
+                return false;
+            }
+            candidate.pendingMessages.append(response);
+            const AppleControlEvents events =
+                    AppleControlEventParser::parse(response);
+            receivedLayout = std::any_of(
+                    events.displayLayouts.cbegin(),
+                    events.displayLayouts.cend(),
+                    [displayCount](const AppleDisplayLayout& layout) {
+                return layout.displays.size() >= displayCount;
+            });
+        }
+    }
     if (!control.sendEncrypted(tcp, candidate.configuration, cancelled, error)) {
         tcp.setWaitCallback({});
         return false;
@@ -317,6 +406,7 @@ bool AppleMediaNegotiator::negotiate(
 
     int retryCount = 0;
     bool configuredPorts = false;
+    QList<AppleCanvas> negotiatedCanvases;
     while (!isCancelled(cancelled) && retryCount <= NegotiationRetryLimit) {
         QByteArray response;
         if (!control.receiveEncrypted(tcp, &response, cancelled, error)) {
@@ -325,12 +415,38 @@ bool AppleMediaNegotiator::negotiate(
         }
         if (!configuredPorts) {
             AppleMediaPorts ports;
-            if (AppleMediaWire::parsePorts(response, &ports)) {
-                media.configureRemotePorts(ports);
+            if (AppleMediaWire::parsePorts(response, &ports) &&
+                    ports.videoPorts().size() == displayCount) {
+                if (!media.configureRemotePorts(ports, error)) {
+                    tcp.setWaitCallback({});
+                    return false;
+                }
                 configuredPorts = true;
             }
         }
-        if (AppleMediaWire::parseCanvas(response, &candidate.canvas)) {
+        negotiatedCanvases.append(AppleMediaWire::parseCanvases(response));
+        if (negotiatedCanvases.size() >= displayCount) {
+            candidate.canvas = negotiatedCanvases.at(0);
+            candidate.videos = {
+                AppleVideoNegotiation{
+                    candidate.keys.videoViewer,
+                    candidate.keys.videoServer,
+                    candidate.offers.videoSynchronizationSource,
+                    negotiatedCanvases.at(0),
+                    0,
+                    0,
+                },
+            };
+            if (displayCount > 1) {
+                candidate.videos.append(AppleVideoNegotiation{
+                    candidate.keys.secondaryVideoViewer,
+                    candidate.keys.secondaryVideoServer,
+                    secondaryOffers.videoSynchronizationSource,
+                    negotiatedCanvases.at(1),
+                    1,
+                    1,
+                });
+            }
             media.stopPunching();
             tcp.setWaitCallback({});
             *result = std::move(candidate);

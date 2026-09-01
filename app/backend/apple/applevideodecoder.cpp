@@ -527,6 +527,14 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
     return result;
 }
 
+void AppleHevcDecoder::flush()
+{
+    if (m_Context != nullptr) {
+        avcodec_flush_buffers(m_Context);
+    }
+    m_ParameterSetsSubmitted = false;
+}
+
 AppleDecodedTile AppleHevcDecoder::convertFrame(
         AVFrame* frame,
         int tileIndex,

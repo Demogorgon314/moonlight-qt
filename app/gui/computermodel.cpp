@@ -250,6 +250,30 @@ bool ComputerModel::setActiveAddressForComputer(QString connectionId,
     return m_Catalog != nullptr && m_Catalog->selectEndpoint(connectionId, address, port);
 }
 
+QVariantMap ComputerModel::getSessionOptions(QString connectionId) const
+{
+    return m_Catalog != nullptr
+            ? m_Catalog->connectionSessionOptions(connectionId)
+            : QVariantMap();
+}
+
+bool ComputerModel::setSessionOptions(QString connectionId,
+                                      QVariantMap options)
+{
+    if (m_Catalog == nullptr) {
+        emit operationFailed(tr("The connection catalog is not available."));
+        return false;
+    }
+    QString error;
+    if (!m_Catalog->setConnectionSessionOptions(
+                connectionId, options, &error)) {
+        emit operationFailed(error.isEmpty()
+                ? tr("The session options could not be saved.") : error);
+        return false;
+    }
+    return true;
+}
+
 bool ComputerModel::resetToAutomaticAddressForComputer(QString connectionId)
 {
     return m_Catalog != nullptr && m_Catalog->selectAutomaticEndpoint(connectionId);

@@ -1,6 +1,7 @@
 #include "applescreensharingsession.h"
 
 #include "appleauthenticator.h"
+#include "appleaudiostream.h"
 #include "applecredentialstore.h"
 #include "appled3d11renderer.h"
 #include "applemediatransport.h"
@@ -9,26 +10,34 @@
 #include "SDL.h"
 
 #include <QCoreApplication>
+#include <QClipboard>
 #include <QDebug>
 #include <QElapsedTimer>
 #include <QFont>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QImage>
 #include <QMetaObject>
+#include <QMimeData>
 #include <QMutexLocker>
 #include <QPainter>
 #include <QPointer>
 #include <QQuickWindow>
 #include <QRunnable>
+#include <QSemaphore>
 #include <QSettings>
 #include <QStringList>
 #include <QThread>
 #include <QThreadPool>
 #include <QTimer>
+#include <QUrl>
+
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -41,9 +50,10 @@ constexpr qint64 RateControlIntervalMs = 50;
 constexpr qint64 KeyFrameRetryIntervalMs = 1500;
 constexpr qint64 DecoderStallMs = 5000;
 constexpr qint64 PerformanceReportIntervalMs = 1000;
-constexpr int PerformanceOverlayLineCount = 6;
+constexpr int PerformanceOverlayLineCount = 9;
 constexpr int PerformanceOverlayReservedCharacters = 96;
 constexpr quint32 FixedLanBandwidthKilobitsPerSecond = 60001;
+constexpr int MaximumReconnectAttempts = 3;
 
 struct IntervalStatistics
 {
@@ -140,7 +150,443 @@ quint8 appleButtonForSdl(quint8 button)
     }
 }
 
+bool clipboardContainsFiles(const QMimeData* mime)
+{
+    if (mime == nullptr) {
+        return false;
+    }
+    if (mime->hasUrls()) {
+        for (const QUrl& url : mime->urls()) {
+            if (url.isLocalFile()) {
+                return true;
+            }
+        }
+    }
+    static const QStringList markers = {
+        QStringLiteral("public.file-url"),
+        QStringLiteral("NSFilenamesPboardType"),
+        QStringLiteral("promised-file"),
+        QStringLiteral("FileNameW"),
+        QStringLiteral("FileGroupDescriptor"),
+        QStringLiteral("FileContents"),
+        QStringLiteral("Shell IDList Array"),
+    };
+    for (const QString& format : mime->formats()) {
+        for (const QString& marker : markers) {
+            if (format.contains(marker, Qt::CaseInsensitive)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace
+
+// A second display is a distinct AVConference stream, not another tile group
+// in the primary decoder. This module owns every mutable decoder/network state
+// for that stream and exposes only one polling operation to the session loop.
+class AppleSecondaryVideoStream
+{
+public:
+    AppleSecondaryVideoStream(AppleScreenSharingSession* session,
+                              AppleVideoNegotiation negotiation,
+                              bool preferHardware,
+                              QString* error)
+        : m_Session(session),
+          m_Negotiation(std::move(negotiation)),
+          m_Decryptor(m_Negotiation.serverKey, error),
+          m_Feedback(m_Negotiation.viewerKey, error),
+          m_PreferHardware(preferHardware)
+    {
+        m_Clock.start();
+    }
+
+    bool isValid() const
+    {
+        return m_Negotiation.isUsable() && m_Decryptor.isValid() &&
+                m_Feedback.isValid();
+    }
+
+    bool poll(AppleMediaTransport& media,
+              std::atomic_bool* cancelled,
+              bool* receivedDatagram,
+              QString* error)
+    {
+        if (receivedDatagram != nullptr) {
+            *receivedDatagram = false;
+        }
+        const qint64 now = m_Clock.elapsed();
+        QByteArray datagram;
+        QString receiveError;
+        if (media.receiveVideo(m_Negotiation.mediaStreamIndex,
+                               &datagram, 0, cancelled, &receiveError)) {
+            if (receivedDatagram != nullptr) {
+                *receivedDatagram = true;
+            }
+            if (!processDatagram(media, datagram, now, error)) {
+                return false;
+            }
+        }
+        else if (!receiveError.isEmpty()) {
+            if (error != nullptr) {
+                *error = receiveError;
+            }
+            return false;
+        }
+
+        if (m_FirstPacketAt < 0 && now >= InitialVideoTimeoutMs) {
+            if (error != nullptr) {
+                *error = QCoreApplication::translate(
+                        "AppleScreenSharingSession",
+                        "The Mac negotiated a second display but sent no video packets.");
+            }
+            return false;
+        }
+        if (!sendPeriodicFeedback(media, now, error)) {
+            return false;
+        }
+        m_Assembler.expire(now);
+        return true;
+    }
+
+private:
+    bool processDatagram(AppleMediaTransport& media,
+                         const QByteArray& datagram,
+                         qint64 now,
+                         QString* error)
+    {
+        AppleRtpPacket packet;
+        if (!m_Decryptor.decrypt(datagram, &packet, nullptr)) {
+            return true;
+        }
+        ++m_ReceivedPacketCount;
+        m_PerformanceBytes += static_cast<quint64>(datagram.size());
+        if (!m_HasPreviousTimestamp) {
+            m_PreviousTimestamp = packet.timestamp;
+            m_HasPreviousTimestamp = true;
+        }
+        else if (packet.timestamp != m_PreviousTimestamp) {
+            const quint32 delta = packet.timestamp - m_PreviousTimestamp;
+            if (delta < 0x7fffffffU) {
+                m_PreviousTimestamp = packet.timestamp;
+                m_LastAcceptedTimestamp = packet.timestamp;
+                m_LastAcceptedTimestampAt = now;
+            }
+        }
+        if (m_FirstPacketAt < 0) {
+            m_FirstPacketAt = now;
+        }
+        m_LastPacketAt = now;
+
+        AppleHevcAccessUnit accessUnit;
+        const bool completed = m_Assembler.process(packet, now, &accessUnit);
+        if (m_Sources.isEmpty() && m_Assembler.parameterSets().isComplete()) {
+            const QList<quint32> candidates = m_Assembler.primarySources(
+                    m_Negotiation.canvas.tileCount);
+            const bool complete = candidates.size() ==
+                    m_Negotiation.canvas.tileCount &&
+                    std::all_of(candidates.cbegin(), candidates.cend(),
+                                [this](quint32 source) {
+                return m_Assembler.completedSources().contains(source);
+            });
+            const bool settled = m_Assembler.totalPacketCount() >= 100 ||
+                    now - m_FirstPacketAt >= 2300;
+            if (complete && settled) {
+                m_Sources = candidates;
+                for (int index = 0; index < m_Sources.size(); ++index) {
+                    m_SourceToTile.insert(m_Sources.at(index), index);
+                }
+                m_Decoder = std::make_unique<AppleHevcDecoder>(
+                        m_PreferHardware);
+                if (!m_Decoder->open(error) ||
+                        !requestKeyFrames(media, error)) {
+                    return false;
+                }
+                m_LastKeyFrameAt = now;
+                m_AwaitingRandomAccessPicture = true;
+            }
+        }
+
+        if (!completed ||
+                !m_SourceToTile.contains(accessUnit.synchronizationSource)) {
+            return true;
+        }
+        if (m_AwaitingRandomAccessPicture) {
+            if (!accessUnit.containsRandomAccessPicture()) {
+                return true;
+            }
+            m_DecodingOrder.reset();
+            m_AwaitingRandomAccessPicture = false;
+        }
+        const QList<AppleHevcAccessUnit> readyUnits =
+                m_DecodingOrder.enqueue({accessUnit});
+        for (const AppleHevcAccessUnit& ready : readyUnits) {
+            const int tile = m_SourceToTile.value(
+                    ready.synchronizationSource);
+            m_FrameBatcher.recordSubmission(ready, tile);
+            publishReadyBatches();
+            QString decodeError;
+            QElapsedTimer decodeClock;
+            decodeClock.start();
+            QList<AppleDecodedTile> frames = m_Decoder->decode(
+                    ready, m_Assembler.parameterSets(), tile, &decodeError);
+            ++m_PerformanceDecodeCalls;
+            m_PerformanceDecodeNanoseconds += decodeClock.nsecsElapsed();
+            if (!frames.isEmpty()) {
+                m_PerformanceDecodedTiles +=
+                        static_cast<quint64>(frames.size());
+                if (!m_PerformanceDecodedSourceTimestamps.contains(
+                            ready.timestamp)) {
+                    m_PerformanceDecodedSourceTimestamps.insert(ready.timestamp);
+                }
+                m_LastDecodedAt = now;
+                m_FrameBatcher.recordDecodedFrames(std::move(frames));
+                publishReadyBatches();
+                if (!m_NotifiedReady) {
+                    m_NotifiedReady = true;
+                    m_Session->m_EverMediaReady.store(true);
+                    const QPointer<AppleScreenSharingSession> session = m_Session;
+                    const AppleCanvas canvas = m_Negotiation.canvas;
+                    const bool hardware = m_Decoder->backend() ==
+                            AppleHevcDecoder::Backend::D3D11va;
+                    const bool fallback =
+                            m_Decoder->hardwareFallbackOccurred();
+                    void* device = m_Decoder->nativeD3D11Device();
+#ifdef Q_OS_WIN
+                    if (device != nullptr) {
+                        static_cast<IUnknown*>(device)->AddRef();
+                    }
+#endif
+                    const int displayIndex = m_Negotiation.displayIndex;
+                    QMetaObject::invokeMethod(
+                            session,
+                            [session, canvas, hardware, fallback,
+                             device, displayIndex]() {
+                                if (session != nullptr) {
+                                    session->mediaReady(canvas, hardware,
+                                                        fallback, device,
+                                                        displayIndex);
+                                }
+#ifdef Q_OS_WIN
+                                if (device != nullptr) {
+                                    static_cast<IUnknown*>(device)->Release();
+                                }
+#endif
+                            },
+                            Qt::QueuedConnection);
+                }
+            }
+            else if (!decodeError.isEmpty()) {
+                m_FrameBatcher.recordDecodeFailure(
+                        ready.frameSequenceNumber, tile);
+                publishReadyBatches();
+                if (now - m_LastKeyFrameAt >= KeyFrameRetryIntervalMs) {
+                    if (!requestKeyFrames(media, error)) {
+                        return false;
+                    }
+                    if (!m_EnteredRefreshState) {
+                        m_EnteredRefreshState = true;
+                        m_Assembler.discardIncomplete();
+                        m_DecodingOrder.reset();
+                    }
+                    m_LastKeyFrameAt = now;
+                }
+            }
+        }
+        return true;
+    }
+
+    void publishReadyBatches()
+    {
+        QList<QList<AppleDecodedTile>> batches =
+                m_FrameBatcher.takeReadyBatches();
+        for (QList<AppleDecodedTile>& batch : batches) {
+            m_Session->queueDecodedFrames(
+                    std::move(batch), m_Negotiation.displayIndex);
+        }
+    }
+
+    bool sendPeriodicFeedback(AppleMediaTransport& media,
+                              qint64 now,
+                              QString* error)
+    {
+        if (m_Sources.isEmpty()) {
+            return true;
+        }
+        const auto nacks = m_Assembler.takeNacks(now);
+        for (auto iterator = nacks.cbegin(); iterator != nacks.cend(); ++iterator) {
+            const QByteArray packet = AppleMediaWire::receiverReport(
+                    m_Negotiation.synchronizationSource) +
+                    AppleMediaWire::genericNack(
+                            m_Negotiation.synchronizationSource,
+                            iterator.key(), iterator.value());
+            if (!sendFeedback(media, packet, error)) {
+                return false;
+            }
+            m_PerformanceNacks +=
+                    static_cast<quint64>(iterator.value().size());
+        }
+        if (now - m_LastReceiverReportAt >= ReceiverReportIntervalMs) {
+            if (!sendFeedback(media,
+                              AppleMediaWire::receiverReport(
+                                      m_Negotiation.synchronizationSource),
+                              error)) {
+                return false;
+            }
+            m_LastReceiverReportAt = now;
+        }
+        if (m_HasPreviousTimestamp &&
+                now - m_LastRateControlAt >= RateControlIntervalMs) {
+            const quint32 delay = m_LastAcceptedTimestampAt >= 0
+                    ? static_cast<quint32>(qMin(
+                              now - m_LastAcceptedTimestampAt,
+                              static_cast<qint64>(0xffff)))
+                    : 0xffff;
+            const quint16 echo = static_cast<quint16>(
+                    (static_cast<quint64>(now) * 1024 / 1000) & 0xffff);
+            if (!sendFeedback(media,
+                              AppleMediaWire::rateControl(
+                                      m_Negotiation.synchronizationSource,
+                                      m_LastAcceptedTimestamp,
+                                      FixedLanBandwidthKilobitsPerSecond,
+                                      m_ReceivedPacketCount, delay, echo),
+                              error)) {
+                return false;
+            }
+            m_LastRateControlAt = now;
+        }
+        const bool awaiting = m_LastDecodedAt < 0 &&
+                now - m_LastKeyFrameAt >= KeyFrameRetryIntervalMs;
+        const bool stalled = m_LastDecodedAt >= 0 && m_LastPacketAt >= 0 &&
+                now - m_LastDecodedAt >= DecoderStallMs &&
+                now - m_LastPacketAt < 1500 &&
+                now - m_LastKeyFrameAt >= DecoderStallMs;
+        if (awaiting || stalled) {
+            if (!requestKeyFrames(media, error)) {
+                return false;
+            }
+            m_DecodingOrder.reset();
+            if (awaiting) {
+                m_Assembler.discardIncomplete();
+            }
+            m_LastKeyFrameAt = now;
+        }
+        reportPerformance(now);
+        return true;
+    }
+
+    bool sendFeedback(AppleMediaTransport& media,
+                      const QByteArray& packet,
+                      QString* error)
+    {
+        const QByteArray protectedPacket = m_Feedback.protect(packet, error);
+        return !protectedPacket.isEmpty() && media.sendVideoControl(
+                m_Negotiation.mediaStreamIndex, protectedPacket, error);
+    }
+
+    bool requestKeyFrames(AppleMediaTransport& media, QString* error)
+    {
+        const QList<QByteArray> requests = AppleMediaWire::fullIntraRequests(
+                m_Negotiation.synchronizationSource,
+                m_Sources,
+                m_KeyFrameSequence);
+        for (const QByteArray& request : requests) {
+            if (!sendFeedback(media, request, error)) {
+                return false;
+            }
+        }
+        m_PerformanceFirs += static_cast<quint64>(requests.size());
+        m_KeyFrameSequence = static_cast<quint8>(
+                m_KeyFrameSequence + requests.size());
+        return true;
+    }
+
+    void reportPerformance(qint64 now)
+    {
+        if (now - m_PerformanceWindowStartedAt < PerformanceReportIntervalMs) {
+            return;
+        }
+        const double seconds = qMax<qint64>(
+                1, now - m_PerformanceWindowStartedAt) / 1000.0;
+        const double sourceFramesPerSecond =
+                m_PerformanceDecodedSourceTimestamps.size() / seconds;
+        const double averageDecodeMilliseconds =
+                m_PerformanceDecodeCalls == 0 ? 0.0
+                : m_PerformanceDecodeNanoseconds / 1000000.0 /
+                  m_PerformanceDecodeCalls;
+        const QString backend = m_Decoder != nullptr &&
+                m_Decoder->backend() == AppleHevcDecoder::Backend::D3D11va
+                ? QStringLiteral("D3D11VA") : QStringLiteral("software");
+        const QString summary = QStringLiteral(
+                "DISPLAY 2 SOURCE %1 FPS   RX %2 Mbps   HEVC 4:4:4 %3 tiles/s @ %4 ms   %5   NACK %6   FIR %7")
+                .arg(sourceFramesPerSecond, 0, 'f', 1)
+                .arg(m_PerformanceBytes * 8.0 / seconds / 1000000.0,
+                     0, 'f', 1)
+                .arg(m_PerformanceDecodedTiles / seconds, 0, 'f', 1)
+                .arg(averageDecodeMilliseconds, 0, 'f', 2)
+                .arg(backend)
+                .arg(m_PerformanceNacks)
+                .arg(m_PerformanceFirs);
+        qInfo().noquote() << "Apple High Performance" << summary;
+        const QPointer<AppleScreenSharingSession> session = m_Session;
+        if (session != nullptr) {
+            QMetaObject::invokeMethod(
+                    session,
+                    [session, summary]() {
+                        if (session != nullptr) {
+                            session->updateSecondaryPerformanceStatistics(
+                                    summary);
+                        }
+                    },
+                    Qt::QueuedConnection);
+        }
+        m_PerformanceWindowStartedAt = now;
+        m_PerformanceBytes = 0;
+        m_PerformanceDecodedTiles = 0;
+        m_PerformanceDecodeCalls = 0;
+        m_PerformanceDecodeNanoseconds = 0;
+        m_PerformanceNacks = 0;
+        m_PerformanceFirs = 0;
+        m_PerformanceDecodedSourceTimestamps.clear();
+    }
+
+    QPointer<AppleScreenSharingSession> m_Session;
+    AppleVideoNegotiation m_Negotiation;
+    AppleSrtpDecryptor m_Decryptor;
+    AppleSrtcpEncryptor m_Feedback;
+    AppleHevcAssembler m_Assembler;
+    AppleHevcDecodingOrderQueue m_DecodingOrder;
+    AppleDecodedFrameBatcher m_FrameBatcher;
+    QList<quint32> m_Sources;
+    QHash<quint32, int> m_SourceToTile;
+    std::unique_ptr<AppleHevcDecoder> m_Decoder;
+    QElapsedTimer m_Clock;
+    qint64 m_FirstPacketAt = -1;
+    qint64 m_LastPacketAt = -1;
+    qint64 m_LastDecodedAt = -1;
+    qint64 m_LastReceiverReportAt = 0;
+    qint64 m_LastRateControlAt = 0;
+    qint64 m_LastAcceptedTimestampAt = -1;
+    qint64 m_LastKeyFrameAt = -KeyFrameRetryIntervalMs;
+    quint32 m_ReceivedPacketCount = 0;
+    quint32 m_PreviousTimestamp = 0;
+    quint32 m_LastAcceptedTimestamp = 0;
+    quint8 m_KeyFrameSequence = 0;
+    qint64 m_PerformanceWindowStartedAt = 0;
+    quint64 m_PerformanceBytes = 0;
+    quint64 m_PerformanceDecodedTiles = 0;
+    quint64 m_PerformanceDecodeCalls = 0;
+    quint64 m_PerformanceDecodeNanoseconds = 0;
+    quint64 m_PerformanceNacks = 0;
+    quint64 m_PerformanceFirs = 0;
+    QSet<quint32> m_PerformanceDecodedSourceTimestamps;
+    bool m_PreferHardware = false;
+    bool m_HasPreviousTimestamp = false;
+    bool m_AwaitingRandomAccessPicture = true;
+    bool m_EnteredRefreshState = false;
+    bool m_NotifiedReady = false;
+};
 
 class AppleHighPerformanceSessionTask final : public QRunnable
 {
@@ -148,18 +594,63 @@ public:
     AppleHighPerformanceSessionTask(AppleScreenSharingSession* session,
                                     AppleSavedConnection connection,
                                     std::atomic_bool* cancelled,
-                                    bool preferHardware)
+                                    bool preferHardware,
+                                    QList<QSize> displaySizes)
         : m_Session(session),
           m_Connection(std::move(connection)),
           m_Cancelled(cancelled),
-          m_PreferHardware(preferHardware)
+          m_PreferHardware(preferHardware),
+          m_DisplaySizes(std::move(displaySizes)),
+          m_DisplayCount(qBound(1, m_DisplaySizes.size(), 2))
     {
+        while (m_DisplaySizes.size() < m_DisplayCount) {
+            m_DisplaySizes.append(QSize(1440, 900));
+        }
+        m_DisplaySizes.resize(m_DisplayCount);
+        for (QSize& size : m_DisplaySizes) {
+            if (!size.isValid()) {
+                size = QSize(1440, 900);
+            }
+        }
         setAutoDelete(true);
     }
 
     void run() override
     {
         QString error;
+        bool succeeded = false;
+        for (int attempt = 0; attempt <= MaximumReconnectAttempts &&
+             !m_Cancelled->load(); ++attempt) {
+            error.clear();
+            succeeded = runConnectionAttempt(&error);
+            if (succeeded || m_Cancelled->load() ||
+                    !m_Session->m_EverMediaReady.load() ||
+                    attempt >= MaximumReconnectAttempts) {
+                break;
+            }
+            if (!prepareForRetry(attempt + 1, error, &error)) {
+                break;
+            }
+        }
+
+        const bool cancelled = m_Cancelled->load();
+        const QPointer<AppleScreenSharingSession> session = m_Session;
+        if (session != nullptr) {
+            QMetaObject::invokeMethod(
+                    session,
+                    [session, succeeded, cancelled, error]() {
+                        if (session != nullptr) {
+                            session->complete(succeeded || cancelled, error);
+                        }
+                    },
+                    Qt::QueuedConnection);
+        }
+    }
+
+private:
+    bool runConnectionAttempt(QString* error)
+    {
+        m_Session->m_ReconnectRequested.store(false);
         AppleTcpTransport tcp;
         AppleAuthenticator authenticator;
         AppleAuthenticatedControl authenticated;
@@ -185,65 +676,157 @@ public:
                 },
                 &authenticated,
                 m_Cancelled,
-                &error);
+                error);
 
         AppleControlChannel control;
         if (succeeded) {
             succeeded = control.negotiate(
-                    tcp, authenticated.masterKey, m_Cancelled, &error);
+                    tcp, authenticated.masterKey,
+                    AppleWire::displayConfiguration(m_DisplaySizes),
+                    m_Cancelled, error);
         }
 
         AppleMediaTransport media;
         AppleMediaNegotiationResult negotiation;
+        AppleTextClipboardExchange clipboard;
+        QString audioProbeError;
+        const bool audioEnabled = AppleAudioStream::decoderIsSupported(
+                &audioProbeError);
         if (succeeded) {
-            // AAC-ELD is independently optional. Until a decoder passes its
-            // runtime probe, make the offer explicitly video-only so audio can
-            // never destabilize the verified video path.
             succeeded = AppleMediaNegotiator().negotiate(
-                    tcp,
-                    control,
-                    media,
-                    m_Connection.endpoint.port,
-                    false,
-                    &negotiation,
-                    m_Cancelled,
-                    &error);
-        }
-        if (succeeded) {
-            succeeded = control.sendEncrypted(
-                    tcp, AppleMediaWire::controlMode(false), m_Cancelled, &error);
-        }
-        if (succeeded) {
-            succeeded = runMediaLoop(tcp, control, media, negotiation, &error);
+                    tcp, control, media, m_Connection.endpoint.port,
+                    audioEnabled, m_DisplayCount, &negotiation,
+                    m_Cancelled, error);
         }
 
-        media.close();
-        tcp.close();
-        const bool cancelled = m_Cancelled->load();
-        const QPointer<AppleScreenSharingSession> session = m_Session;
-        if (session != nullptr) {
+        std::unique_ptr<AppleAudioStream> audio;
+        if (succeeded && audioEnabled) {
+            QString audioError;
+            audio = std::make_unique<AppleAudioStream>(
+                    negotiation.keys.audioServer, &audioError);
+            if (!audio->isReady()) {
+                qWarning() << "Apple Screen Sharing audio unavailable:"
+                           << audioError;
+                audio.reset();
+            }
+        }
+        else if (succeeded && !audioProbeError.isEmpty()) {
+            qWarning() << "Apple Screen Sharing audio decoder probe failed:"
+                       << audioProbeError;
+        }
+
+        if (succeeded) {
+            succeeded = control.sendEncrypted(
+                    tcp,
+                    AppleMediaWire::controlMode(m_Session->m_Observing.load()),
+                    m_Cancelled,
+                    error);
+        }
+        if (succeeded) {
+            for (const QByteArray& message :
+                 clipboard.setEligible(!m_Session->m_Observing.load())) {
+                if (!control.sendEncrypted(
+                            tcp, message, m_Cancelled, error)) {
+                    succeeded = false;
+                    break;
+                }
+            }
+        }
+        if (succeeded) {
+            m_Session->m_ControlReady.store(true);
+            const QPointer<AppleScreenSharingSession> session = m_Session;
             QMetaObject::invokeMethod(
                     session,
-                    [session, succeeded, cancelled, error]() {
+                    [session]() {
                         if (session != nullptr) {
-                            session->complete(succeeded || cancelled, error);
+                            session->updateControlSummary();
+                            session->localClipboardChanged();
                         }
                     },
                     Qt::QueuedConnection);
+            succeeded = runMediaLoop(
+                    tcp, control, media, negotiation, clipboard,
+                    audio.get(), error);
         }
+
+        m_Session->m_ControlReady.store(false);
+        media.close();
+        tcp.close();
+        return succeeded;
     }
 
-private:
+    bool prepareForRetry(int attempt,
+                         const QString& reason,
+                         QString* error)
+    {
+        while (m_Session->m_SystemSuspended.load() &&
+               !m_Cancelled->load()) {
+            QThread::msleep(50);
+        }
+        if (m_Cancelled->load()) {
+            return false;
+        }
+
+        const QPointer<AppleScreenSharingSession> retrySession = m_Session;
+        if (retrySession == nullptr) {
+            return false;
+        }
+        const auto presentationPrepared = std::make_shared<QSemaphore>();
+        const bool resetQueued = QMetaObject::invokeMethod(
+                retrySession,
+                [retrySession, attempt, reason, presentationPrepared]() {
+                    if (retrySession != nullptr) {
+                        retrySession->prepareForReconnect(attempt, reason);
+                    }
+                    presentationPrepared->release();
+                },
+                Qt::QueuedConnection);
+        bool resetCompleted = false;
+        for (int waited = 0; resetQueued && waited < 5000 &&
+             !m_Cancelled->load(); waited += 50) {
+            if (presentationPrepared->tryAcquire(1, 50)) {
+                resetCompleted = true;
+                break;
+            }
+        }
+        if (!resetCompleted || m_Cancelled->load()) {
+            if (!m_Cancelled->load() && error != nullptr) {
+                *error = QCoreApplication::translate(
+                        "AppleScreenSharingSession",
+                        "Video presentation did not reset in time for reconnection.");
+            }
+            return false;
+        }
+
+        const int delayMilliseconds = 500 << qMin(attempt - 1, 2);
+        for (int waited = 0; waited < delayMilliseconds &&
+             !m_Cancelled->load(); waited += 50) {
+            QThread::msleep(50);
+        }
+        return !m_Cancelled->load();
+    }
+
     bool runMediaLoop(AppleTcpTransport& tcp,
                       AppleControlChannel& control,
                       AppleMediaTransport& media,
                       const AppleMediaNegotiationResult& negotiation,
+                      AppleTextClipboardExchange& clipboard,
+                      AppleAudioStream* audio,
                       QString* error)
     {
         AppleSrtpDecryptor decryptor(negotiation.keys.videoServer, error);
         AppleSrtcpEncryptor feedback(negotiation.keys.videoViewer, error);
         if (!decryptor.isValid() || !feedback.isValid()) {
             return false;
+        }
+        std::unique_ptr<AppleSecondaryVideoStream> secondaryVideo;
+        if (negotiation.videos.size() > 1) {
+            secondaryVideo = std::make_unique<AppleSecondaryVideoStream>(
+                    m_Session, negotiation.videos.at(1),
+                    m_PreferHardware, error);
+            if (!secondaryVideo->isValid()) {
+                return false;
+            }
         }
         AppleHevcAssembler assembler;
         AppleHevcDecodingOrderQueue decodingOrder;
@@ -254,6 +837,7 @@ private:
         QElapsedTimer clock;
         clock.start();
         qint64 firstPacketAt = -1;
+        qint64 videoWaitStartedAt = 0;
         qint64 lastPacketAt = -1;
         qint64 lastDecodedAt = -1;
         qint64 lastReceiverReportAt = 0;
@@ -283,16 +867,93 @@ private:
         qint64 lastPerformanceSourceFrameAt = -1;
         QVector<double> performanceSourceFrameIntervals;
         qint64 performanceDecodeNanoseconds = 0;
+        AppleAudioStatistics previousAudioStatistics;
+        bool observing = m_Session->m_Observing.load();
+        AppleCanvas activeCanvas = negotiation.canvas;
+        bool hasReceivedInitialLayout = false;
+
+        for (const QByteArray& pending : negotiation.pendingMessages) {
+            const AppleControlEvents events =
+                    AppleControlEventParser::parse(pending);
+            if (!events.cursorUpdates.isEmpty() ||
+                    !events.displayLayouts.isEmpty()) {
+                const QPointer<AppleScreenSharingSession> session = m_Session;
+                QMetaObject::invokeMethod(
+                        session,
+                        [session, events]() {
+                            if (session != nullptr) {
+                                session->applyControlEvents(events);
+                            }
+                        },
+                        Qt::QueuedConnection);
+            }
+        }
+
+        auto resetVideoPipeline = [&]() {
+            assembler = AppleHevcAssembler();
+            decodingOrder.reset();
+            frameBatcher.reset();
+            sources.clear();
+            sourceToTile.clear();
+            if (decoder) {
+                decoder->flush();
+            }
+            firstPacketAt = -1;
+            videoWaitStartedAt = clock.elapsed();
+            lastPacketAt = -1;
+            lastDecodedAt = -1;
+            lastAcceptedTimestampAt = -1;
+            hasPreviousTimestamp = false;
+            awaitingRandomAccessPicture = true;
+            hasEnteredDecodeRefreshState = false;
+            lastKeyFrameAt = -KeyFrameRetryIntervalMs;
+        };
 
         while (!m_Cancelled->load()) {
-            for (const AppleInputEncryptionRequest& input :
-                 m_Session->takePendingInputs()) {
-                if (!control.sendEncryptedInput(tcp,
-                                                input.header,
-                                                input.plaintextBlock,
-                                                m_Cancelled,
-                                                error)) {
-                    return false;
+            if (m_Session->m_ReconnectRequested.exchange(false)) {
+                if (error != nullptr) {
+                    *error = QCoreApplication::translate(
+                            "AppleScreenSharingSession",
+                            "The session is reconnecting after a system or network interruption.");
+                }
+                return false;
+            }
+            for (const AppleOutboundControl& outbound :
+                 m_Session->takePendingControls()) {
+                QList<QByteArray> messages;
+                switch (outbound.kind) {
+                case AppleOutboundControl::Kind::Input:
+                    if (!observing &&
+                            !control.sendEncryptedInput(
+                                    tcp,
+                                    outbound.input.header,
+                                    outbound.input.plaintextBlock,
+                                    m_Cancelled,
+                                    error)) {
+                        return false;
+                    }
+                    continue;
+                case AppleOutboundControl::Kind::Message:
+                    messages.append(outbound.message);
+                    break;
+                case AppleOutboundControl::Kind::LocalClipboardText:
+                    messages = clipboard.advertiseLocalText(
+                            outbound.text, error);
+                    break;
+                case AppleOutboundControl::Kind::SetObserving:
+                    messages.append(AppleMediaWire::controlMode(
+                            outbound.observing));
+                    messages.append(clipboard.setEligible(
+                            !outbound.observing));
+                    observing = outbound.observing;
+                    break;
+                }
+                for (const QByteArray& message : std::as_const(messages)) {
+                    if (!message.isEmpty() &&
+                            !control.sendEncrypted(
+                                    tcp, message, m_Cancelled, error)) {
+                        return false;
+                    }
                 }
             }
 
@@ -300,6 +961,93 @@ private:
                 QByteArray message;
                 if (!control.receiveEncrypted(tcp, &message, m_Cancelled, error)) {
                     return false;
+                }
+                const AppleControlEvents events =
+                        AppleControlEventParser::parse(message);
+                for (const AppleDisplayLayout& layout : events.displayLayouts) {
+                    if (!control.sendEncrypted(
+                                tcp,
+                                AppleMediaWire::framebufferUpdateRequest(),
+                                m_Cancelled,
+                                error)) {
+                        return false;
+                    }
+                    if (!hasReceivedInitialLayout) {
+                        hasReceivedInitialLayout = true;
+                        continue;
+                    }
+                    AppleCanvas layoutCanvas{
+                        layout.backingWidth,
+                        layout.backingHeight,
+                        activeCanvas.tileCount,
+                    };
+                    if (m_DisplayCount == 1 && layoutCanvas.isUsable() &&
+                            layoutCanvas != activeCanvas) {
+                        activeCanvas = layoutCanvas;
+                        resetVideoPipeline();
+                        const QPointer<AppleScreenSharingSession> session = m_Session;
+                        QMetaObject::invokeMethod(
+                                session,
+                                [session, layoutCanvas]() {
+                                    if (session != nullptr) {
+                                        session->applyCanvas(layoutCanvas);
+                                    }
+                                },
+                                Qt::QueuedConnection);
+                        if (!control.sendEncrypted(
+                                    tcp, negotiation.configuration,
+                                    m_Cancelled, error)) {
+                            return false;
+                        }
+                    }
+                }
+                AppleCanvas mediaCanvas;
+                if (m_DisplayCount == 1 &&
+                        AppleMediaWire::parseCanvas(message, &mediaCanvas) &&
+                        mediaCanvas.isUsable() && mediaCanvas != activeCanvas) {
+                    activeCanvas = mediaCanvas;
+                    const QPointer<AppleScreenSharingSession> session = m_Session;
+                    QMetaObject::invokeMethod(
+                            session,
+                            [session, mediaCanvas]() {
+                                if (session != nullptr) {
+                                    session->applyCanvas(mediaCanvas);
+                                }
+                            },
+                            Qt::QueuedConnection);
+                }
+                AppleTextClipboardResult clipboardResult =
+                        clipboard.receive(message, error);
+                for (const QByteArray& response :
+                     std::as_const(clipboardResult.outboundMessages)) {
+                    if (!control.sendEncrypted(
+                                tcp, response, m_Cancelled, error)) {
+                        return false;
+                    }
+                }
+                if (!events.cursorUpdates.isEmpty() ||
+                        !events.displayLayouts.isEmpty()) {
+                    const QPointer<AppleScreenSharingSession> session = m_Session;
+                    QMetaObject::invokeMethod(
+                            session,
+                            [session, events]() {
+                                if (session != nullptr) {
+                                    session->applyControlEvents(events);
+                                }
+                            },
+                            Qt::QueuedConnection);
+                }
+                if (clipboardResult.receivedText.has_value()) {
+                    const QPointer<AppleScreenSharingSession> session = m_Session;
+                    const QString text = *clipboardResult.receivedText;
+                    QMetaObject::invokeMethod(
+                            session,
+                            [session, text]() {
+                                if (session != nullptr) {
+                                    session->applyRemoteClipboardText(text);
+                                }
+                            },
+                            Qt::QueuedConnection);
                 }
             }
             else if (!tcp.isConnected()) {
@@ -312,9 +1060,21 @@ private:
             }
 
             const qint64 now = clock.elapsed();
+            if (audio != nullptr) {
+                audio->process(media.drainControl(),
+                               m_Session->m_AudioMuted.load());
+            }
+            else {
+                media.drainControl();
+            }
             QByteArray datagram;
             QString receiveError;
-            if (media.receiveVideo(&datagram, 20, m_Cancelled, &receiveError)) {
+            bool primaryReceived = false;
+            if (media.receiveVideo(&datagram,
+                                   secondaryVideo ? 0 : 20,
+                                   m_Cancelled,
+                                   &receiveError)) {
+                primaryReceived = true;
                 AppleRtpPacket packet;
                 if (decryptor.decrypt(datagram, &packet, nullptr)) {
                     ++receivedPacketCount;
@@ -344,9 +1104,9 @@ private:
 
                     if (sources.isEmpty() && assembler.parameterSets().isComplete()) {
                         const QList<quint32> candidates = assembler.primarySources(
-                                negotiation.canvas.tileCount);
+                                activeCanvas.tileCount);
                         const bool candidatesComplete = candidates.size() ==
-                                negotiation.canvas.tileCount &&
+                                activeCanvas.tileCount &&
                                 std::all_of(candidates.cbegin(), candidates.cend(),
                                             [&assembler](quint32 source) {
                             return assembler.completedSources().contains(source);
@@ -440,10 +1200,16 @@ private:
                                 }
                                 if (!notifiedMediaReady) {
                                     notifiedMediaReady = true;
+                                    m_Session->m_EverMediaReady.store(true);
                                     const QPointer<AppleScreenSharingSession> session = m_Session;
-                                    const AppleCanvas canvas = negotiation.canvas;
+                                    const AppleCanvas canvas = activeCanvas;
                                     void* decoderDevice =
                                             decoder->nativeD3D11Device();
+#ifdef Q_OS_WIN
+                                    if (decoderDevice != nullptr) {
+                                        static_cast<IUnknown*>(decoderDevice)->AddRef();
+                                    }
+#endif
                                     QMetaObject::invokeMethod(
                                             session,
                                             [session, canvas, hardwareActive,
@@ -454,6 +1220,11 @@ private:
                                                                         hardwareFallback,
                                                                         decoderDevice);
                                                 }
+#ifdef Q_OS_WIN
+                                                if (decoderDevice != nullptr) {
+                                                    static_cast<IUnknown*>(decoderDevice)->Release();
+                                                }
+#endif
                                             },
                                             Qt::QueuedConnection);
                                 }
@@ -498,7 +1269,17 @@ private:
                 }
                 return false;
             }
-            if (firstPacketAt < 0 && now >= InitialVideoTimeoutMs) {
+            bool secondaryReceived = false;
+            if (secondaryVideo &&
+                    !secondaryVideo->poll(media, m_Cancelled,
+                                          &secondaryReceived, error)) {
+                return false;
+            }
+            if (secondaryVideo && !primaryReceived && !secondaryReceived) {
+                QThread::usleep(1000);
+            }
+            if (firstPacketAt < 0 &&
+                    now - videoWaitStartedAt >= InitialVideoTimeoutMs) {
                 if (error != nullptr) {
                     *error = QCoreApplication::translate(
                             "AppleScreenSharingSession",
@@ -604,6 +1385,50 @@ private:
                         .arg(sourceCadence.jitter, 0, 'f', 1)
                         .arg(performanceNacks)
                         .arg(performanceFirs);
+                if (audio != nullptr) {
+                    const AppleAudioStatistics audioStatistics =
+                            audio->statistics();
+                    const quint64 received = audioStatistics.receivedPackets -
+                            previousAudioStatistics.receivedPackets;
+                    const quint64 decoded = audioStatistics.decodedPackets -
+                            previousAudioStatistics.decodedPackets;
+                    const quint64 dropped = audioStatistics.droppedPackets -
+                            previousAudioStatistics.droppedPackets;
+                    const quint64 decodeAttempts =
+                            audioStatistics.decodeAttempts -
+                            previousAudioStatistics.decodeAttempts;
+                    const quint64 decodeNanoseconds =
+                            audioStatistics.decodeNanoseconds -
+                            previousAudioStatistics.decodeNanoseconds;
+                    const quint64 underflows =
+                            audioStatistics.playbackUnderflows -
+                            previousAudioStatistics.playbackUnderflows;
+                    const double audioDecodeMilliseconds = decodeAttempts == 0
+                            ? 0.0
+                            : decodeNanoseconds / 1000000.0 / decodeAttempts;
+                    const QString audioSummary = QStringLiteral(
+                            "AUDIO AAC-ELD %1/%2 pkt/s   DROP %3   DECODE %4 ms   QUEUE %5 ms   XRUN %6%7")
+                            .arg(decoded / seconds, 0, 'f', 1)
+                            .arg(received / seconds, 0, 'f', 1)
+                            .arg(dropped)
+                            .arg(audioDecodeMilliseconds, 0, 'f', 2)
+                            .arg(audioStatistics.queuedMilliseconds)
+                            .arg(underflows)
+                            .arg(m_Session->m_AudioMuted.load()
+                                 ? QStringLiteral("   MUTED") : QString());
+                    previousAudioStatistics = audioStatistics;
+                    const QPointer<AppleScreenSharingSession> audioSession =
+                            m_Session;
+                    QMetaObject::invokeMethod(
+                            audioSession,
+                            [audioSession, audioSummary]() {
+                                if (audioSession != nullptr) {
+                                    audioSession->updateAudioStatistics(
+                                            audioSummary);
+                                }
+                            },
+                            Qt::QueuedConnection);
+                }
                 qInfo().nospace()
                         << "Apple High Performance media: rx="
                         << QString::number(performancePackets / seconds, 'f', 1)
@@ -689,6 +1514,8 @@ private:
     AppleSavedConnection m_Connection;
     std::atomic_bool* m_Cancelled;
     bool m_PreferHardware;
+    QList<QSize> m_DisplaySizes;
+    int m_DisplayCount;
 };
 
 class ApplePresentationThread final : public QThread
@@ -710,6 +1537,7 @@ protected:
         // DXGI_PRESENT_DO_NOT_WAIT retry without adding a frame of buffering.
         while (!isInterruptionRequested()) {
             m_Session->renderLatestFrames();
+            m_Session->renderSecondaryFrames();
             QThread::usleep(1000);
         }
     }
@@ -725,11 +1553,21 @@ AppleScreenSharingSession::AppleScreenSharingSession(
       m_Connection(std::move(connection)),
       m_Runtime(std::make_unique<LocalStreamRuntime>())
 {
+    m_WorkerPool.setMaxThreadCount(1);
+    m_WorkerPool.setExpiryTimeout(-1);
 }
 
 AppleScreenSharingSession::~AppleScreenSharingSession()
 {
     m_Cancelled.store(true);
+    if (m_Runtime) {
+        m_Runtime->requestStop();
+    }
+    m_WorkerPool.waitForDone();
+    if (m_NativeEventFilterInstalled && QCoreApplication::instance() != nullptr) {
+        QCoreApplication::instance()->removeNativeEventFilter(this);
+        m_NativeEventFilterInstalled = false;
+    }
     destroyPresentation();
 }
 
@@ -742,13 +1580,46 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
         return false;
     }
     m_QtWindow = qtWindow;
+    QSettings settings;
+    m_DisplayCount = qBound(1, m_Connection.virtualDisplayCount, 2);
+    m_DynamicResolutionEnabled = m_DisplayCount == 1 &&
+            settings.value(QStringLiteral(
+                    "appleScreenSharing/dynamicResolution"), true).toBool();
+    QSize initialDisplaySize(1440, 900);
+    if (m_DisplayCount == 1) {
+        if (m_DynamicResolutionEnabled) {
+            const QSize viewportSize = AppleDynamicResolution::normalizedSize(
+                    qtWindow->width(), qtWindow->height());
+            if (viewportSize.isValid()) {
+                initialDisplaySize = viewportSize;
+            }
+        }
+        else {
+            initialDisplaySize = QSize(1920, 1080);
+        }
+    }
+    m_InitialDisplaySizes = QList<QSize>(m_DisplayCount, initialDisplaySize);
     LocalStreamRuntimeConfig runtimeConfig;
-    runtimeConfig.streamWidth = 1440;
-    runtimeConfig.streamHeight = 900;
+    runtimeConfig.streamWidth = initialDisplaySize.width();
+    runtimeConfig.streamHeight = initialDisplaySize.height();
     if (!m_Runtime->initialize(qtWindow, runtimeConfig)) {
         return false;
     }
-    addLaunchWarning(tr("Apple High Performance audio is unavailable in this build; the session will run in explicit video-only mode."));
+    if (QCoreApplication::instance() != nullptr) {
+        QCoreApplication::instance()->installNativeEventFilter(this);
+        m_NativeEventFilterInstalled = true;
+    }
+    if (QClipboard* clipboard = QGuiApplication::clipboard()) {
+        connect(clipboard, &QClipboard::dataChanged,
+                this, &AppleScreenSharingSession::localClipboardChanged,
+                Qt::UniqueConnection);
+    }
+    updateControlSummary();
+    QString audioProbeError;
+    if (!AppleAudioStream::decoderIsSupported(&audioProbeError)) {
+        addLaunchWarning(tr("AAC-ELD audio is unavailable: %1")
+                         .arg(audioProbeError));
+    }
     return true;
 }
 
@@ -757,9 +1628,10 @@ void AppleScreenSharingSession::startSession()
     emit stageStarting(tr("Apple authentication and media negotiation"));
     const bool preferHardware = QSettings().value(
             QStringLiteral("appleScreenSharing/preferHardwareDecode"), true).toBool();
-    QThreadPool::globalInstance()->start(
-            new AppleHighPerformanceSessionTask(
-                    this, m_Connection, &m_Cancelled, preferHardware));
+    m_WorkerPool.start(
+             new AppleHighPerformanceSessionTask(
+                     this, m_Connection, &m_Cancelled, preferHardware,
+                     m_InitialDisplaySizes));
 }
 
 void AppleScreenSharingSession::interruptSession()
@@ -775,26 +1647,73 @@ void AppleScreenSharingSession::setShouldExitSession(bool)
     interrupt();
 }
 
-void AppleScreenSharingSession::queueDecodedFrames(QList<AppleDecodedTile> frames)
+bool AppleScreenSharingSession::nativeEventFilter(
+        const QByteArray& eventType,
+        void* message,
+        NativeEventResult*)
+{
+#ifdef Q_OS_WIN
+    if (eventType == "windows_generic_MSG" && message != nullptr) {
+        const MSG* nativeMessage = static_cast<const MSG*>(message);
+        if (nativeMessage->message == WM_POWERBROADCAST) {
+            switch (nativeMessage->wParam) {
+            case PBT_APMSUSPEND:
+                m_SystemSuspended.store(true);
+                m_ReconnectRequested.store(true);
+                qInfo() << "Apple Screen Sharing detected Windows suspend";
+                break;
+            case PBT_APMRESUMEAUTOMATIC:
+            case PBT_APMRESUMECRITICAL:
+            case PBT_APMRESUMESUSPEND:
+                m_SystemSuspended.store(false);
+                m_ReconnectRequested.store(true);
+                qInfo() << "Apple Screen Sharing detected Windows resume; reconnect requested";
+                break;
+            default:
+                break;
+            }
+        }
+    }
+#else
+    Q_UNUSED(eventType)
+    Q_UNUSED(message)
+#endif
+    return false;
+}
+
+void AppleScreenSharingSession::queueDecodedFrames(QList<AppleDecodedTile> frames,
+                                                   int displayIndex)
 {
     QMutexLocker locker(&m_FrameMutex);
     bool acceptedBatch = false;
     for (AppleDecodedTile& frame : frames) {
         if (frame.isValid()) {
-            m_LatestFrames.insert(frame.tileIndex, std::move(frame));
+            if (displayIndex == 1) {
+                m_SecondaryLatestFrames.insert(
+                        frame.tileIndex, std::move(frame));
+            }
+            else {
+                m_LatestFrames.insert(frame.tileIndex, std::move(frame));
+            }
             acceptedBatch = true;
         }
     }
     if (acceptedBatch) {
-        ++m_PendingFrameBatches;
+        if (displayIndex == 1) {
+            ++m_SecondaryPendingFrameBatches;
+            m_SecondaryPresentationNeeded.store(true);
+        }
+        else {
+            ++m_PendingFrameBatches;
+        }
     }
 }
 
-QList<AppleInputEncryptionRequest> AppleScreenSharingSession::takePendingInputs()
+QList<AppleOutboundControl> AppleScreenSharingSession::takePendingControls()
 {
     QMutexLocker locker(&m_InputMutex);
-    QList<AppleInputEncryptionRequest> result = std::move(m_PendingInputs);
-    m_PendingInputs.clear();
+    QList<AppleOutboundControl> result = std::move(m_PendingControls);
+    m_PendingControls.clear();
     return result;
 }
 
@@ -802,12 +1721,66 @@ void AppleScreenSharingSession::mediaReady(
         const AppleCanvas& canvas,
         bool hardwareDecoderActive,
         bool hardwareFallbackOccurred,
-        void* decoderDevice)
+        void* decoderDevice,
+        int displayIndex)
 {
+    if (displayIndex == 1) {
+        if (m_SecondaryMediaReady || m_Cancelled.load() ||
+                !canvas.isUsable()) {
+            return;
+        }
+        {
+            QMutexLocker locker(&m_FrameMutex);
+            m_SecondaryCanvas = canvas;
+        }
+        const int width = qBound(800, canvas.width, 1600);
+        const int height = qBound(450, canvas.height, 1000);
+        const QByteArray title = tr("%1 — Apple Screen Sharing — Display 2")
+                .arg(m_Connection.displayName).toUtf8();
+        m_SecondaryWindow = SDL_CreateWindow(
+                title.constData(),
+                SDL_WINDOWPOS_CENTERED,
+                SDL_WINDOWPOS_CENTERED,
+                width,
+                height,
+                SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+                        SDL_WINDOW_HIDDEN);
+        if (m_SecondaryWindow == nullptr) {
+            m_Cancelled.store(true);
+            emit displayLaunchError(tr(
+                    "Couldn’t create the second Apple Screen Sharing display window."));
+            return;
+        }
+        QString rendererError;
+        m_SecondaryD3D11Renderer = std::make_unique<AppleD3D11Renderer>();
+        if (!m_SecondaryD3D11Renderer->initialize(
+                    m_SecondaryWindow, decoderDevice, &rendererError)) {
+            m_SecondaryD3D11Renderer.reset();
+            SDL_DestroyWindow(m_SecondaryWindow);
+            m_SecondaryWindow = nullptr;
+            m_Cancelled.store(true);
+            emit displayLaunchError(tr(
+                    "Couldn’t initialize the second 4:4:4 display: %1")
+                                    .arg(rendererError));
+            return;
+        }
+        m_SecondaryMediaReady = true;
+        m_EverMediaReady.store(true);
+        qInfo().nospace()
+                << "Apple High Performance display 2 renderer=direct3d11-owned, "
+                   "canvas=" << canvas.width << "x" << canvas.height
+                << ", decoder="
+                << (hardwareDecoderActive ? "D3D11VA" : "software")
+                << (hardwareFallbackOccurred ? " (fallback)" : "");
+        SDL_ShowWindow(m_SecondaryWindow);
+        SDL_RaiseWindow(m_SecondaryWindow);
+        m_SecondaryPresentationNeeded.store(true);
+        return;
+    }
     if (m_MediaReady || m_Cancelled.load() || !canvas.isUsable()) {
         return;
     }
-    m_Canvas = canvas;
+    applyCanvas(canvas);
     const int width = qBound(800, canvas.width, 1600);
     const int height = qBound(450, canvas.height, 1000);
     SDL_Window* window = m_Runtime->createStreamWindow(
@@ -861,7 +1834,16 @@ void AppleScreenSharingSession::mediaReady(
     connect(m_EventTimer, &QTimer::timeout,
             this, &AppleScreenSharingSession::pollSdlEvents);
     m_EventTimer->start();
+    if (m_DynamicResolutionEnabled) {
+        m_DynamicResolutionTimer = new QTimer(this);
+        m_DynamicResolutionTimer->setSingleShot(true);
+        m_DynamicResolutionTimer->setTimerType(Qt::CoarseTimer);
+        connect(m_DynamicResolutionTimer, &QTimer::timeout,
+                this, &AppleScreenSharingSession::sendPendingDynamicResolution);
+    }
     m_MediaReady = true;
+    m_EverMediaReady.store(true);
+    updateControlSummary();
     setRunning();
     emit connectionStarted();
     QPointer<AppleScreenSharingSession> guard(this);
@@ -878,6 +1860,26 @@ void AppleScreenSharingSession::mediaReady(
     });
 }
 
+void AppleScreenSharingSession::applyCanvas(const AppleCanvas& canvas)
+{
+    if (!canvas.isUsable()) {
+        return;
+    }
+    {
+        QMutexLocker locker(&m_FrameMutex);
+        m_Canvas = canvas;
+        m_LatestFrames.clear();
+        m_TileHeights.clear();
+        m_PendingFrameBatches = 0;
+        m_AwaitingPresentationBatches = 0;
+        m_AwaitingDecodeSubmissions.clear();
+    }
+    m_PresentationNeeded.store(true);
+    qInfo().nospace() << "Apple Screen Sharing canvas="
+                      << canvas.width << "x" << canvas.height
+                      << " tiles=" << canvas.tileCount;
+}
+
 void AppleScreenSharingSession::updatePerformanceStatistics(
         const QString& summary)
 {
@@ -889,6 +1891,237 @@ void AppleScreenSharingSession::updatePerformanceStatistics(
     m_PresentationNeeded.store(true);
 }
 
+void AppleScreenSharingSession::updateSecondaryPerformanceStatistics(
+        const QString& summary)
+{
+    {
+        QMutexLocker locker(&m_PerformanceMutex);
+        m_SecondaryPerformanceSummary = summary;
+    }
+    m_PerformanceOverlayUpdateNeeded.store(true);
+    m_PresentationNeeded.store(true);
+}
+
+void AppleScreenSharingSession::updateAudioStatistics(const QString& summary)
+{
+    {
+        QMutexLocker locker(&m_PerformanceMutex);
+        m_AudioSummary = summary;
+    }
+    m_PerformanceOverlayUpdateNeeded.store(true);
+    m_PresentationNeeded.store(true);
+}
+
+void AppleScreenSharingSession::applyControlEvents(
+        const AppleControlEvents& events)
+{
+    const auto freeRemoteCursor = [this](SDL_Cursor* cursor) {
+        if (cursor == nullptr) {
+            return;
+        }
+        if (cursor == m_ActiveRemoteCursor) {
+            SDL_SetCursor(SDL_GetDefaultCursor());
+            m_ActiveRemoteCursor = nullptr;
+        }
+        SDL_FreeCursor(cursor);
+    };
+    for (const AppleCursorUpdate& update : events.cursorUpdates) {
+        ++m_RemoteCursorUpdateCount;
+        SDL_Cursor* selected = nullptr;
+        if (update.kind == AppleCursorUpdate::Kind::Store &&
+                update.image.isUsable()) {
+            SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(
+                    const_cast<char*>(update.image.rgba.constData()),
+                    update.image.width,
+                    update.image.height,
+                    32,
+                    update.image.width * 4,
+                    SDL_PIXELFORMAT_RGBA32);
+            if (surface != nullptr) {
+                selected = SDL_CreateColorCursor(
+                        surface,
+                        update.image.hotspotX,
+                        update.image.hotspotY);
+                SDL_FreeSurface(surface);
+            }
+            if (selected != nullptr) {
+                if (SDL_Cursor* previous = m_RemoteCursorCache.take(update.id)) {
+                    freeRemoteCursor(previous);
+                }
+                m_RemoteCursorCache.insert(update.id, selected);
+                m_RemoteCursorOrder.removeAll(update.id);
+                m_RemoteCursorOrder.append(update.id);
+                while (m_RemoteCursorOrder.size() > 64) {
+                    const quint32 evicted = m_RemoteCursorOrder.takeFirst();
+                    if (SDL_Cursor* cursor = m_RemoteCursorCache.take(evicted)) {
+                        freeRemoteCursor(cursor);
+                    }
+                }
+            }
+        }
+        else if (update.kind == AppleCursorUpdate::Kind::Select) {
+            selected = m_RemoteCursorCache.value(update.id, nullptr);
+        }
+        if (selected != nullptr) {
+            SDL_SetCursor(selected);
+            m_ActiveRemoteCursor = selected;
+            SDL_ShowCursor(SDL_ENABLE);
+        }
+    }
+    for (const AppleDisplayLayout& layout : events.displayLayouts) {
+        if (m_MediaDisplayIds.isEmpty()) {
+            for (const AppleDisplayRect& display : layout.displays) {
+                m_MediaDisplayIds.append(display.id);
+            }
+        }
+        m_DisplayLayout = layout;
+        qInfo().nospace()
+                << "Apple Screen Sharing display layout: "
+                << layout.displays.size() << " display(s), backing="
+                << layout.backingWidth << "x" << layout.backingHeight;
+    }
+    if (!events.cursorUpdates.isEmpty()) {
+        updateControlSummary();
+    }
+}
+
+void AppleScreenSharingSession::applyRemoteClipboardText(const QString& text)
+{
+    if (m_Observing.load()) {
+        return;
+    }
+    QClipboard* clipboard = QGuiApplication::clipboard();
+    if (clipboard == nullptr || clipboardContainsFiles(clipboard->mimeData())) {
+        qInfo() << "Apple text clipboard preserved a local file clipboard";
+        return;
+    }
+    m_PendingRemoteClipboardText = text;
+    clipboard->setText(text);
+    qInfo().nospace()
+            << "Apple text clipboard received " << text.toUtf8().size()
+            << " UTF-8 bytes";
+}
+
+void AppleScreenSharingSession::updateControlSummary()
+{
+    const QString summary = QStringLiteral(
+            "MODE %1   CLIPBOARD %2   CURSOR %3   DISPLAY %4%5   O:MODE M:MUTE")
+            .arg(m_Observing.load() ? QStringLiteral("OBSERVE")
+                                    : QStringLiteral("CONTROL"))
+            .arg(!m_Observing.load() && m_ControlReady.load()
+                         ? QStringLiteral("ON") : QStringLiteral("OFF"))
+            .arg(m_RemoteCursorUpdateCount)
+            .arg(m_DisplayCount)
+            .arg(m_DynamicResolutionEnabled
+                         ? QStringLiteral(" DYNAMIC") : QString());
+    {
+        QMutexLocker locker(&m_PerformanceMutex);
+        m_ControlSummary = summary;
+    }
+    if (m_Runtime && m_Runtime->streamWindow() != nullptr) {
+        const QString title = tr("%1 — Apple Screen Sharing [%2]")
+                .arg(m_Connection.displayName,
+                     m_Observing.load() ? tr("Observe") : tr("Control"));
+        SDL_SetWindowTitle(m_Runtime->streamWindow(), title.toUtf8().constData());
+    }
+    m_PerformanceOverlayUpdateNeeded.store(true);
+    m_PresentationNeeded.store(true);
+}
+
+void AppleScreenSharingSession::localClipboardChanged()
+{
+    const QClipboard* clipboard = QGuiApplication::clipboard();
+    const QMimeData* mime = clipboard != nullptr ? clipboard->mimeData() : nullptr;
+    if (m_PendingRemoteClipboardText.has_value()) {
+        const bool isRemoteWrite = mime != nullptr && mime->hasText() &&
+                mime->text() == *m_PendingRemoteClipboardText;
+        m_PendingRemoteClipboardText.reset();
+        if (isRemoteWrite) {
+            return;
+        }
+    }
+    if (!m_ControlReady.load() || m_Observing.load()) {
+        return;
+    }
+    if (mime == nullptr || !mime->hasText() || clipboardContainsFiles(mime)) {
+        return;
+    }
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::LocalClipboardText;
+    outbound.text = mime->text();
+    queueControl(std::move(outbound));
+}
+
+void AppleScreenSharingSession::toggleControlMode()
+{
+    const bool observing = !m_Observing.load();
+    m_Observing.store(observing);
+    m_MouseButtons = 0;
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::SetObserving;
+    outbound.observing = observing;
+    queueControl(std::move(outbound));
+    updateControlSummary();
+    if (!observing) {
+        localClipboardChanged();
+    }
+    qInfo() << "Apple Screen Sharing mode changed to"
+            << (observing ? "observe" : "control");
+}
+
+void AppleScreenSharingSession::toggleAudioMute()
+{
+    const bool muted = !m_AudioMuted.load();
+    m_AudioMuted.store(muted);
+    updateControlSummary();
+    qInfo() << "Apple Screen Sharing audio"
+            << (muted ? "muted" : "unmuted");
+}
+
+void AppleScreenSharingSession::scheduleDynamicResolution(int width, int height)
+{
+    if (!m_DynamicResolutionEnabled || m_DisplayCount != 1 ||
+            m_DynamicResolutionTimer == nullptr) {
+        return;
+    }
+    const QSize size = AppleDynamicResolution::normalizedSize(width, height);
+    if (!size.isValid() || size == m_PendingDynamicResolution ||
+            size == m_LastRequestedDynamicResolution ||
+            (m_Canvas.width == size.width() * 2 &&
+             m_Canvas.height == size.height() * 2)) {
+        return;
+    }
+    m_PendingDynamicResolution = size;
+    const quint64 now = steadyNanoseconds() / 1000000ULL;
+    const quint64 earliest = m_LastDynamicResolutionRequestAt == 0
+            ? now : m_LastDynamicResolutionRequestAt + 2500;
+    const int interval = static_cast<int>(qMax<quint64>(
+            500, earliest > now ? earliest - now : 0));
+    m_DynamicResolutionTimer->start(interval);
+}
+
+void AppleScreenSharingSession::sendPendingDynamicResolution()
+{
+    if (!m_DynamicResolutionEnabled || !m_ControlReady.load() ||
+            !m_PendingDynamicResolution.isValid()) {
+        return;
+    }
+    const QSize size = m_PendingDynamicResolution;
+    m_PendingDynamicResolution = {};
+    const QByteArray message = AppleWire::displayConfiguration({size});
+    if (message.isEmpty()) {
+        return;
+    }
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::Message;
+    outbound.message = message;
+    queueControl(std::move(outbound));
+    m_LastRequestedDynamicResolution = size;
+    m_LastDynamicResolutionRequestAt = steadyNanoseconds() / 1000000ULL;
+    qInfo().nospace() << "Apple Screen Sharing requested dynamic resolution "
+                      << size.width() << "x" << size.height();
+}
+
 void AppleScreenSharingSession::updatePerformanceOverlayTexture()
 {
     if (m_D3D11Renderer == nullptr) {
@@ -898,15 +2131,30 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     updateTimer.start();
 
     QString mediaSummary;
+    QString secondaryMediaSummary;
     QString presentationSummary;
+    QString controlSummary;
+    QString audioSummary;
     {
         QMutexLocker locker(&m_PerformanceMutex);
         mediaSummary = m_PerformanceMediaSummary;
+        secondaryMediaSummary = m_SecondaryPerformanceSummary;
         presentationSummary = m_PerformancePresentationSummary;
+        controlSummary = m_ControlSummary;
+        audioSummary = m_AudioSummary;
     }
     QStringList lines;
+    if (!controlSummary.isEmpty()) {
+        lines.append(controlSummary);
+    }
     if (!mediaSummary.isEmpty()) {
         lines.append(mediaSummary.split('\n', Qt::SkipEmptyParts));
+    }
+    if (!secondaryMediaSummary.isEmpty()) {
+        lines.append(secondaryMediaSummary);
+    }
+    if (!audioSummary.isEmpty()) {
+        lines.append(audioSummary);
     }
     if (!presentationSummary.isEmpty()) {
         lines.append(presentationSummary.split(
@@ -986,6 +2234,10 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
 
 void AppleScreenSharingSession::pollSdlEvents()
 {
+    const auto displayIndexForWindow = [this](quint32 windowId) {
+        return m_SecondaryWindow != nullptr &&
+                SDL_GetWindowID(m_SecondaryWindow) == windowId ? 1 : 0;
+    };
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -995,7 +2247,8 @@ void AppleScreenSharingSession::pollSdlEvents()
         case SDL_MOUSEMOTION:
             m_LastMouseX = event.motion.x;
             m_LastMouseY = event.motion.y;
-            queuePointer(m_LastMouseX, m_LastMouseY);
+            queuePointer(m_LastMouseX, m_LastMouseY, 0, 0,
+                         displayIndexForWindow(event.motion.windowID));
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP: {
@@ -1008,7 +2261,8 @@ void AppleScreenSharingSession::pollSdlEvents()
             }
             m_LastMouseX = event.button.x;
             m_LastMouseY = event.button.y;
-            queuePointer(m_LastMouseX, m_LastMouseY, event.button.clicks);
+            queuePointer(m_LastMouseX, m_LastMouseY, event.button.clicks, 0,
+                         displayIndexForWindow(event.button.windowID));
             break;
         }
         case SDL_MOUSEWHEEL: {
@@ -1018,13 +2272,33 @@ void AppleScreenSharingSession::pollSdlEvents()
             if (event.wheel.x > 0) wheel |= 1 << 6;
             if (event.wheel.x < 0) wheel |= 1 << 5;
             if (wheel != 0) {
-                queuePointer(m_LastMouseX, m_LastMouseY, 0, wheel);
-                queuePointer(m_LastMouseX, m_LastMouseY);
+                const int displayIndex = displayIndexForWindow(
+                        event.wheel.windowID);
+                queuePointer(m_LastMouseX, m_LastMouseY, 0, wheel,
+                             displayIndex);
+                queuePointer(m_LastMouseX, m_LastMouseY, 0, 0,
+                             displayIndex);
             }
             break;
         }
         case SDL_KEYDOWN:
         case SDL_KEYUP:
+            if (event.key.keysym.sym == SDLK_o &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    toggleControlMode();
+                }
+                break;
+            }
+            if (event.key.keysym.sym == SDLK_m &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    toggleAudioMute();
+                }
+                break;
+            }
             if (event.type == SDL_KEYUP || event.key.repeat == 0) {
                 queueKey(event.type == SDL_KEYDOWN,
                          event.key.keysym.sym,
@@ -1038,6 +2312,13 @@ void AppleScreenSharingSession::pollSdlEvents()
             case SDL_WINDOWEVENT_RESTORED:
             case SDL_WINDOWEVENT_SIZE_CHANGED:
                 m_PresentationNeeded.store(true);
+                if (displayIndexForWindow(event.window.windowID) == 1) {
+                    m_SecondaryPresentationNeeded.store(true);
+                }
+                else if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                    scheduleDynamicResolution(event.window.data1,
+                                              event.window.data2);
+                }
                 break;
             default:
                 break;
@@ -1053,28 +2334,54 @@ void AppleScreenSharingSession::queuePointer(
         int windowX,
         int windowY,
         int clickCount,
-        quint8 extraButtons)
+        quint8 extraButtons,
+        int displayIndex)
 {
-    const auto point = remotePoint(windowX, windowY);
+    if (m_Observing.load()) {
+        return;
+    }
+    const auto point = remotePoint(windowX, windowY, displayIndex);
     if (!point.has_value()) {
         return;
     }
     const quint32 now = currentMicroseconds();
     const quint32 delta = now - m_PreviousInputTimestamp;
     m_PreviousInputTimestamp = now;
+
+    std::optional<quint32> displayId;
+    if (m_DisplayCount > 1 &&
+            displayIndex >= 0 && displayIndex < m_MediaDisplayIds.size()) {
+        displayId = m_MediaDisplayIds.at(displayIndex);
+    }
+
     QMutexLocker locker(&m_InputMutex);
-    m_PendingInputs.append(AppleMediaWire::pointerEvent(
+    if (displayId != m_SelectedInputDisplayId) {
+        AppleOutboundControl selection;
+        selection.kind = AppleOutboundControl::Kind::Message;
+        selection.message = displayId.has_value()
+                ? AppleMediaWire::selectDisplay(*displayId)
+                : AppleMediaWire::selectCombinedDisplays();
+        m_PendingControls.append(std::move(selection));
+        m_SelectedInputDisplayId = displayId;
+    }
+    AppleOutboundControl input;
+    input.kind = AppleOutboundControl::Kind::Input;
+    input.input = AppleMediaWire::pointerEvent(
             m_MouseButtons | extraButtons,
             point->first,
             point->second,
             clickCount,
-            delta));
+            delta);
+    m_PendingControls.append(std::move(input));
 }
 
 void AppleScreenSharingSession::queueKey(bool isDown,
                                          int sdlKeycode,
                                          int sdlScancode)
 {
+    if (m_Observing.load()) {
+        return;
+    }
     const quint32 symbol = keySymbolForSdl(sdlKeycode);
     if (symbol == 0) {
         return;
@@ -1082,32 +2389,45 @@ void AppleScreenSharingSession::queueKey(bool isDown,
     const quint32 now = currentMicroseconds();
     const quint32 delta = now - m_PreviousInputTimestamp;
     m_PreviousInputTimestamp = now;
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::Input;
+    outbound.input = AppleMediaWire::keyEvent(
+                isDown,
+                symbol,
+                delta,
+                0,
+                static_cast<quint16>(qBound(0, sdlScancode, 65535)));
+    queueControl(std::move(outbound));
+}
+
+void AppleScreenSharingSession::queueControl(AppleOutboundControl control)
+{
     QMutexLocker locker(&m_InputMutex);
-    m_PendingInputs.append(AppleMediaWire::keyEvent(
-            isDown,
-            symbol,
-            delta,
-            0,
-            static_cast<quint16>(qBound(0, sdlScancode, 65535))));
+    m_PendingControls.append(std::move(control));
 }
 
 std::optional<QPair<quint16, quint16>> AppleScreenSharingSession::remotePoint(
         int windowX,
-        int windowY) const
+        int windowY,
+        int displayIndex) const
 {
-    if (!m_Canvas.isUsable() || m_Runtime->streamWindow() == nullptr) {
+    const AppleCanvas canvas = displayIndex == 1
+            ? m_SecondaryCanvas : m_Canvas;
+    SDL_Window* window = displayIndex == 1
+            ? m_SecondaryWindow : m_Runtime->streamWindow();
+    if (!canvas.isUsable() || window == nullptr) {
         return std::nullopt;
     }
     int width = 0;
     int height = 0;
-    SDL_GetWindowSize(m_Runtime->streamWindow(), &width, &height);
+    SDL_GetWindowSize(window, &width, &height);
     if (width <= 0 || height <= 0) {
         return std::nullopt;
     }
-    const double scale = qMin(static_cast<double>(width) / m_Canvas.width,
-                              static_cast<double>(height) / m_Canvas.height);
-    const double contentWidth = m_Canvas.width * scale;
-    const double contentHeight = m_Canvas.height * scale;
+    const double scale = qMin(static_cast<double>(width) / canvas.width,
+                              static_cast<double>(height) / canvas.height);
+    const double contentWidth = canvas.width * scale;
+    const double contentHeight = canvas.height * scale;
     const double left = (width - contentWidth) / 2.0;
     const double top = (height - contentHeight) / 2.0;
     if (windowX < left || windowY < top ||
@@ -1115,16 +2435,17 @@ std::optional<QPair<quint16, quint16>> AppleScreenSharingSession::remotePoint(
         return std::nullopt;
     }
     const int x = qBound(0, static_cast<int>((windowX - left) / scale),
-                         m_Canvas.width - 1);
+                         canvas.width - 1);
     const int y = qBound(0, static_cast<int>((windowY - top) / scale),
-                         m_Canvas.height - 1);
-    return QPair<quint16, quint16>(static_cast<quint16>(qMin(x, 65535)),
-                                   static_cast<quint16>(qMin(y, 65535)));
+                         canvas.height - 1);
+    return QPair<quint16, quint16>(
+            static_cast<quint16>(qBound(0, x, 65535)),
+            static_cast<quint16>(qBound(0, y, 65535)));
 }
 
 void AppleScreenSharingSession::renderLatestFrames()
 {
-    if (m_D3D11Renderer == nullptr || !m_Canvas.isUsable()) {
+    if (m_D3D11Renderer == nullptr) {
         return;
     }
     const quint64 renderLoopAtNanoseconds = steadyNanoseconds();
@@ -1141,12 +2462,17 @@ void AppleScreenSharingSession::renderLatestFrames()
     }
     QHash<int, AppleDecodedTile> frames;
     quint64 pendingFrameBatches = 0;
+    AppleCanvas canvas;
     {
         QMutexLocker locker(&m_FrameMutex);
+        canvas = m_Canvas;
         frames = std::move(m_LatestFrames);
         m_LatestFrames.clear();
         pendingFrameBatches = m_PendingFrameBatches;
         m_PendingFrameBatches = 0;
+    }
+    if (!canvas.isUsable()) {
+        return;
     }
     if (pendingFrameBatches > 0) {
         m_AwaitingPresentationBatches += pendingFrameBatches;
@@ -1191,29 +2517,29 @@ void AppleScreenSharingSession::renderLatestFrames()
     if (!m_D3D11Renderer->outputSize(&outputWidth, &outputHeight)) {
         return;
     }
-    const double scale = qMin(static_cast<double>(outputWidth) / m_Canvas.width,
-                              static_cast<double>(outputHeight) / m_Canvas.height);
-    const int contentWidth = qRound(m_Canvas.width * scale);
-    const int contentHeight = qRound(m_Canvas.height * scale);
+    const double scale = qMin(static_cast<double>(outputWidth) / canvas.width,
+                              static_cast<double>(outputHeight) / canvas.height);
+    const int contentWidth = qRound(canvas.width * scale);
+    const int contentHeight = qRound(canvas.height * scale);
     const int left = (outputWidth - contentWidth) / 2;
     const int top = (outputHeight - contentHeight) / 2;
 
-    const int fallbackHeight = (m_Canvas.height + m_Canvas.tileCount - 1) /
-            m_Canvas.tileCount;
+    const int fallbackHeight = (canvas.height + canvas.tileCount - 1) /
+            canvas.tileCount;
     QList<int> tileHeights;
-    tileHeights.reserve(m_Canvas.tileCount);
-    for (int tile = 0; tile < m_Canvas.tileCount; ++tile) {
+    tileHeights.reserve(canvas.tileCount);
+    for (int tile = 0; tile < canvas.tileCount; ++tile) {
         tileHeights.append(m_TileHeights.value(tile, fallbackHeight));
     }
     const QList<int> tileBoundaries =
             AppleMediaLayout::verticalTileBoundaries(
-                    m_Canvas, tileHeights, contentHeight);
+                    canvas, tileHeights, contentHeight);
     QString renderError;
     QElapsedTimer renderTimer;
     renderTimer.start();
     const AppleD3D11Renderer::RenderResult renderResult =
             m_D3D11Renderer->render(
-                    m_Canvas,
+                    canvas,
                     tileHeights,
                     tileBoundaries,
                     left,
@@ -1344,6 +2670,11 @@ void AppleScreenSharingSession::destroyPresentation()
         m_EventTimer->deleteLater();
         m_EventTimer = nullptr;
     }
+    if (m_DynamicResolutionTimer != nullptr) {
+        m_DynamicResolutionTimer->stop();
+        m_DynamicResolutionTimer->deleteLater();
+        m_DynamicResolutionTimer = nullptr;
+    }
     if (m_PresentationThread != nullptr) {
         m_PresentationThread->requestInterruption();
         m_PresentationThread->wait();
@@ -1360,15 +2691,179 @@ void AppleScreenSharingSession::destroyPresentation()
     m_MaxRenderLoopGapMilliseconds = 0.0;
     m_MaxOverlayUpdateMilliseconds = 0.0;
     m_D3D11Renderer.reset();
+    m_SecondaryD3D11Renderer.reset();
+    if (m_SecondaryWindow != nullptr) {
+        SDL_DestroyWindow(m_SecondaryWindow);
+        m_SecondaryWindow = nullptr;
+    }
+    m_SecondaryLatestFrames.clear();
+    m_SecondaryTileHeights.clear();
+    m_SecondaryCanvas = {};
+    m_SecondaryMediaReady = false;
     m_PerformanceOverlayTexture = nullptr;
     m_PerformanceOverlaySize = {};
     m_Renderer = nullptr;
+    if (!m_RemoteCursorCache.isEmpty()) {
+        SDL_SetCursor(SDL_GetDefaultCursor());
+        m_ActiveRemoteCursor = nullptr;
+        for (SDL_Cursor* cursor : std::as_const(m_RemoteCursorCache)) {
+            SDL_FreeCursor(cursor);
+        }
+        m_RemoteCursorCache.clear();
+        m_RemoteCursorOrder.clear();
+    }
+    else {
+        m_ActiveRemoteCursor = nullptr;
+    }
     if (m_Runtime) {
         m_Runtime->shutdown();
     }
     if (m_QtWindow != nullptr) {
         m_QtWindow->show();
         m_QtWindow->raise();
+    }
+}
+
+void AppleScreenSharingSession::prepareForReconnect(
+        int attempt,
+        const QString& reason)
+{
+    if (m_Cancelled.load()) {
+        return;
+    }
+    qWarning().nospace()
+            << "Apple Screen Sharing reconnect " << attempt << "/"
+            << MaximumReconnectAttempts << ": " << reason;
+    emit stageStarting(tr("Reconnecting to the Mac (%1/%2)")
+                       .arg(attempt)
+                       .arg(MaximumReconnectAttempts));
+    m_ControlReady.store(false);
+    destroyPresentation();
+    m_MediaReady = false;
+    m_SecondaryMediaReady = false;
+    m_DisplayLayout = {};
+    m_MediaDisplayIds.clear();
+    m_PendingRemoteClipboardText.reset();
+    m_PendingDynamicResolution = {};
+    m_LastRequestedDynamicResolution = {};
+    m_LastDynamicResolutionRequestAt = 0;
+    {
+        QMutexLocker locker(&m_InputMutex);
+        m_SelectedInputDisplayId.reset();
+        m_PendingControls.clear();
+    }
+    {
+        QMutexLocker locker(&m_PerformanceMutex);
+        m_PerformanceMediaSummary.clear();
+        m_SecondaryPerformanceSummary.clear();
+        m_PerformancePresentationSummary.clear();
+        m_AudioSummary.clear();
+    }
+    m_PresentationWindowStartedAt = 0;
+    m_PresentationCount = 0;
+    m_PresentedTileUpdates = 0;
+    m_DisplayedFrameBatches = 0;
+    m_DroppedFrameBatches = 0;
+    m_PresentationBusyCount = 0;
+    m_LastDisplayedFrameAt = 0;
+    m_DisplayFrameIntervals.clear();
+    m_SubmitToDisplayLatencies.clear();
+    m_RenderCallDurations.clear();
+    m_MaxRenderLoopGapMilliseconds = 0.0;
+    m_MaxOverlayUpdateMilliseconds = 0.0;
+    LocalStreamRuntimeConfig runtimeConfig;
+    const QSize initialDisplaySize = m_InitialDisplaySizes.isEmpty()
+            ? QSize(1440, 900) : m_InitialDisplaySizes.first();
+    runtimeConfig.streamWidth = initialDisplaySize.width();
+    runtimeConfig.streamHeight = initialDisplaySize.height();
+    if (m_QtWindow == nullptr ||
+            !m_Runtime->initialize(m_QtWindow, runtimeConfig)) {
+        m_Cancelled.store(true);
+        emit displayLaunchError(tr(
+                "Couldn’t reinitialize video presentation after reconnecting."));
+    }
+    updateControlSummary();
+}
+
+void AppleScreenSharingSession::renderSecondaryFrames()
+{
+    if (m_SecondaryD3D11Renderer == nullptr) {
+        return;
+    }
+    QHash<int, AppleDecodedTile> frames;
+    AppleCanvas canvas;
+    {
+        QMutexLocker locker(&m_FrameMutex);
+        canvas = m_SecondaryCanvas;
+        frames = std::move(m_SecondaryLatestFrames);
+        m_SecondaryLatestFrames.clear();
+        m_SecondaryPendingFrameBatches = 0;
+    }
+    if (!canvas.isUsable()) {
+        return;
+    }
+    for (auto iterator = frames.begin(); iterator != frames.end(); ++iterator) {
+        AppleDecodedTile& frame = iterator.value();
+        if ((frame.pixelFormat != AppleDecodedTile::PixelFormat::Vuya &&
+             frame.pixelFormat != AppleDecodedTile::PixelFormat::D3d11Ayuv) ||
+                !frame.isValid()) {
+            continue;
+        }
+        QString uploadError;
+        if (m_SecondaryD3D11Renderer->upload(frame, &uploadError)) {
+            m_SecondaryTileHeights.insert(frame.tileIndex, frame.height);
+            m_SecondaryPresentationNeeded.store(true);
+        }
+        else {
+            qWarning().nospace()
+                    << "Apple High Performance display 2 upload failed: "
+                    << uploadError;
+        }
+    }
+    if (!m_SecondaryPresentationNeeded.exchange(false)) {
+        return;
+    }
+    int outputWidth = 0;
+    int outputHeight = 0;
+    if (!m_SecondaryD3D11Renderer->outputSize(
+                &outputWidth, &outputHeight)) {
+        return;
+    }
+    const double scale = qMin(
+            static_cast<double>(outputWidth) / canvas.width,
+            static_cast<double>(outputHeight) / canvas.height);
+    const int contentWidth = qRound(canvas.width * scale);
+    const int contentHeight = qRound(canvas.height * scale);
+    const int fallbackHeight = (canvas.height + canvas.tileCount - 1) /
+            canvas.tileCount;
+    QList<int> tileHeights;
+    tileHeights.reserve(canvas.tileCount);
+    for (int tile = 0; tile < canvas.tileCount; ++tile) {
+        tileHeights.append(m_SecondaryTileHeights.value(
+                tile, fallbackHeight));
+    }
+    const QList<int> boundaries =
+            AppleMediaLayout::verticalTileBoundaries(
+                    canvas, tileHeights, contentHeight);
+    QString renderError;
+    const AppleD3D11Renderer::RenderResult result =
+            m_SecondaryD3D11Renderer->render(
+                    canvas,
+                    tileHeights,
+                    boundaries,
+                    (outputWidth - contentWidth) / 2,
+                    (outputHeight - contentHeight) / 2,
+                    contentWidth,
+                    outputWidth,
+                    outputHeight,
+                    &renderError);
+    if (result == AppleD3D11Renderer::RenderResult::Busy) {
+        m_SecondaryPresentationNeeded.store(true);
+    }
+    else if (result == AppleD3D11Renderer::RenderResult::Failed) {
+        qWarning().nospace()
+                << "Apple High Performance display 2 render failed: "
+                << renderError;
     }
 }
 

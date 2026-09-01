@@ -207,6 +207,23 @@ bool AppleConnectionStore::clearCredentialBinding(const QString& id)
     return true;
 }
 
+bool AppleConnectionStore::setVirtualDisplayCount(const QString& id,
+                                                   int displayCount)
+{
+    const int index = indexOf(id);
+    if (index < 0 || displayCount < 1 || displayCount > 2) {
+        return false;
+    }
+    AppleSavedConnection& connection = m_Connections[index];
+    if (connection.virtualDisplayCount == displayCount) {
+        return true;
+    }
+    connection.virtualDisplayCount = displayCount;
+    ++connection.revision;
+    persist();
+    return true;
+}
+
 void AppleConnectionStore::load()
 {
     const std::unique_ptr<QSettings> settings = createSettings(m_SettingsFile);
@@ -229,6 +246,10 @@ void AppleConnectionStore::load()
                 settings->value(QStringLiteral("credentialReference")).toString();
         connection.preferredUsername =
                 settings->value(QStringLiteral("preferredUsername")).toString();
+        connection.virtualDisplayCount = qBound(
+                1,
+                settings->value(QStringLiteral("virtualDisplayCount"), 1).toInt(),
+                2);
         connection.revision = settings->value(QStringLiteral("revision"), 1).toULongLong();
         if (connection.isValid()) {
             m_Connections.append(connection);
@@ -259,6 +280,8 @@ void AppleConnectionStore::persist() const
         settings->setValue(QStringLiteral("credentialReference"),
                            connection.credentialReference);
         settings->setValue(QStringLiteral("preferredUsername"), connection.preferredUsername);
+        settings->setValue(QStringLiteral("virtualDisplayCount"),
+                           connection.virtualDisplayCount);
         settings->setValue(QStringLiteral("revision"), connection.revision);
     }
     settings->endArray();

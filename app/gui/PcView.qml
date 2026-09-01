@@ -22,6 +22,13 @@ CenteredGridView {
     property ComputerModel computerModel : createModel()
     readonly property string currentBgUrl: backgroundImage.currentImageUrl
 
+    Settings {
+        id: appleSessionSettings
+        category: "appleScreenSharing"
+        property bool dynamicResolution: true
+        property bool preferHardwareDecode: true
+    }
+
     function reloadBackgroundFromPreferences(forceRefresh) {
         backgroundImage.reloadFromPreferences(forceRefresh === true)
     }
@@ -513,6 +520,11 @@ CenteredGridView {
                     visible: model.directLaunch && model.persistent && model.paired
                 }
                 NavigableMenuItem {
+                    text: qsTr("Screen Sharing Options")
+                    onTriggered: appleSessionOptionsDialog.openFor(model.connectionId)
+                    visible: model.directLaunch && model.persistent
+                }
+                NavigableMenuItem {
                     text: qsTr("Select Connection IP")
                     onTriggered: showAddressSelectionForComputer(model.connectionId, model.name, false)
                     visible: model.online && model.paired && computerModel.hasMultipleConnectionAddresses(model.connectionId)
@@ -716,6 +728,83 @@ CenteredGridView {
                 Layout.fillWidth: true
                 Keys.onReturnPressed: credentialsDialog.accept()
                 Keys.onEnterPressed: credentialsDialog.accept()
+            }
+        }
+    }
+
+    NavigableDialog {
+        id: appleSessionOptionsDialog
+        title: qsTr("Apple Screen Sharing Options")
+        standardButtons: DialogButtonBox.Ok | DialogButtonBox.Cancel
+        property string connectionId: ""
+
+        function openFor(connectionId) {
+            var options = computerModel.getSessionOptions(connectionId)
+            if (options.virtualDisplayCount === undefined) {
+                showOperationError(qsTr("The Screen Sharing options are unavailable."))
+                return
+            }
+            appleSessionOptionsDialog.connectionId = connectionId
+            displayCountCombo.currentIndex = Math.max(
+                    0, Math.min(1, options.virtualDisplayCount - 1))
+            dynamicResolutionCheck.checked = appleSessionSettings.dynamicResolution
+            hardwareDecodeCheck.checked = appleSessionSettings.preferHardwareDecode
+            open()
+        }
+        onAccepted: {
+            computerModel.setSessionOptions(connectionId, {
+                "virtualDisplayCount": displayCountCombo.currentIndex + 1
+            })
+            appleSessionSettings.dynamicResolution = dynamicResolutionCheck.checked
+            appleSessionSettings.preferHardwareDecode = hardwareDecodeCheck.checked
+        }
+
+        ColumnLayout {
+            spacing: Theme.spaceMd
+
+            Text {
+                text: qsTr("High Performance mode can create one dynamic display or two fixed displays on the Mac.")
+                color: Theme.text
+                font.family: Theme.fontSans
+                font.pointSize: Theme.fontBody
+                wrapMode: Text.Wrap
+                Layout.preferredWidth: 460
+            }
+
+            Label {
+                text: qsTr("Virtual displays")
+                color: Theme.text
+            }
+
+            AutoResizingComboBox {
+                id: displayCountCombo
+                model: [qsTr("One display"), qsTr("Two displays")]
+                Layout.fillWidth: true
+            }
+
+            CheckBox {
+                id: dynamicResolutionCheck
+                text: qsTr("Match the first window size dynamically")
+                enabled: displayCountCombo.currentIndex === 0
+                checked: true
+                Layout.fillWidth: true
+            }
+
+            CheckBox {
+                id: hardwareDecodeCheck
+                text: qsTr("Prefer D3D11 hardware decoding")
+                checked: true
+                Layout.fillWidth: true
+            }
+
+            Text {
+                visible: displayCountCombo.currentIndex === 1
+                text: qsTr("Dynamic resolution is disabled while two displays are active.")
+                color: Theme.textDim
+                font.family: Theme.fontSans
+                font.pointSize: Theme.fontBody
+                wrapMode: Text.Wrap
+                Layout.preferredWidth: 460
             }
         }
     }

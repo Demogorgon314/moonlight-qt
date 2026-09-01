@@ -1,5 +1,7 @@
 #include "backend/apple/appleauthenticator.h"
+#include "backend/apple/appleaudiostream.h"
 #include "backend/apple/appleconnectionstore.h"
+#include "backend/apple/applecontrolfeatures.h"
 #include "backend/apple/applefeaturegate.h"
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -45,6 +47,25 @@ void writeUInt32(QByteArray& data, int offset, quint32 value)
     data[offset + 1] = static_cast<char>(value >> 16);
     data[offset + 2] = static_cast<char>(value >> 8);
     data[offset + 3] = static_cast<char>(value);
+}
+
+QByteArray cursorRectangle(quint16 hotspotX,
+                           quint16 hotspotY,
+                           quint16 width,
+                           quint16 height,
+                           quint32 id,
+                           const QByteArray& compressed)
+{
+    QByteArray rectangle(12, '\0');
+    writeUInt16(rectangle, 0, hotspotX);
+    writeUInt16(rectangle, 2, hotspotY);
+    writeUInt16(rectangle, 4, width);
+    writeUInt16(rectangle, 6, height);
+    writeUInt32(rectangle, 8, 0x450);
+    AppleWire::appendUInt32(rectangle, id);
+    AppleWire::appendUInt32(rectangle, static_cast<quint32>(compressed.size()));
+    rectangle.append(compressed);
+    return rectangle;
 }
 
 class TranscriptTransport final : public AppleByteTransport
@@ -229,6 +250,9 @@ void testSavedConnectionIdentityAndSecretBoundary()
                                            QStringLiteral("opaque-credential-reference"),
                                            QStringLiteral("alice")),
                 "only an opaque credential binding may be persisted");
+        require(store.setVirtualDisplayCount(firstId, 2) &&
+                store.connection(firstId).virtualDisplayCount == 2,
+                "the virtual display count must be stored per saved Mac");
 
         updated = endpoint;
         updated.host = QStringLiteral("192.0.2.44");
@@ -254,6 +278,8 @@ void testSavedConnectionIdentityAndSecretBoundary()
         const AppleSavedConnection readded = store.saveDiscovered(updated, QStringLiteral("Studio Mac"));
         require(readded.id != firstId,
                 "delete and re-add must create a new saved identity");
+        require(store.setVirtualDisplayCount(readded.id, 2),
+                "the replacement connection display count must persist independently");
     }
 
     QFile settingsFile(path);
@@ -265,7 +291,8 @@ void testSavedConnectionIdentityAndSecretBoundary()
 
     AppleConnectionStore reloaded(path);
     require(reloaded.connections().size() == 1 &&
-            reloaded.connections().first().id != firstId,
+            reloaded.connections().first().id != firstId &&
+            reloaded.connections().first().virtualDisplayCount == 2,
             "saved identity must survive process restart and removed identity must stay absent");
 }
 
@@ -292,6 +319,9 @@ void testMalformedWireInputs()
             "authentication frame must reject invalid encrypted field sizes");
     require(AppleWire::displayConfiguration(0, 900).isEmpty(),
             "invalid display dimensions must not produce a wire message");
+    require(AppleWire::displayConfiguration(
+                    {QSize(800, 600), QSize(800, 600), QSize(800, 600)}).isEmpty(),
+            "more than two Apple displays must be rejected");
 
     AppleCredentials embeddedNull{
         QStringLiteral("alice"),
@@ -533,6 +563,75 @@ void testHighPerformanceMediaOfferAndAnswer()
     require(AppleMediaWire::parsePorts(portAnswer, &ports) &&
             ports.audio == 5900 && ports.video == 6001,
             "explicit server media ports must replace the optimistic UDP destinations");
+
+    AppleMediaOffers secondaryOffers;
+    secondaryOffers.video = QByteArray::fromHex("c1c2c3c4");
+    AppleMediaKeys dualKeys = keys;
+    dualKeys.secondaryVideoViewer = QByteArray(46, char(0x55));
+    dualKeys.secondaryVideoServer = QByteArray(46, char(0x66));
+    const QByteArray dualConfiguration = AppleMediaWire::configuration(
+            offers, &secondaryOffers, dualKeys, callId, &error);
+    const int secondaryOffset = 0x80 + offers.audio.size() + 92 +
+            offers.video.size();
+    require(error.isEmpty() &&
+            AppleWire::readUInt32(dualConfiguration, 6) == 0x07 &&
+            AppleWire::readUInt16(dualConfiguration, 14) ==
+                    secondaryOffers.video.size() &&
+            dualConfiguration.mid(secondaryOffset, 46) ==
+                    dualKeys.secondaryVideoViewer &&
+            dualConfiguration.mid(secondaryOffset + 46, 46) ==
+                    dualKeys.secondaryVideoServer &&
+            dualConfiguration.mid(secondaryOffset + 92) ==
+                    secondaryOffers.video,
+            "dual-display media configuration must carry an independent second offer and SRTP key pair");
+
+    portAnswer.resize(0x19);
+    writeUInt16(portAnswer, 0x16, 6002);
+    portAnswer[0x18] = 1;
+    require(AppleMediaWire::parsePorts(portAnswer, &ports) &&
+            ports.videoPorts() == QList<quint16>{6001, 6002},
+            "dual-display media answer must expose both independent video ports");
+
+    const QList<AppleCanvas> dualCanvases =
+            AppleMediaWire::parseCanvases(answer + answer);
+    require(dualCanvases.size() == 2 &&
+            dualCanvases.at(0) == AppleCanvas{1920, 1080, 4} &&
+            dualCanvases.at(1) == AppleCanvas{1920, 1080, 4},
+            "dual-display media answers must expose one canvas per video stream");
+}
+
+void testStageFourDisplayConfigurationAndDynamicResolution()
+{
+    constexpr int descriptorSize = 0x9c + 28 * 5;
+    const QByteArray displays = AppleWire::displayConfiguration(
+            {QSize(1920, 1080), QSize(1280, 720)});
+    require(displays.size() == 12 + descriptorSize * 2 &&
+            static_cast<quint8>(displays.at(0)) == 0x1d &&
+            AppleWire::readUInt16(displays, 2) == displays.size() - 4 &&
+            AppleWire::readUInt16(displays, 6) == 2,
+            "display configuration must encode exactly two independent virtual displays");
+    const int firstMode = 12 + 0x9c;
+    const int secondMode = 12 + descriptorSize + 0x9c;
+    require(AppleWire::readUInt32(displays, firstMode) == 3840 &&
+            AppleWire::readUInt32(displays, firstMode + 4) == 2160 &&
+            AppleWire::readUInt32(displays, secondMode) == 2560 &&
+            AppleWire::readUInt32(displays, secondMode + 4) == 1440,
+            "each display descriptor must scale its backing pixels independently");
+
+    require(AppleDynamicResolution::normalizedSize(2560, 1440) ==
+                    QSize(1920, 1080) &&
+            AppleDynamicResolution::normalizedSize(1000, 901) ==
+                    QSize(1000, 900) &&
+            AppleDynamicResolution::normalizedSize(100, 100) ==
+                    QSize(320, 320) &&
+            !AppleDynamicResolution::normalizedSize(0, 1080).isValid(),
+            "dynamic resolution must preserve aspect ratio within the Mac client's even 1920x1080 bounds");
+
+    require(AppleMediaWire::selectCombinedDisplays() ==
+                    QByteArray::fromHex("0d01000000000000") &&
+            AppleMediaWire::selectDisplay(0x12345678) ==
+                    QByteArray::fromHex("0d00000012345678"),
+            "dual-display input selection must match the native Apple wire messages");
 }
 
 void testSrtpAndRecoveryFeedbackVectors()
@@ -978,9 +1077,10 @@ void testUdpPunchIgnoresClosedOptimisticPortReset()
             "the initial loopback video punch must be drained before the reset test");
     media.drainControl();
 
-    media.configureRemotePorts(AppleMediaPorts{
+    require(media.configureRemotePorts(AppleMediaPorts{
             static_cast<quint16>(basePort + 2),
-            static_cast<quint16>(basePort + 3)});
+            static_cast<quint16>(basePort + 3)}),
+            "a one-display transport must accept exactly one remote video port");
     QThread::msleep(110);
     media.punchIfDue();
 
@@ -991,6 +1091,140 @@ void testUdpPunchIgnoresClosedOptimisticPortReset()
     require(error.isEmpty(),
             "an ICMP reset from an unopened optimistic UDP port must not abort media negotiation");
 #endif
+}
+
+void testStageFourCursorAndDisplayLayoutEvents()
+{
+    // Cursor payload is four-byte BGRX pixels followed by one alpha byte per
+    // pixel. qCompress produces a complete zlib stream, which exercises the
+    // same decoder path as the host's sync-flushed stream.
+    const QByteArray raw = QByteArray::fromHex("030201ff070605ff090a");
+    const QByteArray compressed = qCompress(raw, 9).mid(4);
+    QByteArray message = QByteArray::fromHex("00000003");
+    message.append(cursorRectangle(1, 0, 2, 1, 42, compressed));
+    message.append(cursorRectangle(0, 0, 0, 0, 42, {}));
+
+    QByteArray layoutPayload(76, '\0');
+    writeUInt16(layoutPayload, 0, 1);
+    writeUInt16(layoutPayload, 2, 1440);
+    writeUInt16(layoutPayload, 4, 900);
+    writeUInt16(layoutPayload, 6, 2880);
+    writeUInt16(layoutPayload, 8, 1800);
+    writeUInt16(layoutPayload, 18, 1);
+    writeUInt32(layoutPayload, 36, 77);
+    writeUInt16(layoutPayload, 52, 1800);
+    writeUInt16(layoutPayload, 54, 2880);
+    QByteArray layoutRectangle(12, '\0');
+    writeUInt32(layoutRectangle, 8, 0x451);
+    AppleWire::appendUInt16(layoutRectangle,
+                            static_cast<quint16>(layoutPayload.size()));
+    layoutRectangle.append(layoutPayload);
+    message.append(layoutRectangle);
+
+    const AppleControlEvents events = AppleControlEventParser::parse(message);
+    require(events.cursorUpdates.size() == 2,
+            "cursor store and cache-selection updates must both be parsed");
+    require(events.cursorUpdates.at(0).kind == AppleCursorUpdate::Kind::Store &&
+            events.cursorUpdates.at(0).id == 42 &&
+            events.cursorUpdates.at(0).image.hotspotX == 1 &&
+            events.cursorUpdates.at(0).image.rgba ==
+                    QByteArray::fromHex("010203090506070a"),
+            "cursor BGR and alpha planes must become exact RGBA pixels");
+    require(events.cursorUpdates.at(1).kind == AppleCursorUpdate::Kind::Select &&
+            events.cursorUpdates.at(1).id == 42,
+            "zero-length cursor updates must select a cached cursor");
+    require(events.displayLayouts.size() == 1 &&
+            events.displayLayouts.first().backingWidth == 2880 &&
+            events.displayLayouts.first().displays.size() == 1 &&
+            events.displayLayouts.first().displays.first().id == 77,
+            "display-layout rectangles must preserve backing geometry and identity");
+
+    QByteArray malformed = message.left(message.size() - 4);
+    const AppleControlEvents prefix = AppleControlEventParser::parse(malformed);
+    require(prefix.cursorUpdates.size() == 2,
+            "a malformed trailing rectangle must not discard earlier cursor events");
+}
+
+void testStageFourTextOnlyClipboardExchange()
+{
+    AppleTextClipboardExchange exchange;
+    const QList<QByteArray> enable = exchange.setEligible(true);
+    require(enable == QList<QByteArray>{QByteArray::fromHex("1500000100000000")},
+            "controlling mode must explicitly enable the shared pasteboard");
+
+    QString error;
+    const QList<QByteArray> encoded = AppleTextClipboardExchange::encodeText(
+            QStringLiteral("Hello, 世界 👋"), false, 0, &error);
+    require(error.isEmpty() && !encoded.isEmpty(),
+            "Unicode clipboard text must encode without loss");
+    QByteArray complete;
+    for (const QByteArray& fragment : encoded) complete.append(fragment);
+    require(complete.size() >= 20 && complete.left(1) == QByteArray::fromHex("1f") &&
+            complete.right(4) == QByteArray::fromHex("0000ffff"),
+            "clipboard payloads must use the native zlib sync-flush framing");
+
+    QByteArray changed = QByteArray::fromHex("1400000000000002");
+    AppleTextClipboardResult result = exchange.receive(changed, &error);
+    require(result.consumed && result.outboundMessages.size() == 1 &&
+            result.outboundMessages.first() ==
+                    AppleTextClipboardExchange::request(true, 1),
+            "remote clipboard change must begin the native promise exchange");
+
+    const QList<QByteArray> promises = AppleTextClipboardExchange::encodeText(
+            QStringLiteral("Hello, 世界 👋"), true, 1, &error);
+    for (const QByteArray& fragment : promises) {
+        result = exchange.receive(fragment, &error);
+    }
+    require(result.outboundMessages ==
+                    QList<QByteArray>{AppleTextClipboardExchange::request(false, 0)},
+            "a matching promise must be resolved with native automatic session zero");
+
+    for (const QByteArray& fragment : encoded) {
+        result = exchange.receive(fragment, &error);
+    }
+    require(result.receivedText == std::optional<QString>(
+                    QStringLiteral("Hello, 世界 👋")),
+            "only the exact UTF-8 plain-text flavor must cross the clipboard seam");
+
+    const QList<QByteArray> advertised = exchange.advertiseLocalText(
+            QStringLiteral("local text"), &error);
+    require(!advertised.isEmpty(),
+            "eligible local text changes must advertise a pasteboard promise");
+    result = exchange.receive(
+            AppleTextClipboardExchange::request(false, 0x01020304), &error);
+    require(result.consumed && !result.outboundMessages.isEmpty(),
+            "a host request must resolve the most recently advertised local text");
+
+    const QList<QByteArray> disable = exchange.setEligible(false);
+    require(disable == QList<QByteArray>{QByteArray::fromHex("1500000200000000")},
+            "observing mode must explicitly disable shared-pasteboard exchange");
+    result = exchange.receive(changed, &error);
+    require(result.consumed && result.outboundMessages.isEmpty(),
+            "remote clipboard changes must not fetch while observing");
+}
+
+void testStageFourAacEldAudioContract()
+{
+    QByteArray audio(12, '\0');
+    audio[0] = static_cast<char>(0x80);
+    audio[1] = static_cast<char>(101);
+    require(AppleAudioStream::isAudioRtp(audio),
+            "Apple audio RTP payload 101 was not recognized");
+    audio[1] = static_cast<char>(72);
+    require(!AppleAudioStream::isAudioRtp(audio),
+            "RTCP payload was mistaken for Apple audio RTP");
+    audio[0] = 0;
+    audio[1] = static_cast<char>(101);
+    require(!AppleAudioStream::isAudioRtp(audio),
+            "invalid RTP version was accepted as Apple audio");
+
+    QString error;
+    const bool supported = AppleAudioStream::decoderIsSupported(&error);
+    if (!supported) {
+        std::fprintf(stderr, "AAC-ELD probe: %s\n", qPrintable(error));
+    }
+    require(supported,
+            qPrintable(QStringLiteral("AAC-ELD decoder probe failed: %1").arg(error)));
 }
 
 } // namespace
@@ -1014,6 +1248,8 @@ int main(int argc, char* argv[])
     testControlNegotiationAndEncryptedWrite();
     std::fprintf(stderr, "testHighPerformanceMediaOfferAndAnswer\n");
     testHighPerformanceMediaOfferAndAnswer();
+    std::fprintf(stderr, "testStageFourDisplayConfigurationAndDynamicResolution\n");
+    testStageFourDisplayConfigurationAndDynamicResolution();
     std::fprintf(stderr, "testSrtpAndRecoveryFeedbackVectors\n");
     testSrtpAndRecoveryFeedbackVectors();
     std::fprintf(stderr, "testHevcAssemblyAndLossTracking\n");
@@ -1036,6 +1272,12 @@ int main(int argc, char* argv[])
     testDecodedTilesPublishOnFlsEndOfDataWithoutTearing();
     std::fprintf(stderr, "testUdpPunchIgnoresClosedOptimisticPortReset\n");
     testUdpPunchIgnoresClosedOptimisticPortReset();
-    std::fprintf(stderr, "Apple Screen Sharing stage 3 protocol tests passed\n");
+    std::fprintf(stderr, "testStageFourCursorAndDisplayLayoutEvents\n");
+    testStageFourCursorAndDisplayLayoutEvents();
+    std::fprintf(stderr, "testStageFourTextOnlyClipboardExchange\n");
+    testStageFourTextOnlyClipboardExchange();
+    std::fprintf(stderr, "testStageFourAacEldAudioContract\n");
+    testStageFourAacEldAudioContract();
+    std::fprintf(stderr, "Apple Screen Sharing stage 3 and 4 protocol tests passed\n");
     return 0;
 }

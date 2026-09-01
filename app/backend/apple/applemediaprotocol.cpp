@@ -777,8 +777,20 @@ QList<int> AppleMediaLayout::verticalTileBoundaries(
 
 bool AppleMediaKeys::isValid() const
 {
-    return audioViewer.size() == BlobLength && audioServer.size() == BlobLength &&
-           videoViewer.size() == BlobLength && videoServer.size() == BlobLength;
+    const bool baseValid = audioViewer.size() == BlobLength &&
+            audioServer.size() == BlobLength &&
+            videoViewer.size() == BlobLength && videoServer.size() == BlobLength;
+    const bool secondaryEmpty = secondaryVideoViewer.isEmpty() &&
+            secondaryVideoServer.isEmpty();
+    const bool secondaryValid = secondaryVideoViewer.size() == BlobLength &&
+            secondaryVideoServer.size() == BlobLength;
+    return baseValid && (secondaryEmpty || secondaryValid);
+}
+
+bool AppleMediaKeys::hasSecondaryVideo() const
+{
+    return secondaryVideoViewer.size() == BlobLength &&
+            secondaryVideoServer.size() == BlobLength;
 }
 
 namespace AppleMediaWire {
@@ -843,10 +855,26 @@ QByteArray configuration(const AppleMediaOffers& offers,
                          const QUuid& callId,
                          QString* error)
 {
-    const int messageSize = offers.audio.size() + offers.video.size() + 0xd8;
+    return configuration(offers, nullptr, keys, callId, error);
+}
+
+QByteArray configuration(const AppleMediaOffers& offers,
+                         const AppleMediaOffers* secondaryOffers,
+                         const AppleMediaKeys& keys,
+                         const QUuid& callId,
+                         QString* error)
+{
+    const bool hasSecondaryOffer = secondaryOffers != nullptr &&
+            !secondaryOffers->video.isEmpty();
+    const int secondaryOfferSize = hasSecondaryOffer
+            ? secondaryOffers->video.size() : 0;
+    const int messageSize = offers.audio.size() + offers.video.size() +
+            secondaryOfferSize + 0xd8 + (hasSecondaryOffer ? 92 : 0);
     if (!keys.isValid() || offers.audio.isEmpty() || offers.video.isEmpty() ||
             callId.isNull() || offers.audio.size() > 65535 ||
-            offers.video.size() > 65535 || messageSize > 65535) {
+            offers.video.size() > 65535 || secondaryOfferSize > 65535 ||
+            keys.hasSecondaryVideo() != hasSecondaryOffer ||
+            messageSize > 65535) {
         setError(error, QCoreApplication::translate(
                 "AppleMediaProtocol", "The media configuration is invalid or too large."));
         return {};
@@ -855,10 +883,10 @@ QByteArray configuration(const AppleMediaOffers& offers,
     message[0] = char(0x1c);
     writeUInt16(message, 2, static_cast<quint16>(messageSize));
     writeUInt16(message, 4, 3);
-    writeUInt32(message, 6, 0x05);
+    writeUInt32(message, 6, hasSecondaryOffer ? 0x07 : 0x05);
     writeUInt16(message, 10, static_cast<quint16>(offers.audio.size()));
     writeUInt16(message, 12, static_cast<quint16>(offers.video.size()));
-    writeUInt16(message, 14, 0);
+    writeUInt16(message, 14, static_cast<quint16>(secondaryOfferSize));
     const QByteArray uuid = callId.toRfc4122();
     std::memcpy(message.data() + 0x14, uuid.constData(), 16);
     std::memcpy(message.data() + 0x24, keys.audioViewer.constData(), 46);
@@ -869,6 +897,15 @@ QByteArray configuration(const AppleMediaOffers& offers,
     std::memcpy(message.data() + videoOffset + 46, keys.videoServer.constData(), 46);
     std::memcpy(message.data() + videoOffset + 92,
                 offers.video.constData(), offers.video.size());
+    if (hasSecondaryOffer) {
+        const int secondaryOffset = videoOffset + 92 + offers.video.size();
+        std::memcpy(message.data() + secondaryOffset,
+                    keys.secondaryVideoViewer.constData(), 46);
+        std::memcpy(message.data() + secondaryOffset + 46,
+                    keys.secondaryVideoServer.constData(), 46);
+        std::memcpy(message.data() + secondaryOffset + 92,
+                    secondaryOffers->video.constData(), secondaryOfferSize);
+    }
     return message;
 }
 
@@ -889,6 +926,18 @@ QByteArray controlMode(bool observing)
     return message;
 }
 
+QByteArray selectCombinedDisplays()
+{
+    return QByteArray::fromHex("0d01000000000000");
+}
+
+QByteArray selectDisplay(quint32 displayId)
+{
+    QByteArray message = QByteArray::fromHex("0d00000000000000");
+    writeUInt32(message, 4, displayId);
+    return message;
+}
+
 bool parsePorts(const QByteArray& answer, AppleMediaPorts* ports)
 {
     if (ports == nullptr || answer.size() < 0x14 ||
@@ -900,6 +949,14 @@ bool parsePorts(const QByteArray& answer, AppleMediaPorts* ports)
     AppleMediaPorts candidate;
     candidate.audio = AppleWire::readUInt16(answer, 0x0a);
     candidate.video = AppleWire::readUInt16(answer, 0x10);
+    candidate.videos.append(candidate.video);
+    if (answer.size() > 0x18 && (byteAt(answer, 0x18) & 1) != 0) {
+        const quint16 secondary = AppleWire::readUInt16(answer, 0x16);
+        if (secondary == 0) {
+            return false;
+        }
+        candidate.videos.append(secondary);
+    }
     if (!candidate.isUsable()) {
         return false;
     }
@@ -909,11 +966,26 @@ bool parsePorts(const QByteArray& answer, AppleMediaPorts* ports)
 
 bool parseCanvas(const QByteArray& answer, AppleCanvas* canvas)
 {
-    if (canvas == nullptr || answer.isEmpty() || byteAt(answer, 0) != 0) {
+    if (canvas == nullptr) {
         return false;
+    }
+    const QList<AppleCanvas> canvases = parseCanvases(answer);
+    if (canvases.isEmpty()) {
+        return false;
+    }
+    *canvas = canvases.first();
+    return true;
+}
+
+QList<AppleCanvas> parseCanvases(const QByteArray& answer)
+{
+    QList<AppleCanvas> canvases;
+    if (answer.isEmpty() || byteAt(answer, 0) != 0) {
+        return canvases;
     }
     int search = 0;
     while ((search = answer.indexOf("bplist", search)) >= 0) {
+        bool found = false;
         for (int end = answer.size(); end >= search + 40; --end) {
             QByteArray compressed;
             BinaryPlistReader reader(answer.mid(search, end - search));
@@ -922,13 +994,19 @@ bool parseCanvas(const QByteArray& answer, AppleCanvas* canvas)
                 continue;
             }
             const QByteArray blob = inflateMediaBlob(compressed);
-            if (!blob.isEmpty() && canvasFromProtobuf(blob, canvas)) {
-                return true;
+            AppleCanvas canvas;
+            if (!blob.isEmpty() && canvasFromProtobuf(blob, &canvas)) {
+                canvases.append(canvas);
+                found = true;
+                break;
             }
         }
         search += 6;
+        if (!found) {
+            continue;
+        }
     }
-    return false;
+    return canvases;
 }
 
 bool containsMediaAnswer(const QByteArray& answer)

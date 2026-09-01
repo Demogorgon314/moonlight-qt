@@ -475,7 +475,17 @@ bool AppleControlChannel::negotiate(AppleByteTransport& transport,
                                     std::atomic_bool* cancelledFlag,
                                     QString* error)
 {
-    if (masterKey.size() != 16 ||
+    return negotiate(transport, masterKey, AppleWire::displayConfiguration(),
+                     cancelledFlag, error);
+}
+
+bool AppleControlChannel::negotiate(AppleByteTransport& transport,
+                                    const QByteArray& masterKey,
+                                    const QByteArray& displayConfiguration,
+                                    std::atomic_bool* cancelledFlag,
+                                    QString* error)
+{
+    if (masterKey.size() != 16 || displayConfiguration.isEmpty() ||
             !transport.writeAll(AppleWire::viewerInfo() + AppleWire::setEncryption(),
                                 cancelledFlag, error)) {
         return false;
@@ -503,7 +513,7 @@ bool AppleControlChannel::negotiate(AppleByteTransport& transport,
     transport.protocolDelay(200, cancelledFlag);
     return !cancelled(cancelledFlag) && sendEncrypted(
             transport,
-            AppleWire::displayConfiguration(),
+            displayConfiguration,
             cancelledFlag,
             error);
 }

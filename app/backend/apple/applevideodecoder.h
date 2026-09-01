@@ -128,6 +128,7 @@ public:
                                    const AppleHevcParameterSets& parameterSets,
                                    int tileIndex,
                                    QString* error = nullptr);
+    void flush();
     void close();
 
     bool isOpen() const { return m_Context != nullptr; }

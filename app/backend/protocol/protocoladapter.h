@@ -65,6 +65,19 @@ public:
                                 int port) = 0;
     virtual bool selectAutomaticEndpoint(const ConnectionIdentity& identity) = 0;
     virtual QVariantMap activeEndpoint(const ConnectionIdentity& identity) const = 0;
+    virtual QVariantMap sessionOptions(const ConnectionIdentity&) const
+    {
+        return {};
+    }
+    virtual bool setSessionOptions(const ConnectionIdentity&,
+                                   const QVariantMap&,
+                                   QString* error)
+    {
+        if (error != nullptr) {
+            *error = tr("This connection has no configurable session options.");
+        }
+        return false;
+    }
 
     virtual std::unique_ptr<ResolvedLaunchPlan> resolveLaunch(const LaunchRequest& request,
                                                                QString* error) const = 0;

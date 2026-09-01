@@ -57,6 +57,10 @@ public:
     bool selectEndpoint(const QString& connectionId, const QString& address, int port);
     bool selectAutomaticEndpoint(const QString& connectionId);
     QVariantMap activeEndpoint(const QString& connectionId) const;
+    QVariantMap connectionSessionOptions(const QString& connectionId) const;
+    bool setConnectionSessionOptions(const QString& connectionId,
+                                     const QVariantMap& options,
+                                     QString* error = nullptr);
 
     std::unique_ptr<ResolvedLaunchPlan> resolveLaunch(const QString& connectionId,
                                                        const QString& activityId,

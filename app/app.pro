@@ -11,6 +11,7 @@ win32:contains(QT_ARCH, x86_64):equals(MOONLIGHT_APPLE_SCREEN_SHARING_BUILD, 1) 
 }
 
 apple-screen-sharing {
+    QT += zlib-private
     DEFINES += MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
     LIBS += -ladvapi32
     SOURCES += \
@@ -18,6 +19,8 @@ apple-screen-sharing {
         backend/apple/appleconnectionstore.cpp \
         backend/apple/applecredentialstore.cpp \
         backend/apple/appleprotocol.cpp \
+        backend/apple/applecontrolfeatures.cpp \
+        backend/apple/appleaudiostream.cpp \
         backend/apple/appleauthenticator.cpp \
         backend/apple/applemediaprotocol.cpp \
         backend/apple/applemediatransport.cpp \
@@ -30,6 +33,8 @@ apple-screen-sharing {
         backend/apple/appleconnectionstore.h \
         backend/apple/applecredentialstore.h \
         backend/apple/appleprotocol.h \
+        backend/apple/applecontrolfeatures.h \
+        backend/apple/appleaudiostream.h \
         backend/apple/appleauthenticator.h \
         backend/apple/applemediaprotocol.h \
         backend/apple/applemediatransport.h \

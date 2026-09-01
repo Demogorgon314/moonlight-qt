@@ -7,6 +7,7 @@
 #include <QString>
 #include <QUuid>
 
+#include <algorithm>
 #include <optional>
 
 struct AppleCanvas
@@ -24,6 +25,11 @@ struct AppleCanvas
     {
         return width == other.width && height == other.height &&
                tileCount == other.tileCount;
+    }
+
+    bool operator!=(const AppleCanvas& other) const
+    {
+        return !(*this == other);
     }
 };
 
@@ -46,8 +52,11 @@ struct AppleMediaKeys
     QByteArray audioServer;
     QByteArray videoViewer;
     QByteArray videoServer;
+    QByteArray secondaryVideoViewer;
+    QByteArray secondaryVideoServer;
 
     bool isValid() const;
+    bool hasSecondaryVideo() const;
 };
 
 struct AppleMediaOffers
@@ -62,8 +71,22 @@ struct AppleMediaPorts
 {
     quint16 audio = 0;
     quint16 video = 0;
+    QList<quint16> videos;
 
-    bool isUsable() const { return audio != 0 && video != 0; }
+    QList<quint16> videoPorts() const
+    {
+        return !videos.isEmpty() ? videos
+                                 : (video != 0 ? QList<quint16>{video}
+                                               : QList<quint16>{});
+    }
+
+    bool isUsable() const
+    {
+        const QList<quint16> effective = videoPorts();
+        return audio != 0 && !effective.isEmpty() &&
+                std::all_of(effective.cbegin(), effective.cend(),
+                            [](quint16 value) { return value != 0; });
+    }
 };
 
 struct AppleInputEncryptionRequest
@@ -93,13 +116,21 @@ QByteArray configuration(const AppleMediaOffers& offers,
                          const AppleMediaKeys& keys,
                          const QUuid& callId,
                          QString* error = nullptr);
+QByteArray configuration(const AppleMediaOffers& offers,
+                         const AppleMediaOffers* secondaryOffers,
+                         const AppleMediaKeys& keys,
+                         const QUuid& callId,
+                         QString* error = nullptr);
 
 QByteArray framebufferUpdateRequest();
 QByteArray autoFramebufferUpdate();
 QByteArray controlMode(bool observing);
+QByteArray selectCombinedDisplays();
+QByteArray selectDisplay(quint32 displayId);
 
 bool parsePorts(const QByteArray& answer, AppleMediaPorts* ports);
 bool parseCanvas(const QByteArray& answer, AppleCanvas* canvas);
+QList<AppleCanvas> parseCanvases(const QByteArray& answer);
 bool containsMediaAnswer(const QByteArray& answer);
 
 AppleInputEncryptionRequest pointerEvent(quint8 buttons,

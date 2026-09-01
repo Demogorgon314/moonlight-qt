@@ -13,13 +13,13 @@ EQ            = =
 
 CC            = cl
 CXX           = cl
-DEFINES       = -DUNICODE -D_UNICODE -DWIN32 -D_ENABLE_EXTENDED_ALIGNED_STORAGE -DWIN64 -DNDEBUG -DQT_NO_DEBUG -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_CORE_LIB
+DEFINES       = -DUNICODE -D_UNICODE -DWIN32 -D_ENABLE_EXTENDED_ALIGNED_STORAGE -DWIN64 -DNDEBUG -DQT_NO_DEBUG -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_CORE_LIB -DQT_ZLIB_LIB
 CFLAGS        = -nologo -Zc:wchar_t -FS -Zc:strictStrings -O2 -MD -utf-8 -W3 -w44456 -w44457 -w44458 $(DEFINES)
 CXXFLAGS      = -nologo -Zc:wchar_t -FS -Zc:rvalueCast -Zc:inline -Zc:strictStrings -Zc:throwingNew -permissive- -Zc:__cplusplus -Zc:externConstexpr -O2 -MD -std:c++17 -utf-8 -W3 -w34100 -w34189 -w44456 -w44457 -w44458 -wd4577 -wd4467 -EHsc $(DEFINES)
-INCPATH       = -I. -I..\..\app -I..\..\libs\windows\include\x64 -I..\..\libs\windows\include -IC:\Qt\6.11.2\msvc2022_64\include -IC:\Qt\6.11.2\msvc2022_64\include\QtGui -IC:\Qt\6.11.2\msvc2022_64\include\QtNetwork -IC:\Qt\6.11.2\msvc2022_64\include\QtCore -Irelease -I/include -IC:\Qt\6.11.2\msvc2022_64\mkspecs\win32-msvc 
+INCPATH       = -I. -I..\..\app -I..\..\libs\windows\include\x64 -I..\..\libs\windows\include -I..\..\libs\windows\include\x64\SDL2 -IC:\Qt\6.11.2\msvc2022_64\include -IC:\Qt\6.11.2\msvc2022_64\include\QtGui -IC:\Qt\6.11.2\msvc2022_64\include\QtNetwork -IC:\Qt\6.11.2\msvc2022_64\include\QtCore -IC:\Qt\6.11.2\msvc2022_64\include\QtZlib -Irelease -I/include -IC:\Qt\6.11.2\msvc2022_64\mkspecs\win32-msvc 
 LINKER        = link
 LFLAGS        = /NOLOGO /DYNAMICBASE /NXCOMPAT /OPT:REF /OPT:ICF /INCREMENTAL:NO /SUBSYSTEM:CONSOLE "/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'"
-LIBS          = /LIBPATH:..\..\libs\windows\lib\x64 ..\..\libs\windows\lib\x64\libcrypto.lib ..\..\libs\windows\lib\x64\avcodec.lib ..\..\libs\windows\lib\x64\avutil.lib ..\..\libs\windows\lib\x64\swscale.lib advapi32.lib ws2_32.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.lib   
+LIBS          = /LIBPATH:..\..\libs\windows\lib\x64 ..\..\libs\windows\lib\x64\libcrypto.lib ..\..\libs\windows\lib\x64\avcodec.lib ..\..\libs\windows\lib\x64\avutil.lib ..\..\libs\windows\lib\x64\swscale.lib ..\..\libs\windows\lib\x64\SDL2.lib advapi32.lib ws2_32.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.lib   
 QMAKE         = C:\Qt\6.11.2\msvc2022_64\bin\qmake.exe
 DEL_FILE      = del
 CHK_DIR_EXISTS= if not exist
@@ -55,6 +55,8 @@ SOURCES       = main.cpp \
 		..\..\app\backend\apple\appleconnectionstore.cpp \
 		..\..\app\backend\apple\applecredentialstore.cpp \
 		..\..\app\backend\apple\appleprotocol.cpp \
+		..\..\app\backend\apple\applecontrolfeatures.cpp \
+		..\..\app\backend\apple\appleaudiostream.cpp \
 		..\..\app\backend\apple\appleauthenticator.cpp \
 		..\..\app\backend\apple\applemediatransport.cpp \
 		..\..\app\backend\apple\applemediaprotocol.cpp \
@@ -64,6 +66,8 @@ OBJECTS       = release\main.obj \
 		release\appleconnectionstore.obj \
 		release\applecredentialstore.obj \
 		release\appleprotocol.obj \
+		release\applecontrolfeatures.obj \
+		release\appleaudiostream.obj \
 		release\appleauthenticator.obj \
 		release\applemediatransport.obj \
 		release\applemediaprotocol.obj \
@@ -73,6 +77,8 @@ DIST          =  ..\..\app\backend\apple\applefeaturegate.h \
 		..\..\app\backend\apple\appleconnectionstore.h \
 		..\..\app\backend\apple\applecredentialstore.h \
 		..\..\app\backend\apple\appleprotocol.h \
+		..\..\app\backend\apple\applecontrolfeatures.h \
+		..\..\app\backend\apple\appleaudiostream.h \
 		..\..\app\backend\apple\appleauthenticator.h \
 		..\..\app\backend\apple\applemediatransport.h \
 		..\..\app\backend\apple\applemediaprotocol.h \
@@ -81,6 +87,8 @@ DIST          =  ..\..\app\backend\apple\applefeaturegate.h \
 		..\..\app\backend\apple\appleconnectionstore.cpp \
 		..\..\app\backend\apple\applecredentialstore.cpp \
 		..\..\app\backend\apple\appleprotocol.cpp \
+		..\..\app\backend\apple\applecontrolfeatures.cpp \
+		..\..\app\backend\apple\appleaudiostream.cpp \
 		..\..\app\backend\apple\appleauthenticator.cpp \
 		..\..\app\backend\apple\applemediatransport.cpp \
 		..\..\app\backend\apple\applemediaprotocol.cpp \
@@ -141,20 +149,20 @@ all: Makefile.Release  release\apple_protocol_core.exe
 
 release\apple_protocol_core.exe: C:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.lib C:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.lib $(OBJECTS) 
 	$(LINKER) $(LFLAGS) /MANIFEST:embed /OUT:$(DESTDIR_TARGET) @<<
-release\main.obj release\applefeaturegate.obj release\appleconnectionstore.obj release\applecredentialstore.obj release\appleprotocol.obj release\appleauthenticator.obj release\applemediatransport.obj release\applemediaprotocol.obj release\applevideodecoder.obj
+release\main.obj release\applefeaturegate.obj release\appleconnectionstore.obj release\applecredentialstore.obj release\appleprotocol.obj release\applecontrolfeatures.obj release\appleaudiostream.obj release\appleauthenticator.obj release\applemediatransport.obj release\applemediaprotocol.obj release\applevideodecoder.obj
 $(LIBS)
 <<
 
 qmake: FORCE
-	@$(QMAKE) -o Makefile.Release apple_protocol_core.pro "CONFIG+=release"
+	@$(QMAKE) -o Makefile.Release apple_protocol_core.pro -spec win32-msvc "\"CONFIG+=release\""
 
 qmake_all: FORCE
 
 dist:
-	$(ZIP) apple_protocol_core.zip $(SOURCES) $(DIST) apple_protocol_core.pro C:\Qt\6.11.2\msvc2022_64\mkspecs\features\spec_pre.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\msvc-sanitize.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\windows-desktop.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\windows_vulkan_sdk.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\windows-vulkan.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\msvc-desktop.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\qconfig.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_freetype.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_libjpeg.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_libpng.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_openxr_loader.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_charts.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_charts_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_chartsqml.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_chartsqml_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_concurrent.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_core.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_core_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_dbus.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_dbus_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_designer.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_designer_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_designercomponents_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_devicediscovery_support_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_entrypoint_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_fb_support_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_ffmpegmediapluginimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_freetype_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_gui.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_gui_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_harfbuzz_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_help.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_help_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_jpeg_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsanimation.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsanimation_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsfolderlistmodel.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsfolderlistmodel_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsplatform.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsplatform_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsqmlmodels.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsqmlmodels_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssettings.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssettings_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssharedimage.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssharedimage_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekit.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekit_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekitimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekitimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssynchronizer.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssynchronizer_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labswavefrontmesh.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labswavefrontmesh_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_linguist.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimedia.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimedia_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediaquick_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediatestlibprivate_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediawidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediawidgets_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_network.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_network_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_opengl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_opengl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_openglwidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_packetprotocol_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_png_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_printsupport.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_printsupport_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qdoccatch_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qdoccatchconversions_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qdoccatchgenerators_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qml.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qml_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlassetdownloader_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcompiler.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcompiler_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcore.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcore_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmldebug_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmldom_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlformat_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlintegration.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmllocalstorage.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmllocalstorage_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlls_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmeta.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmeta_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmodels.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmodels_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlnetwork.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlnetwork_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltc_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltest.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltest_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltoolingsettings_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltyperegistrar_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlworkerscript.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlworkerscript_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlxmllistmodel.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlxmllistmodel_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3d.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3d_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetimport.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetimport_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetutils.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetutils_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3deffects.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dglslparser_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpers.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpers_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpersimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpersimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3diblbaker.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3diblbaker_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dparticleeffects.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dparticles.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dparticles_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3druntimerender.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3druntimerender_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dspatialaudio_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dutils.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dutils_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dxr.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dxr_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basic.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basic_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basicstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basicstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fluentwinui3styleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fluentwinui3styleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusion.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusion_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusionstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusionstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2imagine.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2imagine_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2imaginestyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2impl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2impl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2material.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2material_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2materialstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2materialstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universal.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universal_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universalstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universalstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2windowsstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrolstestutilsprivate_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2quickimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2quickimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2utils.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2utils_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickeffects.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickeffects_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicklayouts.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicklayouts_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickparticles_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickshapes.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickshapes_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickshapesdesignhelpers_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktemplates2.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktemplates2_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktestutilsprivate_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimeline.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimeline_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimelineblendtrees.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimelineblendtrees_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimage.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimage_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimagegenerator_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimagehelpers.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimagehelpers_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickwidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickwidgets_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_shadertools.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_shadertools_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_spatialaudio.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_spatialaudio_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_sql.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_sql_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_svg.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_svg_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_svgwidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_tasktree.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_testinternals_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_testlib.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_testlib_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_tools_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_uiplugin.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_uitools.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_uitools_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_widgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_widgets_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_xml.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_xml_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_zlib_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qt_functions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qt_config.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\win32-msvc\qmake.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\spec_post.prf .qmake.stash C:\Qt\6.11.2\msvc2022_64\mkspecs\features\exclusive_builds.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\msvc-version.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\toolchain.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\default_pre.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\default_pre.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\resolve_config.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\exclusive_builds_post.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\default_post.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\build_pass.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\console.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\precompile_header.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\warn_on.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\permissions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qt.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\resources_functions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\resources.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\moc.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\opengl.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qmake_use.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\file_copies.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\testcase_targets.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\exceptions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\yacc.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\lex.prf apple_protocol_core.pro C:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.prl C:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.prl C:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.prl    C:\Qt\6.11.2\msvc2022_64\mkspecs\features\data\dummy.cpp ..\..\app\backend\apple\applefeaturegate.h ..\..\app\backend\apple\appleconnectionstore.h ..\..\app\backend\apple\applecredentialstore.h ..\..\app\backend\apple\appleprotocol.h ..\..\app\backend\apple\appleauthenticator.h ..\..\app\backend\apple\applemediatransport.h ..\..\app\backend\apple\applemediaprotocol.h ..\..\app\backend\apple\applevideodecoder.h  main.cpp ..\..\app\backend\apple\applefeaturegate.cpp ..\..\app\backend\apple\appleconnectionstore.cpp ..\..\app\backend\apple\applecredentialstore.cpp ..\..\app\backend\apple\appleprotocol.cpp ..\..\app\backend\apple\appleauthenticator.cpp ..\..\app\backend\apple\applemediatransport.cpp ..\..\app\backend\apple\applemediaprotocol.cpp ..\..\app\backend\apple\applevideodecoder.cpp    
+	$(ZIP) apple_protocol_core.zip $(SOURCES) $(DIST) apple_protocol_core.pro C:\Qt\6.11.2\msvc2022_64\mkspecs\features\spec_pre.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\msvc-sanitize.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\windows-desktop.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\windows_vulkan_sdk.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\windows-vulkan.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\msvc-desktop.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\qconfig.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_freetype.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_libjpeg.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_libpng.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_ext_openxr_loader.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_charts.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_charts_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_chartsqml.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_chartsqml_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_concurrent.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_core.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_core_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_dbus.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_dbus_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_designer.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_designer_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_designercomponents_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_devicediscovery_support_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_entrypoint_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_fb_support_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_ffmpegmediapluginimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_freetype_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_gui.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_gui_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_harfbuzz_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_help.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_help_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_jpeg_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsanimation.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsanimation_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsfolderlistmodel.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsfolderlistmodel_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsplatform.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsplatform_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsqmlmodels.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsqmlmodels_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssettings.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssettings_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssharedimage.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssharedimage_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekit.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekit_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekitimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labsstylekitimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssynchronizer.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labssynchronizer_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labswavefrontmesh.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_labswavefrontmesh_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_linguist.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimedia.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimedia_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediaquick_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediatestlibprivate_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediawidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_multimediawidgets_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_network.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_network_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_opengl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_opengl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_openglwidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_packetprotocol_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_png_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_printsupport.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_printsupport_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qdoccatch_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qdoccatchconversions_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qdoccatchgenerators_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qml.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qml_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlassetdownloader_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcompiler.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcompiler_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcore.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlcore_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmldebug_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmldom_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlformat_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlintegration.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmllocalstorage.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmllocalstorage_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlls_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmeta.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmeta_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmodels.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlmodels_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlnetwork.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlnetwork_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltc_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltest.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltest_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltoolingsettings_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmltyperegistrar_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlworkerscript.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlworkerscript_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlxmllistmodel.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_qmlxmllistmodel_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3d.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3d_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetimport.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetimport_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetutils.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dassetutils_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3deffects.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dglslparser_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpers.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpers_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpersimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dhelpersimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3diblbaker.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3diblbaker_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dparticleeffects.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dparticles.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dparticles_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3druntimerender.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3druntimerender_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dspatialaudio_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dutils.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dutils_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dxr.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick3dxr_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quick_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basic.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basic_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basicstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2basicstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fluentwinui3styleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fluentwinui3styleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusion.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusion_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusionstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2fusionstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2imagine.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2imagine_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2imaginestyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2impl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2impl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2material.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2material_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2materialstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2materialstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universal.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universal_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universalstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2universalstyleimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrols2windowsstyleimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickcontrolstestutilsprivate_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2quickimpl.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2quickimpl_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2utils.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickdialogs2utils_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickeffects.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickeffects_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicklayouts.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicklayouts_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickparticles_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickshapes.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickshapes_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickshapesdesignhelpers_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktemplates2.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktemplates2_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktestutilsprivate_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimeline.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimeline_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimelineblendtrees.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quicktimelineblendtrees_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimage.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimage_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimagegenerator_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimagehelpers.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickvectorimagehelpers_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickwidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_quickwidgets_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_shadertools.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_shadertools_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_spatialaudio.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_spatialaudio_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_sql.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_sql_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_svg.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_svg_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_svgwidgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_tasktree.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_testinternals_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_testlib.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_testlib_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_tools_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_uiplugin.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_uitools.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_uitools_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_widgets.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_widgets_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_xml.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_xml_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\modules\qt_lib_zlib_private.pri C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qt_functions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qt_config.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\win32-msvc\qmake.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\spec_post.prf .qmake.stash C:\Qt\6.11.2\msvc2022_64\mkspecs\features\exclusive_builds.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\common\msvc-version.conf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\toolchain.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\default_pre.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\default_pre.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\resolve_config.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\exclusive_builds_post.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\default_post.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\build_pass.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\console.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\precompile_header.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\warn_on.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\permissions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qt.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\resources_functions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\resources.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\moc.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\win32\opengl.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\qmake_use.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\file_copies.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\testcase_targets.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\exceptions.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\yacc.prf C:\Qt\6.11.2\msvc2022_64\mkspecs\features\lex.prf apple_protocol_core.pro C:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.prl C:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.prl C:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.prl    C:\Qt\6.11.2\msvc2022_64\mkspecs\features\data\dummy.cpp ..\..\app\backend\apple\applefeaturegate.h ..\..\app\backend\apple\appleconnectionstore.h ..\..\app\backend\apple\applecredentialstore.h ..\..\app\backend\apple\appleprotocol.h ..\..\app\backend\apple\applecontrolfeatures.h ..\..\app\backend\apple\appleaudiostream.h ..\..\app\backend\apple\appleauthenticator.h ..\..\app\backend\apple\applemediatransport.h ..\..\app\backend\apple\applemediaprotocol.h ..\..\app\backend\apple\applevideodecoder.h  main.cpp ..\..\app\backend\apple\applefeaturegate.cpp ..\..\app\backend\apple\appleconnectionstore.cpp ..\..\app\backend\apple\applecredentialstore.cpp ..\..\app\backend\apple\appleprotocol.cpp ..\..\app\backend\apple\applecontrolfeatures.cpp ..\..\app\backend\apple\appleaudiostream.cpp ..\..\app\backend\apple\appleauthenticator.cpp ..\..\app\backend\apple\applemediatransport.cpp ..\..\app\backend\apple\applemediaprotocol.cpp ..\..\app\backend\apple\applevideodecoder.cpp    
 
 clean: compiler_clean 
-	-$(DEL_FILE) release\main.obj release\applefeaturegate.obj release\appleconnectionstore.obj release\applecredentialstore.obj release\appleprotocol.obj release\appleauthenticator.obj release\applemediatransport.obj release\applemediaprotocol.obj release\applevideodecoder.obj
+	-$(DEL_FILE) release\main.obj release\applefeaturegate.obj release\appleconnectionstore.obj release\applecredentialstore.obj release\appleprotocol.obj release\applecontrolfeatures.obj release\appleaudiostream.obj release\appleauthenticator.obj release\applemediatransport.obj release\applemediaprotocol.obj release\applevideodecoder.obj
 
 distclean: clean 
 	-$(DEL_FILE) .qmake.stash
@@ -291,7 +299,13 @@ release\main.obj: main.cpp ..\..\app\backend\apple\appleauthenticator.h \
 		..\..\app\backend\apple\applecredentialstore.h \
 		..\..\app\backend\apple\appleprotocol.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QByteArray \
-		..\..\app\backend\apple\applefeaturegate.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSize \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsize.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcheckedint_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmargins.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
+		..\..\app\backend\apple\appleaudiostream.h \
 		..\..\app\backend\apple\applemediaprotocol.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QHash \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhash.h \
@@ -303,6 +317,8 @@ release\main.obj: main.cpp ..\..\app\backend\apple\appleauthenticator.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfloat16.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmath.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtformat_impl.h \
+		..\..\app\backend\apple\applecontrolfeatures.h \
+		..\..\app\backend\apple\applefeaturegate.h \
 		..\..\app\backend\apple\applemediatransport.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtNetwork\QHostAddress \
 		C:\Qt\6.11.2\msvc2022_64\include\QtNetwork\qhostaddress.h \
@@ -360,8 +376,6 @@ release\main.obj: main.cpp ..\..\app\backend\apple\appleauthenticator.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsharedpointer_impl.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvarlengtharray.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalloc.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCryptographicHash \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcryptographichash.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QFile \
@@ -910,7 +924,9 @@ release\appleprotocol.obj: ..\..\app\backend\apple\appleprotocol.cpp ..\..\app\b
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearrayalgorithms.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearrayview.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringfwd.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QString \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QList \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhashfunctions.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstring.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qchar.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringview.h \
@@ -922,6 +938,20 @@ release\appleprotocol.obj: ..\..\app\backend\apple\appleprotocol.cpp ..\..\app\b
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringbuilder.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringconverter.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringconverter_base.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiterator.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearraylist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringlist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalgorithms.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20bit.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsimd.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringmatcher.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSize \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsize.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcheckedint_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmargins.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QString \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCoreApplication \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreevent.h \
@@ -931,15 +961,6 @@ release\appleprotocol.obj: ..\..\app\backend\apple\appleprotocol.cpp ..\..\app\b
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobjectdefs.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobjectdefs_impl.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfunctionaltools_impl.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlist.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhashfunctions.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiterator.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearraylist.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringlist.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalgorithms.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20bit.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsimd.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringmatcher.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qscopedpointer.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmetatype.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdatastream.h \
@@ -982,8 +1003,6 @@ release\appleprotocol.obj: ..\..\app\backend\apple\appleprotocol.cpp ..\..\app\b
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhash.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvarlengtharray.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalloc.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCryptographicHash \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcryptographichash.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qspan.h \
@@ -1020,6 +1039,390 @@ release\appleprotocol.obj: ..\..\app\backend\apple\appleprotocol.cpp ..\..\app\b
 		..\..\libs\windows\include\x64\openssl\objectserr.h \
 		..\..\libs\windows\include\x64\openssl\rand.h \
 		..\..\libs\windows\include\x64\openssl\randerr.h
+
+release\applecontrolfeatures.obj: ..\..\app\backend\apple\applecontrolfeatures.cpp ..\..\app\backend\apple\applecontrolfeatures.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QByteArray \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearray.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qrefcount.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qatomic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbasicatomic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qatomic_cxx11.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qgenericatomic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcompilerdetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qprocessordetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsystemdetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtconfiginclude.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qconfig.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtcore-config.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtconfigmacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtdeprecationdefinitions.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtversionchecks.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtypes.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qassert.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtcoreexports.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtdeprecationmarkers.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtclasshelpermacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtnoop.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qyieldcpu.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qnamespace.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qglobal.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtcoreglobal.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtpreprocessorsupport.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtversion.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtypeinfo.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontainerfwd.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsysinfo.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlogging.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qflags.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcompare_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qconstructormacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdarwinhelpers.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qexceptionhandling.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qforeach.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qttypetraits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfunctionpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qglobalstatic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmalloc.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qminmax.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qnumeric.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20type_traits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qoverload.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qswap.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtenvironmentvariables.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtresource.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qttranslation.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qversiontagging.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcompare.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstdlibdetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcomparehelpers.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtmetamacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qarraydata.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qpair.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qarraydatapointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qarraydataops.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontainertools_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qxptype_traits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23type_traits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20functional.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20memory.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q17memory.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearrayalgorithms.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearrayview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringfwd.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QHash \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhash.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalgorithms.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20bit.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsimd.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhashfunctions.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstring.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qchar.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringalgorithms.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlatin1stringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qanystringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qutf8stringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringtokenizer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringbuilder.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringconverter.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringconverter_base.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiterator.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearraylist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringlist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringmatcher.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QList \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSize \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsize.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcheckedint_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmargins.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QString \
+		..\..\app\backend\apple\appleprotocol.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCoreApplication \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreevent.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbasictimer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qabstracteventdispatcher.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobject.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobjectdefs.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobjectdefs_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfunctionaltools_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qscopedpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmetatype.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdatastream.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiodevicebase.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfloat16.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmath.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtformat_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiterable.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtaggedpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmetacontainer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontainerinfo.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qscopeguard.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobject_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbindingstorage.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qeventloop.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdeadlinetimer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qnativeinterface.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication_platform.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfuture.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfutureinterface.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmutex.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtsan_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qresultstore.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmap.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qshareddata.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qshareddata_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfuture_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qthreadpool.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qthread.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qrunnable.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qexception.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qpromise.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvariant.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdebug.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtextstream.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontiguouscache.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsharedpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsharedpointer_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qset.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvarlengtharray.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalloc.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtZlib\zlib.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtZlib\zconf.h
+
+release\appleaudiostream.obj: ..\..\app\backend\apple\appleaudiostream.cpp ..\..\app\backend\apple\appleaudiostream.h \
+		..\..\app\backend\apple\applemediaprotocol.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QByteArray \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearray.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qrefcount.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qatomic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbasicatomic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qatomic_cxx11.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qgenericatomic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcompilerdetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qprocessordetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsystemdetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtconfiginclude.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qconfig.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtcore-config.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtconfigmacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtdeprecationdefinitions.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtversionchecks.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtypes.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qassert.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtcoreexports.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtdeprecationmarkers.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtclasshelpermacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtnoop.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qyieldcpu.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qnamespace.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qglobal.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtcoreglobal.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtpreprocessorsupport.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtversion.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtypeinfo.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontainerfwd.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsysinfo.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlogging.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qflags.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcompare_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qconstructormacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdarwinhelpers.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qexceptionhandling.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qforeach.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qttypetraits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfunctionpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qglobalstatic.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmalloc.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qminmax.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qnumeric.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20type_traits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qoverload.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qswap.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtenvironmentvariables.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtresource.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qttranslation.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qversiontagging.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcompare.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstdlibdetection.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcomparehelpers.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtmetamacros.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qarraydata.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qpair.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qarraydatapointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qarraydataops.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontainertools_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qxptype_traits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23type_traits.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20functional.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20memory.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q17memory.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearrayalgorithms.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearrayview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringfwd.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QHash \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhash.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalgorithms.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20bit.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsimd.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhashfunctions.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstring.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qchar.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringalgorithms.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlatin1stringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qanystringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qutf8stringview.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringtokenizer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringbuilder.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringconverter.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringconverter_base.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiterator.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbytearraylist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringlist.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qstringmatcher.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QList \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSet \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qset.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QString \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QUuid \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\quuid.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qendian.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfloat16.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmath.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtformat_impl.h \
+		..\..\libs\windows\include\x64\SDL2\SDL.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_main.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_stdinc.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_platform.h \
+		..\..\libs\windows\include\x64\SDL2\begin_code.h \
+		..\..\libs\windows\include\x64\SDL2\close_code.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_windows.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_winrt.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_wingdk.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_xbox.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_macosx.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_iphoneos.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_android.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_os2.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_emscripten.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_ngage.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_unix.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_config_minimal.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_assert.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_atomic.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_audio.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_error.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_endian.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_mutex.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_thread.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_rwops.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_clipboard.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_cpuinfo.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_events.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_video.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_pixels.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_rect.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_surface.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_blendmode.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_keyboard.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_keycode.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_scancode.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_mouse.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_joystick.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_guid.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_gamecontroller.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_sensor.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_quit.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_gesture.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_touch.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_filesystem.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_haptic.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_hidapi.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_hints.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_loadso.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_log.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_messagebox.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_metal.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_power.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_render.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_shape.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_system.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_timer.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_version.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_locale.h \
+		..\..\libs\windows\include\x64\SDL2\SDL_misc.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCoreApplication \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreevent.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbasictimer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qabstracteventdispatcher.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobject.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobjectdefs.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobjectdefs_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfunctionaltools_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qscopedpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmetatype.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdatastream.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiodevicebase.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiterable.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtaggedpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmetacontainer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontainerinfo.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qscopeguard.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qobject_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qbindingstorage.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qeventloop.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdeadlinetimer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qnativeinterface.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication_platform.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfuture.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfutureinterface.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmutex.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtsan_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qresultstore.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmap.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qshareddata.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qshareddata_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfuture_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qthreadpool.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qthread.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qrunnable.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qexception.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qpromise.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvariant.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdebug.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtextstream.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcontiguouscache.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsharedpointer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsharedpointer_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvarlengtharray.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalloc.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QDebug \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QDir \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdir.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdirlisting.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfiledevice.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qiodevice.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qspan.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20iterator.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdatetime.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcalendar.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlocale.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfile.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qfileinfo.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtimezone.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QElapsedTimer \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qelapsedtimer.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QLibrary \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlibrary.h
 
 release\appleauthenticator.obj: ..\..\app\backend\apple\appleauthenticator.cpp ..\..\app\backend\apple\appleauthenticator.h \
 		..\..\app\backend\apple\appleconnectionstore.h \
@@ -1115,6 +1518,12 @@ release\appleauthenticator.obj: ..\..\app\backend\apple\appleauthenticator.cpp .
 		..\..\app\backend\apple\applecredentialstore.h \
 		..\..\app\backend\apple\appleprotocol.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QByteArray \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSize \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsize.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcheckedint_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmargins.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCoreApplication \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreevent.h \
@@ -1166,8 +1575,6 @@ release\appleauthenticator.obj: ..\..\app\backend\apple\appleauthenticator.cpp .
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qhash.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvarlengtharray.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalloc.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCryptographicHash \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcryptographichash.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qspan.h \
@@ -1373,6 +1780,13 @@ release\applemediatransport.obj: ..\..\app\backend\apple\applemediatransport.cpp
 		..\..\app\backend\apple\appleconnectionstore.h \
 		..\..\app\backend\apple\applecredentialstore.h \
 		..\..\app\backend\apple\appleprotocol.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSize \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsize.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcheckedint_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmargins.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
+		..\..\app\backend\apple\applecontrolfeatures.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCoreApplication \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qnativeinterface.h \
@@ -1398,12 +1812,11 @@ release\applemediatransport.obj: ..\..\app\backend\apple\applemediatransport.cpp
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsharedpointer_impl.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvarlengtharray.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalloc.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QDateTime \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdatetime.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcalendar.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qlocale.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QDebug \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QElapsedTimer \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qelapsedtimer.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSysInfo \
@@ -1543,6 +1956,12 @@ release\applemediaprotocol.obj: ..\..\app\backend\apple\applemediaprotocol.cpp .
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmath.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qtformat_impl.h \
 		..\..\app\backend\apple\appleprotocol.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QSize \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsize.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcheckedint_impl.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qmargins.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
+		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QCoreApplication \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreapplication.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcoreevent.h \
@@ -1589,8 +2008,6 @@ release\applemediaprotocol.obj: ..\..\app\backend\apple\applemediaprotocol.cpp .
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qsharedpointer_impl.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qvarlengtharray.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qalloc.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q23utility.h \
-		C:\Qt\6.11.2\msvc2022_64\include\QtCore\q20utility.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\QDateTime \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qdatetime.h \
 		C:\Qt\6.11.2\msvc2022_64\include\QtCore\qcalendar.h \
@@ -1807,6 +2224,7 @@ release\applevideodecoder.obj: ..\..\app\backend\apple\applevideodecoder.cpp ..\
 		..\..\libs\windows\include\x64\libavcodec\version.h \
 		..\..\libs\windows\include\x64\libavcodec\codec_desc.h \
 		..\..\libs\windows\include\x64\libavcodec\codec_par.h \
+		..\..\libs\windows\include\x64\libavutil\hwcontext_d3d11va.h \
 		..\..\libs\windows\include\x64\libswscale\swscale.h \
 		..\..\libs\windows\include\x64\libswscale\version_major.h \
 		..\..\libs\windows\include\x64\libswscale\version.h

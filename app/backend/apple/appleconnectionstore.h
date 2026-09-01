@@ -24,6 +24,7 @@ struct AppleSavedConnection
     QString trustedHostFingerprint;
     QString credentialReference;
     QString preferredUsername;
+    int virtualDisplayCount = 1;
     quint64 revision = 1;
 
     bool isValid() const;
@@ -50,6 +51,7 @@ public:
                               const QString& credentialReference,
                               const QString& preferredUsername);
     bool clearCredentialBinding(const QString& id);
+    bool setVirtualDisplayCount(const QString& id, int displayCount);
 
 private:
     void load();
@@ -59,4 +61,3 @@ private:
     QString m_SettingsFile;
     QList<AppleSavedConnection> m_Connections;
 };
-

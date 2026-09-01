@@ -463,6 +463,39 @@ QVariantMap AppleProtocolAdapter::activeEndpoint(const ConnectionIdentity& ident
     return endpoints.isEmpty() ? QVariantMap() : endpoints.first().toMap();
 }
 
+QVariantMap AppleProtocolAdapter::sessionOptions(
+        const ConnectionIdentity& identity) const
+{
+    bool found = false;
+    const AppleSavedConnection connection = m_Store.connection(
+            identity.stableId(), &found);
+    if (!found) {
+        return {};
+    }
+    return {{QStringLiteral("virtualDisplayCount"),
+             connection.virtualDisplayCount}};
+}
+
+bool AppleProtocolAdapter::setSessionOptions(
+        const ConnectionIdentity& identity,
+        const QVariantMap& options,
+        QString* error)
+{
+    bool conversionOk = false;
+    const int displayCount = options.value(
+            QStringLiteral("virtualDisplayCount")).toInt(&conversionOk);
+    if (!conversionOk || displayCount < 1 || displayCount > 2) {
+        setError(error, tr("Choose either one or two virtual displays."));
+        return false;
+    }
+    if (!m_Store.setVirtualDisplayCount(identity.stableId(), displayCount)) {
+        setError(error, tr("The Screen Sharing options could not be saved."));
+        return false;
+    }
+    emit connectionChanged(identity.toString());
+    return true;
+}
+
 std::unique_ptr<ResolvedLaunchPlan> AppleProtocolAdapter::resolveLaunch(
         const LaunchRequest& request,
         QString* error) const

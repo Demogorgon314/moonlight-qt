@@ -208,6 +208,22 @@ echo Copying DLL dependencies
 copy %SOURCE_ROOT%\libs\windows\lib\%ARCH%\*.dll %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
 
+if "%MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING%"=="1" if /I "%ARCH%"=="x64" (
+    set APPLE_AUDIO_DEPS=%SOURCE_ROOT%\libs\windows\apple-screen-sharing\x64
+    if not exist !APPLE_AUDIO_DEPS!\fdk-aac.dll (
+        echo Missing Apple AAC-ELD dependency. Run setup-deps.ps1 with MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING=1.
+        goto Error
+    )
+    echo Copying optional Apple AAC-ELD dependency
+    copy !APPLE_AUDIO_DEPS!\fdk-aac.dll %DEPLOY_FOLDER%
+    if !ERRORLEVEL! NEQ 0 goto Error
+    mkdir %DEPLOY_FOLDER%\third-party\fdk-aac 2>nul
+    copy !APPLE_AUDIO_DEPS!\NOTICE.txt %DEPLOY_FOLDER%\third-party\fdk-aac\NOTICE.txt
+    if !ERRORLEVEL! NEQ 0 goto Error
+    copy !APPLE_AUDIO_DEPS!\fdk-aac-2.0.3-source.zip %DEPLOY_FOLDER%\third-party\fdk-aac\fdk-aac-2.0.3-source.zip
+    if !ERRORLEVEL! NEQ 0 goto Error
+)
+
 echo Copying AntiHooking.dll
 copy %BUILD_FOLDER%\AntiHooking\%BUILD_CONFIG%\AntiHooking.dll %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
@@ -273,7 +289,7 @@ if "%ML_SYMBOL_STORE%" NEQ "" (
 )
 
 echo Building MSI
-cmd /c "set VERSION= && msbuild -Restore %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH% /p:MSBuildProjectExtensionsPath=%BUILD_FOLDER%\"
+cmd /c "set VERSION= && msbuild -Restore %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH% /p:BUILD_FOLDER=%BUILD_FOLDER% /p:DEPLOY_FOLDER=%DEPLOY_FOLDER% /p:MSBuildProjectExtensionsPath=%BUILD_FOLDER%\ /p:IntermediateOutputPath=%BUILD_FOLDER%\wix-obj\"
 if !ERRORLEVEL! NEQ 0 goto Error
 
 echo Copying application binary to deployment directory
