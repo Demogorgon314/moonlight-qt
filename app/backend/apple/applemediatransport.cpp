@@ -413,6 +413,17 @@ bool AppleMediaNegotiator::negotiate(
             tcp.setWaitCallback({});
             return false;
         }
+        const AppleControlEvents controlEvents =
+                AppleControlEventParser::parse(response);
+        if (!controlEvents.cursorUpdates.isEmpty() ||
+                !controlEvents.displayLayouts.isEmpty()) {
+            // The single-display path can receive its authoritative initial
+            // layout while media answers are still being negotiated. Preserve
+            // it for the session controller just like the Swift reference;
+            // otherwise the first later dynamic layout is misclassified as
+            // the initial notification and media restart is skipped.
+            candidate.pendingMessages.append(response);
+        }
         if (!configuredPorts) {
             AppleMediaPorts ports;
             if (AppleMediaWire::parsePorts(response, &ports) &&

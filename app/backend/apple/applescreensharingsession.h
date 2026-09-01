@@ -43,7 +43,10 @@ struct AppleOutboundControl
     AppleInputEncryptionRequest input;
     QByteArray message;
     QString text;
+    quint64 queuedAtNanoseconds = 0;
+    quint32 timestampDeltaMicroseconds = 0;
     bool observing = false;
+    bool coalesciblePointerMotion = false;
 };
 
 class AppleScreenSharingSession final : public StreamSession,
@@ -188,6 +191,8 @@ private:
     std::atomic_bool m_EverMediaReady{false};
     std::atomic_bool m_ReconnectRequested{false};
     std::atomic_bool m_SystemSuspended{false};
+    std::atomic<quint64> m_PointerMotionsCoalesced{0};
+    std::atomic<quint64> m_MaxPendingControlDepth{0};
     bool m_MediaReady = false;
     bool m_SecondaryMediaReady = false;
     bool m_NativeEventFilterInstalled = false;

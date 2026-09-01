@@ -17,6 +17,7 @@ struct AppleCursorImage
     QByteArray rgba;
 
     bool isUsable() const;
+    AppleCursorImage scaledForDpi(double scale) const;
 };
 
 struct AppleCursorUpdate

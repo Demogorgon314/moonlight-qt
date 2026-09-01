@@ -1145,6 +1145,31 @@ void testStageFourCursorAndDisplayLayoutEvents()
             "a malformed trailing rectangle must not discard earlier cursor events");
 }
 
+void testRemoteCursorScalesForClientDpi()
+{
+    AppleCursorImage cursor;
+    cursor.width = 2;
+    cursor.height = 2;
+    cursor.hotspotX = 1;
+    cursor.hotspotY = 1;
+    cursor.rgba = QByteArray::fromHex(
+            "ff0000ff00ff00ff0000ffffffffffff");
+
+    const AppleCursorImage scaled = cursor.scaledForDpi(2.0);
+    require(scaled.isUsable() && scaled.width == 4 && scaled.height == 4 &&
+            scaled.hotspotX == 2 && scaled.hotspotY == 2 &&
+            scaled.rgba.size() == 4 * 4 * 4,
+            "a custom remote cursor and its hotspot must follow the client window DPI");
+
+    const AppleCursorImage unscaled = cursor.scaledForDpi(0.75);
+    require(unscaled.width == cursor.width &&
+            unscaled.height == cursor.height &&
+            unscaled.hotspotX == cursor.hotspotX &&
+            unscaled.hotspotY == cursor.hotspotY &&
+            unscaled.rgba == cursor.rgba,
+            "low client DPI must not shrink a remote cursor below its sender size");
+}
+
 void testStageFourTextOnlyClipboardExchange()
 {
     AppleTextClipboardExchange exchange;
@@ -1274,6 +1299,8 @@ int main(int argc, char* argv[])
     testUdpPunchIgnoresClosedOptimisticPortReset();
     std::fprintf(stderr, "testStageFourCursorAndDisplayLayoutEvents\n");
     testStageFourCursorAndDisplayLayoutEvents();
+    std::fprintf(stderr, "testRemoteCursorScalesForClientDpi\n");
+    testRemoteCursorScalesForClientDpi();
     std::fprintf(stderr, "testStageFourTextOnlyClipboardExchange\n");
     testStageFourTextOnlyClipboardExchange();
     std::fprintf(stderr, "testStageFourAacEldAudioContract\n");

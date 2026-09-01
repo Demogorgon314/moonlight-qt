@@ -3,11 +3,13 @@
 #include "appleprotocol.h"
 
 #include <QCoreApplication>
+#include <QImage>
 
 #include <QtZlib/zlib.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -235,6 +237,47 @@ bool AppleCursorImage::isUsable() const
             height <= MaximumCursorDimension && hotspotX >= 0 && hotspotY >= 0 &&
             hotspotX < width && hotspotY < height &&
             rgba.size() == width * height * 4;
+}
+
+AppleCursorImage AppleCursorImage::scaledForDpi(double scale) const
+{
+    if (!isUsable() || !std::isfinite(scale) || scale <= 1.0) {
+        return *this;
+    }
+
+    const double availableScale = std::min(
+            static_cast<double>(MaximumCursorDimension) / width,
+            static_cast<double>(MaximumCursorDimension) / height);
+    const double effectiveScale = std::min(scale, availableScale);
+    if (effectiveScale <= 1.0) {
+        return *this;
+    }
+
+    AppleCursorImage result;
+    result.width = qBound(
+            width, qRound(width * effectiveScale), MaximumCursorDimension);
+    result.height = qBound(
+            height, qRound(height * effectiveScale), MaximumCursorDimension);
+    const QImage source(
+            reinterpret_cast<const uchar*>(rgba.constData()),
+            width, height, width * 4, QImage::Format_RGBA8888);
+    const QImage scaled = source.scaled(
+            result.width, result.height,
+            Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    if (scaled.isNull()) {
+        return *this;
+    }
+    result.rgba.resize(result.width * result.height * 4);
+    for (int row = 0; row < result.height; ++row) {
+        std::memcpy(result.rgba.data() + row * result.width * 4,
+                    scaled.constScanLine(row),
+                    static_cast<size_t>(result.width * 4));
+    }
+    result.hotspotX = qBound(
+            0, qRound(hotspotX * effectiveScale), result.width - 1);
+    result.hotspotY = qBound(
+            0, qRound(hotspotY * effectiveScale), result.height - 1);
+    return result;
 }
 
 bool AppleDisplayLayout::isUsable() const
