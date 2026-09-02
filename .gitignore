@@ -8,4 +8,6 @@ soundio/libsoundio/
 libs/
 config.tests/*/.qmake.stash
 config.tests/*/Makefile
-tests/apple_protocol_core/release/
+tests/*/Makefile*
+tests/*/debug/
+tests/*/release/
