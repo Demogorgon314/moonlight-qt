@@ -2786,15 +2786,36 @@ void AppleScreenSharingSession::mediaReady(
                 case AppleMacPointerEvent::Type::Scroll:
                     m_LastMouseX = event.x;
                     m_LastMouseY = event.y;
-                    queueScroll(
-                            event.x,
-                            event.y,
-                            event.deltaX,
-                            event.deltaY,
-                            event.preciseDeltaX,
-                            event.preciseDeltaY,
-                            event.scrollingDirectionInverted,
-                            0);
+                    if (m_NativePrecisionScrollSupported.load() &&
+                            event.hasNativeScrollEvent) {
+                        queueScroll(
+                                event.x,
+                                event.y,
+                                event.deltaX,
+                                event.deltaY,
+                                event.preciseDeltaX,
+                                event.preciseDeltaY,
+                                event.scrollingDirectionInverted,
+                                0,
+                                &event.nativeScrollEvent);
+                    }
+                    else {
+                        const int deltaX = event.hasNativeScrollEvent
+                                ? event.nativeScrollEvent.deltaX
+                                : event.deltaX;
+                        const int deltaY = event.hasNativeScrollEvent
+                                ? event.nativeScrollEvent.deltaY
+                                : event.deltaY;
+                        quint8 wheel = 0;
+                        if (deltaY > 0) wheel |= 1 << 3;
+                        if (deltaY < 0) wheel |= 1 << 4;
+                        if (deltaX > 0) wheel |= 1 << 6;
+                        if (deltaX < 0) wheel |= 1 << 5;
+                        if (wheel != 0) {
+                            queuePointer(event.x, event.y, 0, wheel, 0);
+                            queuePointer(event.x, event.y, 0, 0, 0);
+                        }
+                    }
                     break;
                 }
             },
@@ -4101,7 +4122,8 @@ void AppleScreenSharingSession::queueScroll(
         double preciseDeltaX,
         double preciseDeltaY,
         bool flipped,
-        int displayIndex)
+        int displayIndex,
+        const AppleScrollWheelEvent* nativeEvent)
 {
     if (m_Observing.load()) {
         return;
@@ -4130,17 +4152,18 @@ void AppleScreenSharingSession::queueScroll(
     AppleOutboundControl input;
     input.kind = AppleOutboundControl::Kind::Message;
     input.queuedAtNanoseconds = steadyNanoseconds();
-    input.message = AppleMediaWire::scrollWheelEvent(
-            AppleMediaWire::scrollWheelDeltas(
+    const AppleScrollWheelEvent scrollEvent = nativeEvent != nullptr
+            ? *nativeEvent
+            : AppleMediaWire::scrollWheelDeltas(
                     deltaX,
                     deltaY,
                     preciseDeltaX,
                     preciseDeltaY,
                     flipped,
                     ++m_ScrollEventCount,
-                    m_ScrollSpeedMultiplier),
-            point->first,
-            point->second);
+                    m_ScrollSpeedMultiplier);
+    input.message = AppleMediaWire::scrollWheelEvent(
+            scrollEvent, point->first, point->second);
     m_PendingControls.append(std::move(input));
     recordMaximum(m_MaxPendingControlDepth,
                   static_cast<quint64>(m_PendingControls.size()));

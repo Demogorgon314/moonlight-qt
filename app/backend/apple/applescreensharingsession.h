@@ -167,7 +167,8 @@ private:
                      double preciseDeltaX,
                      double preciseDeltaY,
                      bool flipped,
-                     int displayIndex);
+                     int displayIndex,
+                     const AppleScrollWheelEvent* nativeEvent = nullptr);
     void queueKey(bool isDown,
                   int sdlKeycode,
                   int sdlScancode,

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <unordered_set>
 #include <utility>
 
@@ -144,9 +145,14 @@ struct InputContext
                 static_cast<int>(bounds.size.height - point.y),
                 0,
                 std::max(0, static_cast<int>(bounds.size.height) - 1));
-        nativeEvent.clickCount = static_cast<int>(event.clickCount);
-        nativeEvent.buttonNumber =
-                static_cast<unsigned char>(event.buttonNumber);
+        if (type != AppleMacPointerEvent::Type::Scroll) {
+            nativeEvent.clickCount = static_cast<int>(event.clickCount);
+        }
+        if (type == AppleMacPointerEvent::Type::ButtonDown ||
+                type == AppleMacPointerEvent::Type::ButtonUp) {
+            nativeEvent.buttonNumber =
+                    static_cast<unsigned char>(event.buttonNumber);
+        }
         if (type == AppleMacPointerEvent::Type::Scroll) {
             nativeEvent.deltaX = static_cast<int>(event.deltaX);
             nativeEvent.deltaY = static_cast<int>(event.deltaY);
@@ -156,6 +162,11 @@ struct InputContext
                     ? event.scrollingDeltaY : event.deltaY;
             nativeEvent.scrollingDirectionInverted =
                     event.isDirectionInvertedFromDevice;
+            if (event.CGEvent != nullptr) {
+                nativeEvent.hasNativeScrollEvent = true;
+                nativeEvent.nativeScrollEvent =
+                        appleMacScrollWheelEventFromCGEvent(event.CGEvent);
+            }
         }
         pointerCallback(nativeEvent);
     }
@@ -341,6 +352,59 @@ NSView* nativeViewForSdlWindow(SDL_Window* window)
 }
 
 } // namespace
+
+AppleScrollWheelEvent appleMacScrollWheelEventFromCGEvent(
+        const void* opaqueCgEvent)
+{
+    AppleScrollWheelEvent event;
+    if (opaqueCgEvent == nullptr) {
+        return event;
+    }
+    const CGEventRef cgEvent = reinterpret_cast<CGEventRef>(
+            const_cast<void*>(opaqueCgEvent));
+    const auto field = [cgEvent](CGEventField name) {
+        return CGEventGetIntegerValueField(cgEvent, name);
+    };
+    const auto clampInt16 = [](int64_t value) {
+        return static_cast<qint16>(std::clamp<int64_t>(
+                value,
+                std::numeric_limits<qint16>::min(),
+                std::numeric_limits<qint16>::max()));
+    };
+    const auto clampInt32 = [](int64_t value) {
+        return static_cast<qint32>(std::clamp<int64_t>(
+                value,
+                std::numeric_limits<qint32>::min(),
+                std::numeric_limits<qint32>::max()));
+    };
+
+    // These fields intentionally mirror RemoteVideoCanvasNSView in the Swift
+    // client. macOS already supplies natural direction, acceleration, gesture
+    // phase, and momentum; reconstructing them from NSEvent deltas loses data.
+    event.deltaX = clampInt16(field(kCGScrollWheelEventDeltaAxis2));
+    event.deltaY = clampInt16(field(kCGScrollWheelEventDeltaAxis1));
+    event.deltaZ = clampInt16(field(kCGScrollWheelEventDeltaAxis3));
+    event.fixedDeltaX = clampInt32(
+            field(kCGScrollWheelEventFixedPtDeltaAxis2));
+    event.fixedDeltaY = clampInt32(
+            field(kCGScrollWheelEventFixedPtDeltaAxis1));
+    event.fixedDeltaZ = clampInt32(
+            field(kCGScrollWheelEventFixedPtDeltaAxis3));
+    event.pointDeltaX = clampInt32(
+            field(kCGScrollWheelEventPointDeltaAxis2));
+    event.pointDeltaY = clampInt32(
+            field(kCGScrollWheelEventPointDeltaAxis1));
+    event.pointDeltaZ = clampInt32(
+            field(kCGScrollWheelEventPointDeltaAxis3));
+    event.scrollPhase = static_cast<quint32>(
+            field(kCGScrollWheelEventScrollPhase));
+    event.momentumPhase = static_cast<quint32>(
+            field(kCGScrollWheelEventMomentumPhase));
+    event.scrollCount = static_cast<quint32>(
+            field(kCGScrollWheelEventScrollCount));
+    event.flags = static_cast<quint32>(CGEventGetFlags(cgEvent));
+    return event;
+}
 
 struct AppleMacInputBridge::Private
 {

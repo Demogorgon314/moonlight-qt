@@ -31,11 +31,15 @@ macx {
     LIBS += -L../../libs/mac/lib \
         -lcrypto.3 -lavcodec.63 -lavutil.61 -lswscale.10 -lSDL2 \
         -framework Security -framework AudioToolbox -framework CoreVideo \
-        -framework Metal -framework QuartzCore -framework AppKit
+        -framework CoreGraphics -framework Metal -framework QuartzCore \
+        -framework AppKit
     SOURCES += \
+        ../../app/backend/apple/applemacinputbridge.mm \
         ../../app/backend/apple/applemetalrenderer.mm \
         ../../app/backend/apple/appleaudiodecoder_macos.mm
-    HEADERS += ../../app/backend/apple/applemetalrenderer.h
+    HEADERS += \
+        ../../app/backend/apple/applemacinputbridge.h \
+        ../../app/backend/apple/applemetalrenderer.h
 }
 
 SOURCES += \

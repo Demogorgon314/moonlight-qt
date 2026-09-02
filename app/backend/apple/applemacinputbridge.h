@@ -1,5 +1,7 @@
 #pragma once
 
+#include "applemediaprotocol.h"
+
 #include <functional>
 #include <memory>
 #include <string>
@@ -39,7 +41,14 @@ struct AppleMacPointerEvent
     double preciseDeltaX = 0.0;
     double preciseDeltaY = 0.0;
     bool scrollingDirectionInverted = false;
+    bool hasNativeScrollEvent = false;
+    AppleScrollWheelEvent nativeScrollEvent;
 };
+
+#ifdef Q_OS_DARWIN
+AppleScrollWheelEvent appleMacScrollWheelEventFromCGEvent(
+        const void* cgEvent);
+#endif
 
 // Owns the macOS input seam for an SDL stream window. The adapter attaches
 // directly to SDL's existing NSView so AppKit remains the sole event owner.

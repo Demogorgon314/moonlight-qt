@@ -12,6 +12,10 @@
 #include "backend/apple/applefiletransfer.h"
 #include "backend/apple/applefiletransferservice.h"
 #include "backend/apple/applekeyboardmapper.h"
+#ifdef Q_OS_DARWIN
+#include "backend/apple/applemacinputbridge.h"
+#include <ApplicationServices/ApplicationServices.h>
+#endif
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
 #include "backend/apple/appleprotocol.h"
@@ -1073,6 +1077,52 @@ void testNativePrecisionScrollWireAndDeltas()
             accelerated.scrollCount == 9,
             "Apple scroll speed must scale every delta representation consistently");
 }
+
+#ifdef Q_OS_DARWIN
+void testMacNativeScrollPreservesCgEventFields()
+{
+    CGEventRef cgEvent = CGEventCreateScrollWheelEvent(
+            nullptr, kCGScrollEventUnitPixel, 3, 2, -1, -3);
+    require(cgEvent != nullptr, "a synthetic macOS scroll event must be created");
+    const auto releaseEvent = qScopeGuard([cgEvent]() { CFRelease(cgEvent); });
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventDeltaAxis1, 2);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventDeltaAxis2, -1);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventDeltaAxis3, -3);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventFixedPtDeltaAxis1, -2);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventFixedPtDeltaAxis2, 0x01020304);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventFixedPtDeltaAxis3, 0);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventPointDeltaAxis1, -1);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventPointDeltaAxis2, 0x11223344);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventPointDeltaAxis3, 4);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventScrollPhase, 1);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventMomentumPhase, 2);
+    CGEventSetIntegerValueField(
+            cgEvent, kCGScrollWheelEventScrollCount, 3);
+    CGEventSetFlags(cgEvent, static_cast<CGEventFlags>(0x12345678));
+
+    const AppleScrollWheelEvent event =
+            appleMacScrollWheelEventFromCGEvent(cgEvent);
+    require(AppleMediaWire::scrollWheelEvent(event, 0x9abc, 0xdef0) ==
+                    QByteArray::fromHex(
+                            "170000360001000bffff0002fffd"
+                            "01020304fffffffe00000000"
+                            "11223344ffffffff00000004"
+                            "00000001000000020000000312345678"
+                            "9abcdef0"),
+            "macOS scrolling must preserve the complete Swift CGEvent wire fields");
+}
+#endif
 
 void testAppleStreamWindowPlacementPersistence()
 {
@@ -2931,6 +2981,10 @@ int main(int argc, char* argv[])
     testAppleKeyboardMappingAndFocusRelease();
     std::fprintf(stderr, "testNativePrecisionScrollWireAndDeltas\n");
     testNativePrecisionScrollWireAndDeltas();
+#ifdef Q_OS_DARWIN
+    std::fprintf(stderr, "testMacNativeScrollPreservesCgEventFields\n");
+    testMacNativeScrollPreservesCgEventFields();
+#endif
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
     testAppleStreamWindowPlacementPersistence();
     std::fprintf(stderr, "testHevcDecoderBackendFallback\n");
