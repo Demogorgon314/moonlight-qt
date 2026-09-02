@@ -41,6 +41,10 @@ apple-screen-sharing {
         backend/apple/applevideorenderer.cpp \
         backend/apple/applewindowplacement.cpp \
         backend/apple/appleprotocoladapter.cpp \
+        backend/apple/applescreensharingcontrol.cpp \
+        backend/apple/applescreensharinginput.cpp \
+        backend/apple/applescreensharingpresentation.cpp \
+        backend/apple/applescreensharingworker.cpp \
         backend/apple/applescreensharingsession.cpp
     HEADERS += \
         backend/apple/applefeaturegate.h \
@@ -63,6 +67,8 @@ apple-screen-sharing {
         backend/apple/applevideorenderer.h \
         backend/apple/applewindowplacement.h \
         backend/apple/appleprotocoladapter.h \
+        backend/apple/applewindowskeyboardhook_p.h \
+        backend/apple/applescreensharingsession_p.h \
         backend/apple/applescreensharingsession.h
     DISTFILES += backend/apple/LICENSE.ScreenSharingProtocol
 

@@ -106,6 +106,7 @@ private:
     friend class AppleSecondaryVideoStream;
     friend class ApplePresentationThread;
 
+    void startHighPerformanceWorker();
     void queueDecodedFrames(QList<AppleDecodedTile> frames,
                             int displayIndex = 0);
     QList<AppleOutboundControl> takePendingControls();
