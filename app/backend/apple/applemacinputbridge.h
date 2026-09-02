@@ -58,11 +58,15 @@ public:
     using KeyCallback = std::function<void(const AppleMacKeyEvent& event)>;
     using PointerCallback =
             std::function<void(const AppleMacPointerEvent& event)>;
+    using RemoteDragCallback =
+            std::function<bool(const void* nativeEvent,
+                               bool pointerInsideView)>;
     using CloseCallback = std::function<void()>;
 
     AppleMacInputBridge(SDL_Window* window,
                         KeyCallback keyCallback,
                         PointerCallback pointerCallback,
+                        RemoteDragCallback remoteDragCallback,
                         CloseCallback closeCallback);
     ~AppleMacInputBridge();
 
@@ -70,6 +74,7 @@ public:
     AppleMacInputBridge& operator=(const AppleMacInputBridge&) = delete;
 
     bool isValid() const;
+    void repostRemoteDragEvent();
 
 private:
     struct Private;

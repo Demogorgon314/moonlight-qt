@@ -527,19 +527,36 @@ bool AppleFileTransferService::acceptRemoteDrag(
         QString* error,
         QList<quint32>* sessionIds)
 {
+    QStringList requestedNames;
+    requestedNames.reserve(drag.sourcePaths.size());
+    for (const QString& sourcePath : drag.sourcePaths) {
+        requestedNames.append(remoteBaseName(sourcePath));
+    }
+    return acceptRemoteFiles(
+            drag.sourcePaths,
+            requestedNames,
+            destinationDirectory,
+            error,
+            sessionIds);
+}
+
+bool AppleFileTransferService::acceptRemoteFiles(
+        const QStringList& sourcePaths,
+        const QStringList& requestedNames,
+        const QString& destinationDirectory,
+        QString* error,
+        QList<quint32>* sessionIds)
+{
     if (sessionIds != nullptr) sessionIds->clear();
-    if (drag.sourcePaths.isEmpty() ||
+    if (sourcePaths.isEmpty() ||
+            sourcePaths.size() != requestedNames.size() ||
             !QDir().mkpath(destinationDirectory)) {
         setError(error, QStringLiteral("The remote file destination is invalid."));
         return false;
     }
-    std::lock_guard<std::mutex> lock(m_State->mutex);
-    if (!m_State->available || !m_State->controlling || m_State->closed) {
-        setError(error, QStringLiteral("File transfer is not available in this session."));
-        return false;
-    }
-    for (const QString& sourcePath : drag.sourcePaths) {
-        const QString name = remoteBaseName(sourcePath);
+    std::vector<std::unique_ptr<AppleFileCopyReceiver>> receivers;
+    receivers.reserve(static_cast<size_t>(requestedNames.size()));
+    for (const QString& name : requestedNames) {
         QString receiverError;
         auto receiver = std::make_unique<AppleFileCopyReceiver>(
                 destinationDirectory, name, &receiverError);
@@ -547,12 +564,23 @@ bool AppleFileTransferService::acceptRemoteDrag(
             setError(error, receiverError);
             return false;
         }
+        receivers.push_back(std::move(receiver));
+    }
+    std::lock_guard<std::mutex> lock(m_State->mutex);
+    if (!m_State->available || !m_State->controlling || m_State->closed) {
+        setError(error, QStringLiteral("File transfer is not available in this session."));
+        return false;
+    }
+    for (qsizetype index = 0; index < sourcePaths.size(); ++index) {
+        const QString& sourcePath = sourcePaths.at(index);
+        const QString& name = requestedNames.at(index);
         const quint32 sessionId = m_State->allocateSessionIdLocked();
         auto transfer = std::make_shared<State::Incoming>();
         transfer->sessionId = sessionId;
         transfer->sourcePath = sourcePath;
         transfer->requestedName = name;
-        transfer->receiver = std::move(receiver);
+        transfer->receiver = std::move(
+                receivers[static_cast<size_t>(index)]);
         transfer->tracksCompletion = sessionIds != nullptr;
         m_State->incoming.insert(sessionId, transfer);
         m_State->queued.push_back(
@@ -570,10 +598,36 @@ bool AppleFileTransferService::materializeRemoteDrag(
         QStringList* completedPaths,
         QString* error)
 {
+    QStringList requestedNames;
+    requestedNames.reserve(drag.sourcePaths.size());
+    for (const QString& sourcePath : drag.sourcePaths) {
+        requestedNames.append(remoteBaseName(sourcePath));
+    }
+    return materializeRemoteFiles(
+            drag.sourcePaths,
+            requestedNames,
+            destinationDirectory,
+            cancelled,
+            completedPaths,
+            error);
+}
+
+bool AppleFileTransferService::materializeRemoteFiles(
+        const QStringList& sourcePaths,
+        const QStringList& requestedNames,
+        const QString& destinationDirectory,
+        const std::atomic_bool& cancelled,
+        QStringList* completedPaths,
+        QString* error)
+{
     if (completedPaths != nullptr) completedPaths->clear();
     QList<quint32> sessionIds;
-    if (!acceptRemoteDrag(
-                drag, destinationDirectory, error, &sessionIds)) {
+    if (!acceptRemoteFiles(
+                sourcePaths,
+                requestedNames,
+                destinationDirectory,
+                error,
+                &sessionIds)) {
         return false;
     }
 
@@ -595,6 +649,46 @@ bool AppleFileTransferService::materializeRemoteDrag(
     setError(error, QStringLiteral(
             "The promised-file transfer was cancelled."));
     return false;
+}
+
+bool AppleFileTransferService::materializeRemoteFile(
+        const QString& sourcePath,
+        const QString& destinationPath,
+        const std::atomic_bool& cancelled,
+        QString* completedPath,
+        QString* error)
+{
+    if (completedPath != nullptr) completedPath->clear();
+    const QFileInfo destinationInfo(destinationPath);
+    const QString requestedName = destinationInfo.fileName();
+    const QString destinationDirectory = destinationInfo.absolutePath();
+    if (sourcePath.isEmpty() || requestedName.isEmpty() ||
+            destinationDirectory.isEmpty()) {
+        setError(error, QStringLiteral(
+                "The promised-file destination is invalid."));
+        return false;
+    }
+
+    QStringList paths;
+    if (!materializeRemoteFiles(
+                {sourcePath},
+                {requestedName},
+                destinationDirectory,
+                cancelled,
+                &paths,
+                error)) {
+        return false;
+    }
+
+    const QString promisedPath = destinationInfo.absoluteFilePath();
+    if (paths.size() != 1 ||
+            QFileInfo(paths.first()).absoluteFilePath() != promisedPath) {
+        setError(error, QStringLiteral(
+                "The promised file could not be written to Finder's destination."));
+        return false;
+    }
+    if (completedPath != nullptr) *completedPath = promisedPath;
+    return true;
 }
 
 AppleFileTransferWaitResult AppleFileTransferService::waitForRemoteFiles(

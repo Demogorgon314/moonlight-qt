@@ -62,11 +62,19 @@ struct InputContext
 {
     InputContext(AppleMacInputBridge::KeyCallback key,
                  AppleMacInputBridge::PointerCallback pointer,
+                 AppleMacInputBridge::RemoteDragCallback remoteDrag,
                  AppleMacInputBridge::CloseCallback close)
         : keyCallback(std::move(key)),
           pointerCallback(std::move(pointer)),
+          remoteDragCallback(std::move(remoteDrag)),
           closeCallback(std::move(close))
     {
+    }
+
+    ~InputContext()
+    {
+        [lastLeftDragEvent release];
+        lastLeftDragEvent = nil;
     }
 
     void sendKey(NSEvent* event)
@@ -171,10 +179,47 @@ struct InputContext
         pointerCallback(nativeEvent);
     }
 
+    bool beginRemoteDrag(NSView* view, NSEvent* event)
+    {
+        if (view == nil || event == nil ||
+                event.type != NSEventTypeLeftMouseDragged) {
+            return false;
+        }
+        [lastLeftDragEvent release];
+        lastLeftDragEvent = [event retain];
+        if (!remoteDragCallback) return false;
+        const NSPoint point = [view convertPoint:event.locationInWindow
+                                        fromView:nil];
+        const bool began = remoteDragCallback(
+                event, NSPointInRect(point, view.visibleRect));
+        if (began) {
+            [lastLeftDragEvent release];
+            lastLeftDragEvent = nil;
+        }
+        return began;
+    }
+
+    void clearLeftDragEvent()
+    {
+        [lastLeftDragEvent release];
+        lastLeftDragEvent = nil;
+    }
+
+    void repostRemoteDragEvent()
+    {
+        NSEvent* event = NSApp.currentEvent;
+        if (event.type != NSEventTypeLeftMouseDragged) {
+            event = lastLeftDragEvent;
+        }
+        if (event != nil) [NSApp postEvent:event atStart:NO];
+    }
+
     AppleMacInputBridge::KeyCallback keyCallback;
     AppleMacInputBridge::PointerCallback pointerCallback;
+    AppleMacInputBridge::RemoteDragCallback remoteDragCallback;
     AppleMacInputBridge::CloseCallback closeCallback;
     std::unordered_set<unsigned short> activeModifierKeyCodes;
+    NSEvent* lastLeftDragEvent = nil;
 };
 
 InputContext* inputContext(id view)
@@ -234,6 +279,16 @@ void bridgeMouseMoved(id view, SEL, NSEvent* event)
     }
 }
 
+void bridgeMouseDragged(id view, SEL, NSEvent* event)
+{
+    if (InputContext* context = inputContext(view)) {
+        NSView* inputView = static_cast<NSView*>(view);
+        if (context->beginRemoteDrag(inputView, event)) return;
+        context->sendPointer(
+                inputView, event, AppleMacPointerEvent::Type::Motion);
+    }
+}
+
 void bridgeMouseDown(id view, SEL, NSEvent* event)
 {
     NSView* inputView = static_cast<NSView*>(view);
@@ -247,6 +302,7 @@ void bridgeMouseDown(id view, SEL, NSEvent* event)
 void bridgeMouseUp(id view, SEL, NSEvent* event)
 {
     if (InputContext* context = inputContext(view)) {
+        if (event.buttonNumber == 0) context->clearLeftDragEvent();
         context->sendPointer(
                 view, event, AppleMacPointerEvent::Type::ButtonUp);
     }
@@ -303,7 +359,7 @@ Class inputSubclassForClass(Class original)
             !addOverride(subclass, original, @selector(mouseMoved:),
                          reinterpret_cast<IMP>(bridgeMouseMoved)) ||
             !addOverride(subclass, original, @selector(mouseDragged:),
-                         reinterpret_cast<IMP>(bridgeMouseMoved)) ||
+                         reinterpret_cast<IMP>(bridgeMouseDragged)) ||
             !addOverride(subclass, original, @selector(rightMouseDragged:),
                          reinterpret_cast<IMP>(bridgeMouseMoved)) ||
             !addOverride(subclass, original, @selector(otherMouseDragged:),
@@ -425,6 +481,7 @@ AppleMacInputBridge::AppleMacInputBridge(
         SDL_Window* window,
         KeyCallback keyCallback,
         PointerCallback pointerCallback,
+        RemoteDragCallback remoteDragCallback,
         CloseCallback closeCallback)
     : d(std::make_unique<Private>())
 {
@@ -444,6 +501,7 @@ AppleMacInputBridge::AppleMacInputBridge(
         d->context = std::make_unique<InputContext>(
                 std::move(keyCallback),
                 std::move(pointerCallback),
+                std::move(remoteDragCallback),
                 std::move(closeCallback));
         d->view = [view retain];
         d->originalClass = originalClass;
@@ -530,4 +588,11 @@ AppleMacInputBridge::~AppleMacInputBridge()
 bool AppleMacInputBridge::isValid() const
 {
     return d->valid;
+}
+
+void AppleMacInputBridge::repostRemoteDragEvent()
+{
+    @autoreleasepool {
+        if (d->context) d->context->repostRemoteDragEvent();
+    }
 }

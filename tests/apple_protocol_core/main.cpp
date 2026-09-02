@@ -13,10 +13,12 @@
 #include "backend/apple/applefiletransferservice.h"
 #include "backend/apple/applekeyboardmapper.h"
 #ifdef Q_OS_DARWIN
+#include "backend/apple/applefiledrag_mac.h"
 #include "backend/apple/applemacinputbridge.h"
 #include <ApplicationServices/ApplicationServices.h>
 
 bool testAppleMacZoomButtonUsesNativeFullscreen();
+bool testAppleMacInputBridgeRoutesRemoteDragBeforePointer();
 #endif
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -2640,21 +2642,20 @@ void testAppleFileTransferServiceReceivesRemoteFile()
 
     AppleFileTransferService service;
     service.setAvailable(true);
-    AppleRemoteFileDrag drag;
-    drag.sessionId = 0x5000;
-    drag.sourcePaths = {QStringLiteral("/Users/test/remote-source.bin")};
     const QString destination = QDir(temporary.path()).filePath(
             QStringLiteral("downloads"));
+    const QString promisedDestination = QDir(destination).filePath(
+            QStringLiteral("Finder Chosen.bin"));
     std::atomic_bool cancelled{false};
-    QStringList materializedPaths;
+    QString materializedPath;
     QString materializeError;
     bool materialized = false;
     std::thread materializer([&]() {
-        materialized = service.materializeRemoteDrag(
-                drag,
-                destination,
+        materialized = service.materializeRemoteFile(
+                QStringLiteral("/Users/test/remote-source.bin"),
+                promisedDestination,
                 cancelled,
-                &materializedPaths,
+                &materializedPath,
                 &materializeError);
     });
 
@@ -2695,14 +2696,10 @@ void testAppleFileTransferServiceReceivesRemoteFile()
                     &error),
             qPrintable(error));
     materializer.join();
-    require(materialized &&
-                    materializedPaths == QStringList{
-                            QDir(destination).filePath(
-                                    QStringLiteral("remote-source.bin"))},
+    require(materialized && materializedPath == promisedDestination,
             qPrintable(materializeError));
 
-    const QString received = QDir(destination).filePath(
-            QStringLiteral("remote-source.bin"));
+    const QString received = promisedDestination;
     QFile receivedFile(received);
     require(receivedFile.open(QIODevice::ReadOnly) &&
                     receivedFile.readAll() == contents,
@@ -2989,6 +2986,9 @@ int main(int argc, char* argv[])
     std::fprintf(stderr, "testAppleMacZoomButtonUsesNativeFullscreen\n");
     require(testAppleMacZoomButtonUsesNativeFullscreen(),
             "the macOS zoom button must use native fullscreen and restore its original action");
+    std::fprintf(stderr, "testAppleMacInputBridgeRoutesRemoteDragBeforePointer\n");
+    require(testAppleMacInputBridgeRoutesRemoteDragBeforePointer(),
+            "the macOS input bridge forwarded an outgoing file drag as remote pointer motion");
 #endif
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
     testAppleStreamWindowPlacementPersistence();
@@ -3041,6 +3041,14 @@ int main(int argc, char* argv[])
     testAppleWindowsPromisedFileAsyncCompletionCanRepeat();
     std::fprintf(stderr, "testAppleWindowsPromisedFilesReachTwoShellFolders\n");
     testAppleWindowsPromisedFilesReachTwoShellFolders();
+#endif
+#ifdef Q_OS_DARWIN
+    std::fprintf(stderr, "testAppleMacPromisedFileAdapter\n");
+    QString macPromiseError;
+    require(testAppleMacPromisedFileAdapter(&macPromiseError),
+            qPrintable(QStringLiteral(
+                    "macOS promised-file adapter failed: %1")
+                               .arg(macPromiseError)));
 #endif
     std::fprintf(stderr, "testAppleLocalFileDragTracksTheHoveredRemoteTarget\n");
     testAppleLocalFileDragTracksTheHoveredRemoteTarget();

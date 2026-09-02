@@ -12,6 +12,7 @@
 #include "applecredentialstore.h"
 #include "applekeyboardmapper.h"
 #ifdef Q_OS_DARWIN
+#include "applefiledrag_mac.h"
 #include "applemacinputbridge.h"
 #endif
 #include "applevideorenderer.h"
@@ -2691,6 +2692,15 @@ void AppleScreenSharingSession::mediaReady(
     // Attach only after renderer initialization so the bridge owns the final
     // SDL content view. This mirrors the native Swift canvas: one view owns
     // keyboard, pointer, and scroll delivery through shortcut transitions.
+    m_MacRemoteFileDragSource =
+            std::make_unique<AppleMacRemoteFileDragSource>(window);
+    if (!m_MacRemoteFileDragSource->isValid()) {
+        qWarning() << "Apple native macOS promised-file drag source unavailable";
+        m_MacRemoteFileDragSource.reset();
+    }
+    else {
+        qInfo() << "Apple native macOS promised-file drag source enabled";
+    }
     m_AppleMacInputBridge = std::make_unique<AppleMacInputBridge>(
             window,
             [this](const AppleMacKeyEvent& event) {
@@ -2818,6 +2828,10 @@ void AppleScreenSharingSession::mediaReady(
                     }
                     break;
                 }
+            },
+            [this](const void* nativeEvent, bool pointerInsideView) {
+                return activateRemoteFileDragIfEligible(
+                        pointerInsideView, nativeEvent);
             },
             [this]() {
                 interrupt();
@@ -3117,10 +3131,100 @@ void AppleScreenSharingSession::applyRemoteClipboardText(const QString& text)
             << " UTF-8 bytes";
 }
 
-void AppleScreenSharingSession::activateRemoteFileDragIfEligible(
-        bool pointerInsideStream)
+bool AppleScreenSharingSession::activateRemoteFileDragIfEligible(
+        bool pointerInsideStream,
+        const void* nativeEvent)
 {
-    if (m_RemoteFileDragGate == nullptr) return;
+    if (m_RemoteFileDragGate == nullptr) return false;
+#ifdef Q_OS_DARWIN
+    if (m_MacRemoteFileDragSource != nullptr &&
+            m_MacRemoteFileDragSource->isValid()) {
+        const bool leftButtonDown =
+                m_MacRemoteFileDragSource->leftButtonDown();
+        if (nativeEvent == nullptr) {
+            if (m_RemoteFileDragGate->hasPending() && leftButtonDown &&
+                    !pointerInsideStream &&
+                    m_AppleMacInputBridge != nullptr) {
+                // The type-32 notification arrives asynchronously after the
+                // drag crossed the view boundary. Re-run the native event,
+                // matching RemoteVideoCanvasNSView in the Swift client.
+                m_AppleMacInputBridge->repostRemoteDragEvent();
+            }
+            return false;
+        }
+        const std::optional<AppleRemoteFileDrag> drag =
+                m_RemoteFileDragGate->takeIfEligible(
+                        leftButtonDown, pointerInsideStream);
+        if (!drag.has_value()) return false;
+
+        const AppleRemoteFileDragInputTransition began =
+                m_RemoteFileDragInputState->nativeDragBegan(m_MouseButtons);
+        m_MouseButtons = began.buttons;
+        const std::shared_ptr<AppleFileTransferService> service =
+                m_FileTransferService;
+        const QPointer<AppleScreenSharingSession> session(this);
+        QString startError;
+        const bool started = m_MacRemoteFileDragSource->begin(
+                *drag,
+                nativeEvent,
+                [service](const QString& sourcePath,
+                          const QString& destinationPath,
+                          const std::atomic_bool& nativeCancelled,
+                          QString* completedPath,
+                          QString* error) {
+                    return service != nullptr &&
+                            service->materializeRemoteFile(
+                                    sourcePath,
+                                    destinationPath,
+                                    nativeCancelled,
+                                    completedPath,
+                                    error);
+                },
+                [session](AppleMacRemoteFileDragResult result,
+                          const QString& error) {
+                    if (session == nullptr) return;
+                    QMetaObject::invokeMethod(
+                            session,
+                            [session, result, error]() {
+                                if (session == nullptr) return;
+                                const AppleRemoteFileDragInputTransition ended =
+                                        session->m_RemoteFileDragInputState
+                                                ->nativeDragEnded(
+                                                        session->m_MouseButtons);
+                                session->m_MouseButtons = ended.buttons;
+                                if (result ==
+                                        AppleMacRemoteFileDragResult::Dropped) {
+                                    qInfo() << "Apple promised files were dropped through Finder";
+                                }
+                                else if (result ==
+                                                 AppleMacRemoteFileDragResult::Failed &&
+                                         !error.isEmpty()) {
+                                    qWarning().noquote()
+                                            << "Apple promised-file drag failed:"
+                                            << error;
+                                    session->addLaunchWarning(error);
+                                }
+                            },
+                            Qt::QueuedConnection);
+                },
+                &startError);
+        if (started) {
+            qInfo() << "Apple remote promised-file drag entered Finder";
+            return true;
+        }
+        const AppleRemoteFileDragInputTransition failed =
+                m_RemoteFileDragInputState->nativeDragStartFailed(
+                        m_MouseButtons);
+        m_MouseButtons = failed.buttons;
+        m_RemoteFileDragGate->update(*drag);
+        qWarning().noquote()
+                << "Apple promised-file drag could not start:"
+                << startError;
+        return false;
+    }
+#else
+    Q_UNUSED(nativeEvent);
+#endif
     bool leftButtonDown = (m_MouseButtons & 1) != 0;
 #ifdef Q_OS_WIN
     if (m_WindowsRemoteFileDragSource != nullptr &&
@@ -3136,7 +3240,7 @@ void AppleScreenSharingSession::activateRemoteFileDragIfEligible(
     const std::optional<AppleRemoteFileDrag> drag =
             m_RemoteFileDragGate->takeIfEligible(
                     leftButtonDown, pointerInsideStream);
-    if (!drag.has_value()) return;
+    if (!drag.has_value()) return false;
 
     const QPointer<AppleScreenSharingSession> session(this);
     QTimer::singleShot(0, this, [session, drag]() {
@@ -3274,6 +3378,7 @@ void AppleScreenSharingSession::activateRemoteFileDragIfEligible(
             session->addLaunchWarning(error);
         }
     });
+    return true;
 }
 
 void AppleScreenSharingSession::applyFileTransferEvents(
@@ -4729,6 +4834,7 @@ void AppleScreenSharingSession::destroyPresentation()
     persistWindowGeometry(m_SecondaryWindow, AppleWindowRole::Secondary);
 #ifdef Q_OS_DARWIN
     m_AppleMacInputBridge.reset();
+    m_MacRemoteFileDragSource.reset();
 #endif
     m_VideoRenderer.reset();
     m_SecondaryVideoRenderer.reset();

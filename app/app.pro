@@ -78,13 +78,15 @@ apple-screen-sharing {
     }
 
     macx {
-        LIBS += -framework Security -framework AudioToolbox -framework AVFAudio -framework Carbon
+        LIBS += -framework Security -framework AudioToolbox -framework AVFAudio -framework Carbon -framework UniformTypeIdentifiers
         SOURCES += \
+            backend/apple/applefiledrag_mac.mm \
             backend/apple/applemacinputbridge.mm \
             backend/apple/applemetalrenderer.mm \
             backend/apple/appleaudiodecoder_macos.mm \
             backend/apple/applefiletransferdialog_macos.mm
         HEADERS += \
+            backend/apple/applefiledrag_mac.h \
             backend/apple/applemacinputbridge.h \
             backend/apple/applemetalrenderer.h
     }

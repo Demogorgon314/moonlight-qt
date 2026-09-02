@@ -80,6 +80,16 @@ public:
             QStringList* completedPaths,
             QString* error = nullptr);
 
+    // Materializes one AppKit file promise at Finder's exact coordinated URL.
+    // The wire protocol names the remote root independently, so Finder's
+    // de-duplicated name must be supplied to the receiver explicitly.
+    bool materializeRemoteFile(
+            const QString& sourcePath,
+            const QString& destinationPath,
+            const std::atomic_bool& cancelled,
+            QString* completedPath,
+            QString* error = nullptr);
+
     // Returns true when the encrypted plaintext belongs to file transfer,
     // including incomplete fragments and malformed file messages.
     bool receive(const QByteArray& fragment, QString* diagnostic = nullptr);
@@ -95,6 +105,19 @@ public:
     void close();
 
 private:
+    bool acceptRemoteFiles(
+            const QStringList& sourcePaths,
+            const QStringList& requestedNames,
+            const QString& destinationDirectory,
+            QString* error,
+            QList<quint32>* sessionIds);
+    bool materializeRemoteFiles(
+            const QStringList& sourcePaths,
+            const QStringList& requestedNames,
+            const QString& destinationDirectory,
+            const std::atomic_bool& cancelled,
+            QStringList* completedPaths,
+            QString* error);
     AppleFileTransferWaitResult waitForRemoteFiles(
             const QList<quint32>& sessionIds,
             int timeoutMilliseconds,

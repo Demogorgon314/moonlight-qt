@@ -30,6 +30,7 @@ class ApplePresentationThread;
 class AppleKeyboardMapper;
 #ifdef Q_OS_DARWIN
 class AppleMacInputBridge;
+class AppleMacRemoteFileDragSource;
 #endif
 class AppleRemoteFileDragGate;
 class AppleRemoteFileDragInputState;
@@ -125,7 +126,9 @@ private:
     void useDefaultRemoteCursor();
     void applyRemoteClipboardText(const QString& text);
     void applyFileTransferEvents(QList<AppleFileTransferEvent> events);
-    void activateRemoteFileDragIfEligible(bool pointerInsideStream);
+    bool activateRemoteFileDragIfEligible(
+            bool pointerInsideStream,
+            const void* nativeEvent = nullptr);
     void updateControlSummary();
     void localClipboardChanged();
     void refreshLocalClipboard(bool windowFocusGained);
@@ -200,6 +203,7 @@ private:
     std::unique_ptr<AppleKeyboardMapper> m_KeyboardMapper;
 #ifdef Q_OS_DARWIN
     std::unique_ptr<AppleMacInputBridge> m_AppleMacInputBridge;
+    std::unique_ptr<AppleMacRemoteFileDragSource> m_MacRemoteFileDragSource;
 #endif
     std::shared_ptr<AppleFileTransferService> m_FileTransferService;
     std::unique_ptr<AppleRemoteFileDragGate> m_RemoteFileDragGate;

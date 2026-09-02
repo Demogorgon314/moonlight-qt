@@ -25,6 +25,7 @@ win32 {
 }
 
 macx {
+    DEFINES += APPLE_FILE_DRAG_TESTS
     INCLUDEPATH += \
         ../../libs/mac/include \
         ../../libs/mac/include/SDL2
@@ -34,11 +35,13 @@ macx {
         -framework CoreGraphics -framework Metal -framework QuartzCore \
         -framework AppKit
     SOURCES += \
+        ../../app/backend/apple/applefiledrag_mac.mm \
         ../../app/backend/apple/applemacinputbridge.mm \
         ../../app/backend/apple/applemetalrenderer.mm \
         ../../app/backend/apple/appleaudiodecoder_macos.mm \
         mac_input_bridge_tests.mm
     HEADERS += \
+        ../../app/backend/apple/applefiledrag_mac.h \
         ../../app/backend/apple/applemacinputbridge.h \
         ../../app/backend/apple/applemetalrenderer.h
 }
