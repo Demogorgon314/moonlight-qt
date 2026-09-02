@@ -635,6 +635,7 @@ void AppleScreenSharingSession::mediaReady(
     else {
         qInfo() << "Apple native macOS promised-file drag source enabled";
     }
+    ensureLocalFileDragLifecycle();
     m_AppleMacInputBridge = std::make_unique<AppleMacInputBridge>(
             window,
             [this](const AppleMacKeyEvent& event) {
@@ -769,7 +770,9 @@ void AppleScreenSharingSession::mediaReady(
             },
             [this]() {
                 interrupt();
-            });
+            },
+            m_LocalFileDragLifecycle,
+            0);
     if (!m_AppleMacInputBridge->isValid()) {
         addLaunchWarning(tr("Native macOS input could not be attached."));
         m_AppleMacInputBridge.reset();
@@ -850,7 +853,6 @@ void AppleScreenSharingSession::destroyPresentation()
 #ifdef Q_OS_WIN
     m_WindowsRemoteFileDragSource.reset();
     m_WindowsFileDropTargets.clear();
-    m_LocalFileDragLifecycle.reset();
     m_WindowsKeyboardHook.reset();
 #endif
     releaseAllKeys();
@@ -898,6 +900,8 @@ void AppleScreenSharingSession::destroyPresentation()
     m_AppleMacInputBridge.reset();
     m_MacRemoteFileDragSource.reset();
 #endif
+    m_LocalFileDragLifecycle.reset();
+    m_LocalFileDragPointerActive = false;
     m_VideoRenderer.reset();
     m_SecondaryVideoRenderer.reset();
     if (m_SecondaryWindow != nullptr) {

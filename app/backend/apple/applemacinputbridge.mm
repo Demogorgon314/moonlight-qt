@@ -1,4 +1,5 @@
 #include "applemacinputbridge.h"
+#include "applefiledrag.h"
 
 #import <AppKit/AppKit.h>
 #import <objc/message.h>
@@ -63,16 +64,23 @@ struct InputContext
     InputContext(AppleMacInputBridge::KeyCallback key,
                  AppleMacInputBridge::PointerCallback pointer,
                  AppleMacInputBridge::RemoteDragCallback remoteDrag,
-                 AppleMacInputBridge::CloseCallback close)
+                 AppleMacInputBridge::CloseCallback close,
+                 std::shared_ptr<AppleLocalFileDragLifecycle> localFileDrag,
+                 int localFileDragDisplayIndex)
         : keyCallback(std::move(key)),
           pointerCallback(std::move(pointer)),
           remoteDragCallback(std::move(remoteDrag)),
-          closeCallback(std::move(close))
+          closeCallback(std::move(close)),
+          localFileDragLifecycle(std::move(localFileDrag)),
+          displayIndex(localFileDragDisplayIndex)
     {
     }
 
     ~InputContext()
     {
+        if (localFileDragLifecycle != nullptr) {
+            localFileDragLifecycle->cancel();
+        }
         [lastLeftDragEvent release];
         lastLeftDragEvent = nil;
     }
@@ -214,12 +222,97 @@ struct InputContext
         if (event != nil) [NSApp postEvent:event atStart:NO];
     }
 
+    bool enterLocalFileDrag(NSView* view, id<NSDraggingInfo> sender)
+    {
+        if (localFileDragLifecycle == nullptr || view == nil || sender == nil) {
+            return false;
+        }
+        const QStringList paths = localFilePaths(sender.draggingPasteboard);
+        if (paths.isEmpty()) {
+            return false;
+        }
+        const NSInteger sequenceNumber = sender.draggingSequenceNumber;
+        const quintptr identity = sequenceNumber == 0
+                ? 1 : static_cast<quintptr>(sequenceNumber);
+        return localFileDragLifecycle->enter(
+                identity, paths, localFileDragPoint(view, sender));
+    }
+
+    bool moveLocalFileDrag(NSView* view, id<NSDraggingInfo> sender)
+    {
+        return localFileDragLifecycle != nullptr && view != nil &&
+                sender != nil && localFileDragLifecycle->move(
+                        localFileDragPoint(view, sender));
+    }
+
+    void leaveLocalFileDrag()
+    {
+        if (localFileDragLifecycle != nullptr) {
+            localFileDragLifecycle->leave();
+        }
+    }
+
+    bool dropLocalFileDrag(NSView* view, id<NSDraggingInfo> sender)
+    {
+        return localFileDragLifecycle != nullptr && view != nil &&
+                sender != nil && localFileDragLifecycle->drop(
+                        localFileDragPoint(view, sender));
+    }
+
+    void endLocalFileDrag()
+    {
+        if (localFileDragLifecycle != nullptr) {
+            localFileDragLifecycle->cancel();
+        }
+    }
+
+    bool hasActiveLocalFileDrag() const
+    {
+        return localFileDragLifecycle != nullptr &&
+                localFileDragLifecycle->isActive();
+    }
+
     AppleMacInputBridge::KeyCallback keyCallback;
     AppleMacInputBridge::PointerCallback pointerCallback;
     AppleMacInputBridge::RemoteDragCallback remoteDragCallback;
     AppleMacInputBridge::CloseCallback closeCallback;
+    std::shared_ptr<AppleLocalFileDragLifecycle> localFileDragLifecycle;
+    int displayIndex = 0;
     std::unordered_set<unsigned short> activeModifierKeyCodes;
     NSEvent* lastLeftDragEvent = nil;
+
+private:
+    static QStringList localFilePaths(NSPasteboard* pasteboard)
+    {
+        if (pasteboard == nil) {
+            return {};
+        }
+        NSArray* urls = [pasteboard
+                readObjectsForClasses:@[[NSURL class]]
+                              options:@{
+                                  NSPasteboardURLReadingFileURLsOnlyKey: @YES,
+                              }];
+        QStringList paths;
+        for (NSURL* url in urls) {
+            if (url.isFileURL && url.path != nil) {
+                paths.append(QString::fromUtf8(url.path.UTF8String));
+            }
+        }
+        return paths;
+    }
+
+    AppleFileDragPoint localFileDragPoint(
+            NSView* view,
+            id<NSDraggingInfo> sender) const
+    {
+        const NSPoint point = [view convertPoint:sender.draggingLocation
+                                         fromView:nil];
+        return {
+            static_cast<int>(point.x),
+            static_cast<int>(view.bounds.size.height - point.y),
+            displayIndex,
+        };
+    }
 };
 
 InputContext* inputContext(id view)
@@ -316,6 +409,49 @@ void bridgeScrollWheel(id view, SEL, NSEvent* event)
     }
 }
 
+NSDragOperation bridgeDraggingEntered(
+        id view, SEL, id<NSDraggingInfo> sender)
+{
+    InputContext* context = inputContext(view);
+    return context != nullptr && context->enterLocalFileDrag(view, sender)
+            ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+NSDragOperation bridgeDraggingUpdated(
+        id view, SEL, id<NSDraggingInfo> sender)
+{
+    InputContext* context = inputContext(view);
+    return context != nullptr && context->moveLocalFileDrag(view, sender)
+            ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+void bridgeDraggingExited(id view, SEL, id<NSDraggingInfo>)
+{
+    if (InputContext* context = inputContext(view)) {
+        context->leaveLocalFileDrag();
+    }
+}
+
+BOOL bridgePrepareForDragOperation(id view, SEL, id<NSDraggingInfo>)
+{
+    InputContext* context = inputContext(view);
+    return context != nullptr && context->hasActiveLocalFileDrag();
+}
+
+BOOL bridgePerformDragOperation(
+        id view, SEL, id<NSDraggingInfo> sender)
+{
+    InputContext* context = inputContext(view);
+    return context != nullptr && context->dropLocalFileDrag(view, sender);
+}
+
+void bridgeDraggingEnded(id view, SEL, id<NSDraggingInfo>)
+{
+    if (InputContext* context = inputContext(view)) {
+        context->endLocalFileDrag();
+    }
+}
+
 void bridgeCloseWindow(id view, SEL, id)
 {
     if (InputContext* context = inputContext(view);
@@ -378,6 +514,24 @@ Class inputSubclassForClass(Class original)
                          reinterpret_cast<IMP>(bridgeMouseUp)) ||
             !addOverride(subclass, original, @selector(scrollWheel:),
                          reinterpret_cast<IMP>(bridgeScrollWheel)) ||
+            !addOverride(subclass, original, @selector(draggingEntered:),
+                         reinterpret_cast<IMP>(bridgeDraggingEntered)) ||
+            !addOverride(subclass, original, @selector(draggingUpdated:),
+                         reinterpret_cast<IMP>(bridgeDraggingUpdated)) ||
+            !addOverride(subclass, original, @selector(draggingExited:),
+                         reinterpret_cast<IMP>(bridgeDraggingExited)) ||
+            !addOverride(subclass, original,
+                         @selector(prepareForDragOperation:),
+                         reinterpret_cast<IMP>(
+                                 bridgePrepareForDragOperation)) ||
+            !addOverride(subclass, original,
+                         @selector(performDragOperation:),
+                         reinterpret_cast<IMP>(bridgePerformDragOperation)) ||
+            !class_addMethod(
+                    subclass,
+                    @selector(draggingEnded:),
+                    reinterpret_cast<IMP>(bridgeDraggingEnded),
+                    "v@:@") ||
             !class_addMethod(
                     subclass,
                     sel_registerName("moonlightCloseWindow:"),
@@ -466,6 +620,7 @@ struct AppleMacInputBridge::Private
 {
     std::unique_ptr<InputContext> context;
     NSView* view = nil;
+    NSArray<NSPasteboardType>* originalDraggedTypes = nil;
     NSTrackingArea* trackingArea = nil;
     NSButton* closeButton = nil;
     id originalCloseTarget = nil;
@@ -482,7 +637,9 @@ AppleMacInputBridge::AppleMacInputBridge(
         KeyCallback keyCallback,
         PointerCallback pointerCallback,
         RemoteDragCallback remoteDragCallback,
-        CloseCallback closeCallback)
+        CloseCallback closeCallback,
+        std::shared_ptr<AppleLocalFileDragLifecycle> localFileDragLifecycle,
+        int displayIndex)
     : d(std::make_unique<Private>())
 {
     @autoreleasepool {
@@ -502,9 +659,19 @@ AppleMacInputBridge::AppleMacInputBridge(
                 std::move(keyCallback),
                 std::move(pointerCallback),
                 std::move(remoteDragCallback),
-                std::move(closeCallback));
+                std::move(closeCallback),
+                std::move(localFileDragLifecycle),
+                displayIndex);
         d->view = [view retain];
         d->originalClass = originalClass;
+        d->originalDraggedTypes = [view.registeredDraggedTypes copy];
+        NSMutableArray<NSPasteboardType>* draggedTypes =
+                [NSMutableArray arrayWithArray:
+                        d->originalDraggedTypes ?: @[]];
+        if (![draggedTypes containsObject:NSPasteboardTypeFileURL]) {
+            [draggedTypes addObject:NSPasteboardTypeFileURL];
+        }
+        [view registerForDraggedTypes:draggedTypes];
         objc_setAssociatedObject(
                 view,
                 InputContextKey,
@@ -550,6 +717,12 @@ AppleMacInputBridge::~AppleMacInputBridge()
 {
     @autoreleasepool {
         if (d->view != nil) {
+            [d->view unregisterDraggedTypes];
+            if (d->originalDraggedTypes.count > 0) {
+                [d->view registerForDraggedTypes:d->originalDraggedTypes];
+            }
+            [d->originalDraggedTypes release];
+            d->originalDraggedTypes = nil;
             if (d->zoomButton != nil) {
                 d->zoomButton.target = d->originalZoomTarget;
                 d->zoomButton.action = d->originalZoomAction;

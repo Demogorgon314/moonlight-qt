@@ -44,8 +44,7 @@ using AppleScreenSharingSessionPrivate::steadyNanoseconds;
 using AppleScreenSharingSessionPrivate::nativeHandleForWindow;
 #endif
 
-#ifdef Q_OS_WIN
-void AppleScreenSharingSession::ensureWindowsFileDragLifecycle()
+void AppleScreenSharingSession::ensureLocalFileDragLifecycle()
 {
     if (m_LocalFileDragLifecycle != nullptr) return;
     m_LocalFileDragLifecycle =
@@ -120,12 +119,13 @@ void AppleScreenSharingSession::ensureWindowsFileDragLifecycle()
                     });
 }
 
+#ifdef Q_OS_WIN
 void AppleScreenSharingSession::installWindowsFileDropTarget(
         SDL_Window* window,
         int displayIndex)
 {
     if (window == nullptr) return;
-    ensureWindowsFileDragLifecycle();
+    ensureLocalFileDragLifecycle();
     void* const nativeWindow = nativeHandleForWindow(window);
     auto target = std::make_unique<AppleWindowsFileDropTarget>(
             nativeWindow,

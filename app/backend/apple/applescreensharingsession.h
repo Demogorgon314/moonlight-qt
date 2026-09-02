@@ -183,8 +183,8 @@ private:
     void updateKeyboardGrabState(SDL_Window* window);
     bool systemKeyCaptureRequestedForWindow(quint32 windowId) const;
     void queueControl(AppleOutboundControl control);
+    void ensureLocalFileDragLifecycle();
 #ifdef Q_OS_WIN
-    void ensureWindowsFileDragLifecycle();
     void installWindowsFileDropTarget(SDL_Window* window, int displayIndex);
 #endif
     std::optional<QRect> restoredWindowGeometry(AppleWindowRole role) const;
@@ -211,16 +211,16 @@ private:
     std::unique_ptr<AppleRemoteFileDragInputState> m_RemoteFileDragInputState;
     std::unique_ptr<AppleFileTransferProgressWindow>
             m_FileTransferProgressWindow;
-#ifdef Q_OS_WIN
     std::shared_ptr<AppleLocalFileDragLifecycle> m_LocalFileDragLifecycle;
-    std::vector<std::unique_ptr<AppleWindowsFileDropTarget>>
-            m_WindowsFileDropTargets;
-    std::unique_ptr<AppleWindowsRemoteFileDragSource>
-            m_WindowsRemoteFileDragSource;
     bool m_LocalFileDragPointerActive = false;
     int m_LastLocalFileDragX = 0;
     int m_LastLocalFileDragY = 0;
     int m_LastLocalFileDragDisplayIndex = 0;
+#ifdef Q_OS_WIN
+    std::vector<std::unique_ptr<AppleWindowsFileDropTarget>>
+            m_WindowsFileDropTargets;
+    std::unique_ptr<AppleWindowsRemoteFileDragSource>
+            m_WindowsRemoteFileDragSource;
 #endif
     AppleWindowPlacementStore m_WindowPlacementStore;
     std::optional<QRect> m_PrimaryWindowGeometry;

@@ -7,6 +7,7 @@
 #include <string>
 
 struct SDL_Window;
+class AppleLocalFileDragLifecycle;
 
 struct AppleMacKeyEvent
 {
@@ -67,7 +68,10 @@ public:
                         KeyCallback keyCallback,
                         PointerCallback pointerCallback,
                         RemoteDragCallback remoteDragCallback,
-                        CloseCallback closeCallback);
+                        CloseCallback closeCallback,
+                        std::shared_ptr<AppleLocalFileDragLifecycle>
+                                localFileDragLifecycle = {},
+                        int displayIndex = 0);
     ~AppleMacInputBridge();
 
     AppleMacInputBridge(const AppleMacInputBridge&) = delete;
