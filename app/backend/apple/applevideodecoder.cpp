@@ -175,9 +175,31 @@ QList<QList<AppleDecodedTile>> AppleDecodedFrameBatcher::takeReadyBatches()
             m_GroupOrder.removeFirst();
             continue;
         }
-        if (!group->closed ||
-                group->decodedFrames.size() != group->submittedTileSet.size()) {
-            break;
+        const bool ready = group->closed &&
+                group->decodedFrames.size() == group->submittedTileSet.size();
+        if (!ready) {
+            // VideoToolbox reports an explicit completion for every accepted
+            // sample, including dropped frames. FFmpeg's synchronous API does
+            // not: an accepted access unit can produce no frame and no error.
+            // A later complete sender frame proves that keeping this older
+            // group can only add latency and retain every following 4:4:4
+            // surface, so discard it and resume at the next atomic boundary.
+            bool laterGroupIsReady = false;
+            for (qsizetype index = 1; index < m_GroupOrder.size(); ++index) {
+                const auto later = m_Groups.constFind(m_GroupOrder.at(index));
+                if (later != m_Groups.cend() && later->closed &&
+                        later->decodedFrames.size() ==
+                                later->submittedTileSet.size()) {
+                    laterGroupIsReady = true;
+                    break;
+                }
+            }
+            if (!laterGroupIsReady) {
+                break;
+            }
+            m_Groups.erase(group);
+            m_GroupOrder.removeFirst();
+            continue;
         }
         QList<AppleDecodedTile> frames;
         frames.reserve(group->submittedTiles.size());
@@ -204,8 +226,12 @@ void AppleDecodedFrameBatcher::reset()
     m_ImmediateBatches.clear();
 }
 
-AppleHevcDecoder::AppleHevcDecoder(bool preferHardware)
-    : m_PreferHardware(preferHardware)
+AppleHevcDecoder::AppleHevcDecoder(bool preferHardware, int tileCount)
+    : m_PreferHardware(preferHardware),
+      // One sender frame can expose every tile before the presentation thread
+      // copies it. Keep room for that frame and the one currently entering the
+      // decoder in addition to FFmpeg's reference-picture requirement.
+      m_HardwareSurfaceSlack(qMax(3, qMax(1, tileCount) * 2))
 {
 }
 
@@ -219,6 +245,8 @@ bool AppleHevcDecoder::open(QString* error)
     if (isOpen()) {
         return true;
     }
+    m_ConsecutiveHardwareFailures = 0;
+    m_HardwareFallbackOccurred = false;
 #if defined(Q_OS_WIN) || defined(Q_OS_DARWIN)
     if (m_PreferHardware && openBackend(true, nullptr)) {
         return true;
@@ -230,7 +258,9 @@ bool AppleHevcDecoder::open(QString* error)
     return openBackend(false, error);
 }
 
-bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
+bool AppleHevcDecoder::openBackend(bool hardware,
+                                   QString* error,
+                                   AVBufferRef* reusableHardwareDevice)
 {
     close();
     m_Codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
@@ -268,8 +298,12 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
 
 #ifdef Q_OS_WIN
     if (hardware) {
-        const int hardwareResult = av_hwdevice_ctx_create(
-                &m_HardwareDevice, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+        const int hardwareResult = reusableHardwareDevice != nullptr
+                ? ((m_HardwareDevice = av_buffer_ref(reusableHardwareDevice)) != nullptr
+                           ? 0 : AVERROR(ENOMEM))
+                : av_hwdevice_ctx_create(
+                          &m_HardwareDevice, AV_HWDEVICE_TYPE_D3D11VA,
+                          nullptr, nullptr, 0);
         if (hardwareResult < 0 || m_HardwareDevice == nullptr) {
             close();
             return false;
@@ -296,9 +330,12 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
     }
 #elif defined(Q_OS_DARWIN)
     if (hardware) {
-        const int hardwareResult = av_hwdevice_ctx_create(
-                &m_HardwareDevice, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-                nullptr, nullptr, 0);
+        const int hardwareResult = reusableHardwareDevice != nullptr
+                ? ((m_HardwareDevice = av_buffer_ref(reusableHardwareDevice)) != nullptr
+                           ? 0 : AVERROR(ENOMEM))
+                : av_hwdevice_ctx_create(
+                          &m_HardwareDevice, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                          nullptr, nullptr, 0);
         if (hardwareResult < 0 || m_HardwareDevice == nullptr) {
             close();
             return false;
@@ -335,6 +372,7 @@ bool AppleHevcDecoder::openBackend(bool hardware, QString* error)
     }
 #endif
     m_ParameterSetsSubmitted = false;
+    ++m_Generation;
     return true;
 }
 
@@ -397,7 +435,7 @@ bool AppleHevcDecoder::prepareHardwareFramesContext(AVCodecContext* context,
     // directly instead of transferring every tile back to system memory.
     d3d11FramesContext->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
     if (framesContext->initial_pool_size > 0) {
-        framesContext->initial_pool_size += 3;
+        framesContext->initial_pool_size += m_HardwareSurfaceSlack;
     }
     result = av_hwframe_ctx_init(context->hw_frames_ctx);
     if (result < 0) {
@@ -473,6 +511,10 @@ QList<AppleDecodedTile> AppleHevcDecoder::decode(
             packet, tileIndex, accessUnit.timestamp,
             accessUnit.frameSequenceNumber, &decodeError);
     if (decodeError.isEmpty() || m_Backend == Backend::Software) {
+        if (decodeError.isEmpty() && !frames.isEmpty() &&
+                m_Backend != Backend::Software) {
+            m_ConsecutiveHardwareFailures = 0;
+        }
         if (!decodeError.isEmpty()) {
             setError(error, decodeError);
         }
@@ -480,22 +522,32 @@ QList<AppleDecodedTile> AppleHevcDecoder::decode(
         return frames;
     }
 
-    // Native decoder availability can change after creation (driver reset,
-    // unsupported profile or pixel-buffer format). Rebuild only this decoder
-    // as software and resubmit the same access unit with parameter sets.
+    // A transient D3D11/VideoToolbox resource shortage invalidates the codec
+    // state but not necessarily the hardware device. Recreate the codec once
+    // on the same device so the zero-copy renderer remains compatible. The
+    // caller observes the generation change, clears its tile synchronizer, and
+    // requests a random-access picture before submitting more inter frames.
+    ++m_ConsecutiveHardwareFailures;
+    AVBufferRef* reusableHardwareDevice = av_buffer_ref(m_HardwareDevice);
+    const bool recoveredHardware = m_ConsecutiveHardwareFailures == 1 &&
+            reusableHardwareDevice != nullptr &&
+            openBackend(true, nullptr, reusableHardwareDevice);
+    av_buffer_unref(&reusableHardwareDevice);
+    if (recoveredHardware) {
+        setError(error, QCoreApplication::translate(
+                "AppleVideoDecoder",
+                "The hardware HEVC decoder was restarted and needs a new random-access picture."));
+        return {};
+    }
+
     m_HardwareFallbackOccurred = true;
     if (!openBackend(false, error)) {
         return {};
     }
-    const QByteArray fallbackPacket = annexB(accessUnit, parameterSets);
-    decodeError.clear();
-    frames = decodePacket(fallbackPacket, tileIndex, accessUnit.timestamp,
-                          accessUnit.frameSequenceNumber, &decodeError);
-    if (!decodeError.isEmpty()) {
-        setError(error, decodeError);
-    }
-    m_ParameterSetsSubmitted = true;
-    return frames;
+    setError(error, QCoreApplication::translate(
+            "AppleVideoDecoder",
+            "The hardware HEVC decoder failed repeatedly; software decoding is waiting for a new random-access picture."));
+    return {};
 }
 
 QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
@@ -529,52 +581,77 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
         static_cast<quint16>(frameSequenceNumber.has_value()),
     };
     std::memcpy(m_Packet->opaque_ref->data, &metadata, sizeof(metadata));
-    int status = avcodec_send_packet(m_Context, m_Packet);
-    if (status < 0 && status != AVERROR(EAGAIN)) {
+    auto receiveAvailableFrames = [&]() -> int {
+        int status = 0;
+        while (true) {
+            av_frame_unref(m_Frame);
+            status = avcodec_receive_frame(m_Context, m_Frame);
+            if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) {
+                return status;
+            }
+            if (status < 0) {
+                setError(error, QCoreApplication::translate(
+                        "AppleVideoDecoder", "HEVC frame decoding failed: %1")
+                        .arg(ffmpegError(status)));
+                result.clear();
+                return status;
+            }
+            int outputTileIndex = tileIndex;
+            quint32 outputTimestamp = timestamp;
+            quint64 outputDecodeSubmittedAtNanoseconds = 0;
+            std::optional<quint16> outputFrameSequenceNumber = frameSequenceNumber;
+            if (m_Frame->opaque_ref != nullptr &&
+                    m_Frame->opaque_ref->size >= sizeof(AppleDecodedFrameMetadata)) {
+                AppleDecodedFrameMetadata outputMetadata;
+                std::memcpy(&outputMetadata,
+                            m_Frame->opaque_ref->data,
+                            sizeof(outputMetadata));
+                outputTileIndex = outputMetadata.tileIndex;
+                outputTimestamp = outputMetadata.rtpTimestamp;
+                outputDecodeSubmittedAtNanoseconds =
+                        outputMetadata.decodeSubmittedAtNanoseconds;
+                if (outputMetadata.hasFrameSequenceNumber != 0) {
+                    outputFrameSequenceNumber = outputMetadata.frameSequenceNumber;
+                }
+            }
+            AppleDecodedTile frame = convertFrame(
+                    m_Frame, outputTileIndex, outputTimestamp, error);
+            frame.frameSequenceNumber = outputFrameSequenceNumber;
+            frame.decodeSubmittedAtNanoseconds =
+                    outputDecodeSubmittedAtNanoseconds;
+            if (frame.isValid()) {
+                result.append(std::move(frame));
+            }
+        }
+    };
+
+    int status = 0;
+    while ((status = avcodec_send_packet(m_Context, m_Packet)) ==
+           AVERROR(EAGAIN)) {
+        const qsizetype frameCountBeforeDrain = result.size();
+        const int receiveStatus = receiveAvailableFrames();
+        if (receiveStatus < 0 && receiveStatus != AVERROR(EAGAIN) &&
+                receiveStatus != AVERROR_EOF) {
+            return {};
+        }
+        if (result.size() == frameCountBeforeDrain &&
+                receiveStatus == AVERROR(EAGAIN)) {
+            setError(error, QCoreApplication::translate(
+                    "AppleVideoDecoder",
+                    "The HEVC decoder made no progress while accepting a packet."));
+            return {};
+        }
+    }
+    if (status < 0) {
         setError(error, QCoreApplication::translate(
                 "AppleVideoDecoder", "HEVC packet submission failed: %1")
                 .arg(ffmpegError(status)));
-        return result;
+        return {};
     }
-    while (true) {
-        av_frame_unref(m_Frame);
-        status = avcodec_receive_frame(m_Context, m_Frame);
-        if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) {
-            break;
-        }
-        if (status < 0) {
-            setError(error, QCoreApplication::translate(
-                    "AppleVideoDecoder", "HEVC frame decoding failed: %1")
-                    .arg(ffmpegError(status)));
-            result.clear();
-            break;
-        }
-        int outputTileIndex = tileIndex;
-        quint32 outputTimestamp = timestamp;
-        quint64 outputDecodeSubmittedAtNanoseconds = 0;
-        std::optional<quint16> outputFrameSequenceNumber = frameSequenceNumber;
-        if (m_Frame->opaque_ref != nullptr &&
-                m_Frame->opaque_ref->size >= sizeof(AppleDecodedFrameMetadata)) {
-            AppleDecodedFrameMetadata outputMetadata;
-            std::memcpy(&outputMetadata,
-                        m_Frame->opaque_ref->data,
-                        sizeof(outputMetadata));
-            outputTileIndex = outputMetadata.tileIndex;
-            outputTimestamp = outputMetadata.rtpTimestamp;
-            outputDecodeSubmittedAtNanoseconds =
-                    outputMetadata.decodeSubmittedAtNanoseconds;
-            if (outputMetadata.hasFrameSequenceNumber != 0) {
-                outputFrameSequenceNumber = outputMetadata.frameSequenceNumber;
-            }
-        }
-        AppleDecodedTile frame = convertFrame(
-                m_Frame, outputTileIndex, outputTimestamp, error);
-        frame.frameSequenceNumber = outputFrameSequenceNumber;
-        frame.decodeSubmittedAtNanoseconds =
-                outputDecodeSubmittedAtNanoseconds;
-        if (frame.isValid()) {
-            result.append(std::move(frame));
-        }
+    const int receiveStatus = receiveAvailableFrames();
+    if (receiveStatus < 0 && receiveStatus != AVERROR(EAGAIN) &&
+            receiveStatus != AVERROR_EOF) {
+        return {};
     }
     return result;
 }

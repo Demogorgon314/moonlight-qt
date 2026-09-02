@@ -3,6 +3,14 @@
 #include "backend/apple/appleconnectionstore.h"
 #include "backend/apple/applecontrolfeatures.h"
 #include "backend/apple/applefeaturegate.h"
+#include "backend/apple/applefilecopy.h"
+#include "backend/apple/applefiledrag.h"
+#ifdef Q_OS_WIN
+#include "backend/apple/applefiledrag_win.h"
+#include <qt_windows.h>
+#endif
+#include "backend/apple/applefiletransfer.h"
+#include "backend/apple/applefiletransferservice.h"
 #include "backend/apple/applekeyboardmapper.h"
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -13,6 +21,7 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QMimeData>
 #include <QScopeGuard>
@@ -32,6 +41,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <thread>
 
 namespace {
 
@@ -834,6 +845,14 @@ void testEncryptedInputWireBoundary()
                     "00000000000001020304ff03028001e0"),
             "pointer input must preserve buttons, click count, timestamp, and canvas coordinates");
 
+    const AppleInputEncryptionRequest fileDragDown =
+            AppleMediaWire::pointerEvent(1, 640, 480, 1, 1);
+    const AppleInputEncryptionRequest fileDragUp =
+            AppleMediaWire::pointerEvent(0, 640, 480, 1, 2);
+    require(fileDragDown.header == QByteArray::fromHex("1003") &&
+                    fileDragUp.header == QByteArray::fromHex("1003"),
+            "Finder file-drag down and up frames must retain click count one");
+
     const AppleInputEncryptionRequest key = AppleMediaWire::keyEvent(
             true, 0xff0d, 9, 0, 40);
     require(key.isValid() && key.header == QByteArray::fromHex("1001") &&
@@ -1328,6 +1347,37 @@ void testDecodedTilesPublishOnFlsEndOfDataWithoutTearing()
             "a failed final tile must be removed immediately so it cannot head-of-line block later atomic frames");
 }
 
+void testDecodedTilesDoNotRetainFramesBehindMissingDecoderOutput()
+{
+    AppleDecodedFrameBatcher batcher;
+    auto accessUnit = [](quint16 sequence, int tileIndex) {
+        AppleHevcAccessUnit unit;
+        unit.synchronizationSource = static_cast<quint32>(tileIndex + 1);
+        unit.frameSequenceNumber = sequence;
+        unit.subframeBoundary = AppleHevcAccessUnit::SubframeBoundary::Last;
+        return unit;
+    };
+    auto tile = [](int tileIndex, quint16 sequence) {
+        AppleDecodedTile frame;
+        frame.tileIndex = tileIndex;
+        frame.frameSequenceNumber = sequence;
+        return frame;
+    };
+
+    // FFmpeg can accept an access unit without returning either a frame or a
+    // per-packet failure callback. Once a later sender frame is complete, the
+    // missing output can no longer be allowed to retain every newer 4:4:4
+    // surface behind it.
+    batcher.recordSubmission(accessUnit(700, 0), 0);
+    batcher.recordSubmission(accessUnit(701, 1), 1);
+    batcher.recordDecodedFrames({tile(1, 701)});
+
+    const QList<QList<AppleDecodedTile>> recovered = batcher.takeReadyBatches();
+    require(recovered.size() == 1 && recovered.first().size() == 1 &&
+                    recovered.first().first().frameSequenceNumber == 701,
+            "a missing decoder output must not head-of-line block and retain later complete frames");
+}
+
 quint16 findFourAvailableUdpPorts()
 {
     for (quint16 basePort = 40000; basePort < 65000; basePort += 4) {
@@ -1577,6 +1627,1079 @@ void testStageFourTextOnlyClipboardExchange()
             "remote clipboard changes must not fetch while observing");
 }
 
+void testAppleFileTransferNativeWireContract()
+{
+    QString error;
+    const QByteArray drop = AppleFileTransferProtocol::beginDrop(
+            {QUrl(QStringLiteral("file:///tmp/type32-oracle-file.txt"))},
+            0x1234,
+            &error);
+    require(error.isEmpty(), qPrintable(error));
+    require(drop == QByteArray::fromHex(
+                    "20000000000012340000006100000056"
+                    "78da62606060646060e02f284dcac94cd64bcbcc49d52d2dca6180009094407"
+                    "27eae5e6241414eaa5e7e714965412a508c250da24609a4de4a5f5fbf24b7401"
+                    "f24676ca49b5f94980c340424a357525102000000ffff"),
+            "type 32 file-drag archive differs from the native vector");
+    require(AppleFileTransferProtocol::cancelDrop(0x01020304) ==
+                    QByteArray::fromHex(
+                            "20000000010203040000000000000000"),
+            "type 32 cancel differs from the native vector");
+
+    AppleFileTransferRequest request;
+    require(AppleFileTransferProtocol::parseFileRequest(
+                    QByteArray::fromHex(
+                            "1e00000000001234000000042f746d70"),
+                    &request,
+                    &error) &&
+                    request.sessionId == 0x1234 &&
+                    request.destinationPath == QStringLiteral("/tmp"),
+            "type 30 destination request did not parse");
+    require(AppleFileTransferProtocol::startFileReceive(
+                    0x1234, QStringLiteral("/tmp")) ==
+                    QByteArray::fromHex(
+                            "2200000000170001000200001234000000000000000000042f746d7000"),
+            "start-receive differs from the native vector");
+    require(AppleFileTransferProtocol::startFileSend(
+                    0x1234, QStringLiteral("/tmp")) ==
+                    QByteArray::fromHex(
+                            "2200000000170001000100001234000000010000000000042f746d7000"),
+            "start-send differs from the native vector");
+    require(AppleFileTransferProtocol::control(
+                    0x1234, AppleFileTransferControl::Pause) ==
+                    QByteArray::fromHex("2200000000080001000300001234") &&
+                    AppleFileTransferProtocol::control(
+                            0x1234, AppleFileTransferControl::Resume) ==
+                    QByteArray::fromHex("2200000000080001000400001234") &&
+                    AppleFileTransferProtocol::control(
+                            0x1234, AppleFileTransferControl::Stop) ==
+                    QByteArray::fromHex("2200000000080001000500001234"),
+            "native file-copy control vectors changed");
+    require(AppleFileTransferProtocol::completion(
+                    0x1234, 0, QStringLiteral("b.bin")) ==
+                    QByteArray::fromHex(
+                            "220000000012000100c80000123400000005622e62696e00") &&
+                    AppleFileTransferProtocol::progress(0x1234, 0.5) ==
+                    QByteArray::fromHex(
+                            "2200000000100001012c000012343fe0000000000000"),
+            "native file-copy response vectors changed");
+
+    AppleFileCopySummary summary;
+    summary.rootIsFile = true;
+    summary.logicalBytes = 1;
+    summary.physicalBytes = 4096;
+    summary.fileCount = 1;
+    require(AppleFileTransferProtocol::senderSummary(0x1234, summary) ==
+                    QByteArray::fromHex(
+                            "22000000003c000100640000123400000001000000000000000000000001000000000000100000000000000000010000000000000000000000000000000000000000"),
+            "native sender summary vector changed");
+
+    AppleFileCopyItemMetadata item;
+    item.dataForkSize = 1;
+    item.mode = 0100644;
+    item.textEncodingHint = 0x7e;
+    item.name = QStringLiteral("a");
+    require(AppleFileTransferProtocol::senderItem(0x1234, item) ==
+                    QByteArray::fromHex(
+                            "22000000007200010065000012340100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000081a40000007e000100006100"),
+            "native sender item vector changed");
+    require(AppleFileTransferProtocol::senderData(
+                    0x1234, QByteArrayLiteral("X")) ==
+                    QByteArray::fromHex(
+                            "22000000000d00010066000012340000000158") &&
+                    AppleFileTransferProtocol::senderDone(0x1234, -5000) ==
+                    QByteArray::fromHex(
+                            "22000000000c000100680000123478ecffff"),
+            "native sender data/done vectors changed");
+
+    AppleFileTransferResponse response;
+    require(AppleFileTransferProtocol::parseResponse(
+                    AppleFileTransferProtocol::progress(0x1234, 0.5),
+                    &response,
+                    &error) &&
+                    response.kind == AppleFileTransferResponse::Kind::Progress &&
+                    response.sessionId == 0x1234 && response.fraction == 0.5,
+            "native progress response did not parse");
+
+    item.finderInfo[0] = char(0x54);
+    item.finderInfo[24] = char(0x12);
+    item.finderInfo[25] = char(0x34);
+    item.resourceForkSize = 3;
+    item.dataForkSize = 4;
+    item.creationDate = {10, 11};
+    item.contentModificationDate = {12, 13};
+    item.attributeModificationDate = {14, 15};
+    item.accessDate = {16, 17};
+    item.backupDate = {18, 19};
+    item.nodeFlags = 1;
+    item.level = 2;
+    item.mode = 0100640;
+    item.name = QStringLiteral("file.bin");
+    item.extendedAttributes = {
+        {QStringLiteral("a"), QByteArray::fromHex("0102")},
+        {QStringLiteral("bc"), QByteArray::fromHex("03")},
+    };
+    AppleFileCopyReceiverFrame frame;
+    require(AppleFileTransferProtocol::parseReceiverFrame(
+                    AppleFileTransferProtocol::senderItem(0x1234, item),
+                    &frame,
+                    &error),
+            qPrintable(error));
+    require(frame.kind == AppleFileCopyReceiverFrame::Kind::Item &&
+                    frame.sessionId == 0x1234 &&
+                    frame.item.name == item.name &&
+                    frame.item.level == 2 &&
+                    frame.item.dataForkSize == 4 &&
+                    frame.item.resourceForkSize == 3 &&
+                    frame.item.creationDate == item.creationDate &&
+                    frame.item.extendedAttributes == item.extendedAttributes &&
+                    static_cast<quint8>(frame.item.finderInfo.at(0)) == 0x54 &&
+                    frame.item.finderInfo.at(24) == 0 &&
+                    frame.item.finderInfo.at(25) == 0,
+            "file item metadata did not round-trip through the receiver parser");
+
+    const QByteArray largeMessage = AppleFileTransferProtocol::senderData(
+            0x1234, QByteArray(AppleFileTransferProtocol::MaximumDataBlockLength,
+                              'X'));
+    const QList<QByteArray> fragments =
+            AppleFileTransferProtocol::fragments(largeMessage);
+    require(fragments.size() == 2 && fragments.at(0).size() == 60000 &&
+                    fragments.at(1).size() == largeMessage.size() - 60000,
+            "encrypted-record fragmentation exceeded the native limit");
+    AppleFileTransferReassembler reassembler;
+    std::optional<QByteArray> reassembled;
+    require(reassembler.receive(fragments.at(0), &reassembled, &error) &&
+                    !reassembled.has_value() &&
+                    reassembler.receive(fragments.at(1), &reassembled, &error) &&
+                    reassembled == largeMessage,
+            "file-copy encrypted records were not reassembled");
+
+    std::optional<AppleRemoteFileDrag> remoteDrag;
+    require(AppleFileTransferProtocol::parseRemoteDrag(
+                    drop, &remoteDrag, &error) && remoteDrag.has_value() &&
+                    remoteDrag->sessionId == 0x1234 &&
+                    remoteDrag->sourcePaths ==
+                            QStringList{QStringLiteral("/tmp/type32-oracle-file.txt")},
+            "remote file-drag archive did not round-trip");
+    require(!AppleFileTransferProtocol::progress(
+                    0x1234, std::numeric_limits<double>::quiet_NaN()).size() &&
+                    AppleFileTransferProtocol::startFileSend(
+                            0, QStringLiteral("/tmp")).isEmpty(),
+            "invalid file-transfer inputs were accepted");
+}
+
+void testAppleFileCopyDirectoryRoundTrip()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(), "file-copy temporary directory was unavailable");
+    const QString source = QDir(temporary.path()).filePath(
+            QStringLiteral("source"));
+    require(QDir().mkpath(QDir(source).filePath(QStringLiteral("nested"))),
+            "file-copy source tree could not be created");
+    const auto writeFile = [](const QString& path, const QByteArray& data) {
+        QFile file(path);
+        return file.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
+                file.write(data) == data.size();
+    };
+    const QByteArray compressible(180000, 'A');
+    const QByteArray alreadyCompressed = QByteArray::fromHex(
+            "504b0304140000000800a55a245b00000000000000000000000000000000");
+    require(writeFile(QDir(source).filePath(QStringLiteral("large.txt")),
+                      compressible) &&
+                    writeFile(QDir(source).filePath(
+                                      QStringLiteral("nested/archive.zip")),
+                              alreadyCompressed) &&
+                    writeFile(QDir(source).filePath(
+                                      QStringLiteral("nested/empty.bin")),
+                              {}),
+            "file-copy source files could not be created");
+
+    QList<QByteArray> messages;
+    quint64 emittedBytes = 0;
+    std::atomic_bool cancelled{false};
+    QString error;
+    int metricsReadCount = 0;
+    AppleFileCopySender sender([&metricsReadCount]() {
+        return metricsReadCount >= 2 ? quint32(9) : quint32(0);
+    });
+    require(sender.run(
+                    source,
+                    0x2345,
+                    [&messages, &emittedBytes](const QByteArray& message,
+                                               quint64 bytes,
+                                               QString*) {
+                        messages.append(message);
+                        emittedBytes += bytes;
+                        return true;
+                    },
+                    [&metricsReadCount]() {
+                        ++metricsReadCount;
+                        AppleFileCopySender::OutputMetrics metrics;
+                        if (metricsReadCount >= 2) {
+                            metrics.pendingBytes = 10 * 1024 * 1024;
+                            metrics.totalBytesEnqueued = 1;
+                        }
+                        return metrics;
+                    },
+                    &cancelled,
+                    &error),
+            qPrintable(error));
+    require(!messages.isEmpty() && emittedBytes ==
+                    static_cast<quint64>(compressible.size() +
+                                         alreadyCompressed.size()),
+            "file-copy sender reported an incorrect payload size");
+    bool sawCompressed = false;
+    bool sawRaw = false;
+    for (const QByteArray& message : std::as_const(messages)) {
+        AppleFileCopyReceiverFrame frame;
+        require(AppleFileTransferProtocol::parseReceiverFrame(
+                        message, &frame, &error),
+                qPrintable(error));
+        sawCompressed = sawCompressed ||
+                frame.kind == AppleFileCopyReceiverFrame::Kind::CompressedData;
+        sawRaw = sawRaw || frame.kind == AppleFileCopyReceiverFrame::Kind::Data;
+    }
+    require(sawCompressed && sawRaw,
+            "file-copy compression policy did not preserve raw archive data");
+
+    const QString destination = QDir(temporary.path()).filePath(
+            QStringLiteral("destination"));
+    AppleFileCopyReceiver receiver(
+            destination, QStringLiteral("received"), &error);
+    require(receiver.isValid(), qPrintable(error));
+    QString completedPath;
+    double progress = 0.0;
+    for (const QByteArray& message : std::as_const(messages)) {
+        AppleFileCopyReceiverFrame frame;
+        require(AppleFileTransferProtocol::parseReceiverFrame(
+                        message, &frame, &error),
+                qPrintable(error));
+        AppleFileCopyReceiver::Update update;
+        require(receiver.receive(frame, &update, &error), qPrintable(error));
+        if (update.progress.has_value()) progress = *update.progress;
+        if (!update.completedPath.isEmpty()) completedPath = update.completedPath;
+    }
+    require(progress == 1.0 &&
+                    completedPath == QDir(destination).filePath(
+                            QStringLiteral("received")),
+            "file-copy receiver did not complete at the requested root");
+    QFile receivedText(QDir(completedPath).filePath(QStringLiteral("large.txt")));
+    QFile receivedArchive(QDir(completedPath).filePath(
+            QStringLiteral("nested/archive.zip")));
+    require(receivedText.open(QIODevice::ReadOnly) &&
+                    receivedText.readAll() == compressible &&
+                    receivedArchive.open(QIODevice::ReadOnly) &&
+                    receivedArchive.readAll() == alreadyCompressed &&
+                    QFileInfo(QDir(completedPath).filePath(
+                                      QStringLiteral("nested/empty.bin"))).size() == 0,
+            "file-copy directory contents changed during round-trip");
+
+    AppleFileCopyReceiver duplicate(
+            destination, QStringLiteral("received"), &error);
+    require(duplicate.isValid(), qPrintable(error));
+    QString duplicatePath;
+    for (const QByteArray& message : std::as_const(messages)) {
+        AppleFileCopyReceiverFrame frame;
+        AppleFileCopyReceiver::Update update;
+        require(AppleFileTransferProtocol::parseReceiverFrame(
+                        message, &frame, &error) &&
+                        duplicate.receive(frame, &update, &error),
+                qPrintable(error));
+        if (!update.completedPath.isEmpty()) duplicatePath = update.completedPath;
+    }
+    require(QFileInfo(duplicatePath).fileName() == QStringLiteral("received 2"),
+            "file-copy receiver overwrote an existing destination");
+}
+
+void testAppleFileCopySenderBeginsWithNativeUncompressedData()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(),
+            "file-copy native sender temporary directory failed");
+    const QString source = temporary.filePath(QStringLiteral("payload.dmg"));
+    QFile sourceFile(source);
+    constexpr int payloadSize = 128 * 1024 + 1;
+    require(sourceFile.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
+                    sourceFile.write(QByteArray(payloadSize, 'A')) == payloadSize,
+            "file-copy native sender fixture could not be created");
+    sourceFile.close();
+
+    QList<QByteArray> messages;
+    std::atomic_bool cancelled{false};
+    QString error;
+    AppleFileCopySender sender;
+    require(sender.run(
+                    source,
+                    0x3456,
+                    [&messages](const QByteArray& message,
+                                quint64,
+                                QString*) {
+                        messages.append(message);
+                        return true;
+                    },
+                    {},
+                    &cancelled,
+                    &error),
+            qPrintable(error));
+
+    require(messages.size() >= 4,
+            "file-copy sender omitted native file frames");
+    AppleFileCopyReceiverFrame summary;
+    require(AppleFileTransferProtocol::parseReceiverFrame(
+                    messages.first(), &summary, &error),
+            qPrintable(error));
+    require(summary.kind == AppleFileCopyReceiverFrame::Kind::Summary &&
+                    summary.summary.logicalBytes == payloadSize &&
+                    summary.summary.physicalBytes >
+                            summary.summary.logicalBytes,
+            "file-copy sender did not report the native allocated file size");
+    AppleFileCopyReceiverFrame firstPayload;
+    AppleFileCopyReceiverFrame metadata;
+    require(AppleFileTransferProtocol::parseReceiverFrame(
+                    messages.at(1), &metadata, &error),
+            qPrintable(error));
+    require(metadata.kind == AppleFileCopyReceiverFrame::Kind::Item &&
+                    metadata.item.type == AppleFileCopyItemType::File &&
+                    metadata.item.mode == 0100644 &&
+                    metadata.item.nodeFlags == 0 &&
+                    metadata.item.textEncodingHint == 0x7e,
+            qPrintable(QStringLiteral(
+                    "Windows file-copy metadata diverged from the native "
+                    "regular-file contract (mode=%1 flags=%2 encoding=%3)")
+                               .arg(metadata.item.mode, 0, 8)
+                               .arg(metadata.item.nodeFlags)
+                               .arg(metadata.item.textEncodingHint)));
+    require(AppleFileTransferProtocol::parseReceiverFrame(
+                    messages.at(2), &firstPayload, &error),
+            qPrintable(error));
+    require(firstPayload.kind == AppleFileCopyReceiverFrame::Kind::Data,
+            "file-copy sender compressed its first payload before native backlog negotiation");
+}
+
+void testAppleFileTransferKeepsLogicalMessageFragmentsAtomic()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(),
+            "file-transfer atomic-fragment temporary directory failed");
+    const QString source = QDir(temporary.path()).filePath(
+            QStringLiteral("payload.zip"));
+    QFile sourceFile(source);
+    const QByteArray contents(140000, 'R');
+    require(sourceFile.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
+                    sourceFile.write(contents) == contents.size(),
+            "file-transfer atomic-fragment source could not be created");
+    sourceFile.close();
+
+    AppleFileTransferService service;
+    service.setAvailable(true);
+    QList<QByteArray> dropMessages;
+    QString error;
+    require(service.beginLocalDrop({source}, &dropMessages, &error) &&
+                    dropMessages.size() == 1,
+            qPrintable(error));
+    bool ok = false;
+    const quint32 dropSessionId = AppleWire::readUInt32(
+            dropMessages.first(), 4, &ok);
+    require(ok && dropSessionId != 0,
+            "local file drop omitted its session ID");
+
+    const QByteArray destination = QByteArrayLiteral("/Users/test/Desktop");
+    QByteArray request(4, '\0');
+    request[0] = static_cast<char>(0x1e);
+    AppleWire::appendUInt32(request, dropSessionId);
+    AppleWire::appendUInt32(
+            request, static_cast<quint32>(destination.size()));
+    request.append(destination);
+    require(service.receive(request, &error), qPrintable(error));
+
+    QElapsedTimer timeout;
+    timeout.start();
+    bool sawFragmentedMessage = false;
+    while (!sawFragmentedMessage && timeout.elapsed() < 5000) {
+        const QList<QByteArray> batch = service.takeOutbound(1);
+        if (batch.isEmpty()) {
+            QThread::yieldCurrentThread();
+            continue;
+        }
+        const QByteArray& first = batch.first();
+        if (first.size() < 6 || static_cast<quint8>(first.at(0)) != 0x22) {
+            continue;
+        }
+        const quint32 bodyLength = AppleWire::readUInt32(first, 2, &ok);
+        require(ok, "queued file-copy message had a truncated length");
+        const int logicalLength = static_cast<int>(bodyLength) + 6;
+        if (logicalLength <= first.size()) continue;
+
+        QByteArray reassembled;
+        for (const QByteArray& fragment : batch) {
+            reassembled.append(fragment);
+        }
+        require(reassembled.size() == logicalLength,
+                "one logical file-copy message was exposed as separate queue batches");
+        sawFragmentedMessage = true;
+    }
+    require(sawFragmentedMessage,
+            "file-transfer sender did not produce a fragmented data message");
+    service.close();
+}
+
+void testAppleFileTransferProgressNeverMovesBackward()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(),
+            "file-transfer progress temporary directory failed");
+    const QString source = QDir(temporary.path()).filePath(
+            QStringLiteral("progress.bin"));
+    QFile sourceFile(source);
+    const QByteArray contents(4 * 1024 * 1024, 'P');
+    require(sourceFile.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
+                    sourceFile.write(contents) == contents.size(),
+            "file-transfer progress source could not be created");
+    sourceFile.close();
+
+    AppleFileTransferService service;
+    service.setAvailable(true);
+    QList<QByteArray> dropMessages;
+    QString error;
+    require(service.beginLocalDrop({source}, &dropMessages, &error) &&
+                    dropMessages.size() == 1,
+            qPrintable(error));
+    bool ok = false;
+    const quint32 dropSessionId = AppleWire::readUInt32(
+            dropMessages.first(), 4, &ok);
+    const QByteArray destination = QByteArrayLiteral("/Users/test/Desktop");
+    QByteArray request(4, '\0');
+    request[0] = static_cast<char>(0x1e);
+    AppleWire::appendUInt32(request, dropSessionId);
+    AppleWire::appendUInt32(
+            request, static_cast<quint32>(destination.size()));
+    request.append(destination);
+    require(ok && service.receive(request, &error), qPrintable(error));
+
+    quint32 transferSessionId = 0;
+    double highestProgress = 0.0;
+    QElapsedTimer timeout;
+    timeout.start();
+    while ((transferSessionId == 0 || highestProgress < 0.25) &&
+           timeout.elapsed() < 5000) {
+        service.takeOutbound(16);
+        for (const AppleFileTransferEvent& event : service.takeEvents()) {
+            if (event.direction != AppleFileTransferEvent::Direction::ToRemote) {
+                continue;
+            }
+            if (event.kind == AppleFileTransferEvent::Kind::Started) {
+                transferSessionId = event.sessionId;
+            }
+            if (event.kind == AppleFileTransferEvent::Kind::Progress) {
+                highestProgress = qMax(highestProgress, event.progress);
+            }
+        }
+        QThread::yieldCurrentThread();
+    }
+    require(transferSessionId != 0 && highestProgress >= 0.25,
+            "file-transfer sender did not publish measurable progress");
+
+    const double staleRemoteProgress = highestProgress / 4.0;
+    require(service.receive(AppleFileTransferProtocol::progress(
+                                    transferSessionId, staleRemoteProgress),
+                            &error),
+            qPrintable(error));
+    double previous = highestProgress;
+    for (const AppleFileTransferEvent& event : service.takeEvents()) {
+        if (event.sessionId != transferSessionId ||
+                event.kind != AppleFileTransferEvent::Kind::Progress) {
+            continue;
+        }
+        require(event.progress >= previous,
+                "outgoing file-transfer progress moved backward");
+        previous = event.progress;
+    }
+
+    bool senderFinished = false;
+    timeout.restart();
+    while (!senderFinished && timeout.elapsed() < 5000) {
+        service.takeOutbound(32);
+        for (const AppleFileTransferEvent& event : service.takeEvents()) {
+            senderFinished = senderFinished ||
+                    (event.sessionId == transferSessionId &&
+                     event.kind == AppleFileTransferEvent::Kind::Completing);
+        }
+        QThread::yieldCurrentThread();
+    }
+    require(senderFinished,
+            "file-transfer sender did not reach its remote-completion boundary");
+    require(service.receive(AppleFileTransferProtocol::completion(
+                                    transferSessionId, 5,
+                                    QStringLiteral("progress.bin")),
+                            &error),
+            qPrintable(error));
+    bool sawRemoteFailure = false;
+    for (const AppleFileTransferEvent& event : service.takeEvents()) {
+        if (event.sessionId == transferSessionId &&
+                event.kind == AppleFileTransferEvent::Kind::Failed) {
+            sawRemoteFailure = event.errorText.contains(
+                    QStringLiteral("error code 5"));
+        }
+    }
+    require(sawRemoteFailure,
+            "the remote completion error was hidden behind a generic failure");
+    service.close();
+}
+
+void testAppleFileTransferStopsImmediatelyAfterRemoteRejection()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(),
+            "file-transfer rejection temporary directory failed");
+    const QString source = temporary.filePath(QStringLiteral("rejected.dmg"));
+    QFile sourceFile(source);
+    const QByteArray chunk(1024 * 1024, 'R');
+    require(sourceFile.open(QIODevice::WriteOnly | QIODevice::NewOnly),
+            "file-transfer rejection source could not be created");
+    for (int index = 0; index < 32; ++index) {
+        require(sourceFile.write(chunk) == chunk.size(),
+                "file-transfer rejection source was truncated");
+    }
+    sourceFile.close();
+
+    AppleFileTransferService service;
+    service.setAvailable(true);
+    QList<QByteArray> dropMessages;
+    QString error;
+    require(service.beginLocalDrop({source}, &dropMessages, &error),
+            qPrintable(error));
+    bool ok = false;
+    const quint32 dropSessionId = AppleWire::readUInt32(
+            dropMessages.first(), 4, &ok);
+    const QByteArray destination = QByteArrayLiteral("/Volumes/ExternalSSD");
+    QByteArray request(4, '\0');
+    request[0] = static_cast<char>(0x1e);
+    AppleWire::appendUInt32(request, dropSessionId);
+    AppleWire::appendUInt32(
+            request, static_cast<quint32>(destination.size()));
+    request.append(destination);
+    require(ok && service.receive(request, &error), qPrintable(error));
+
+    const QList<QByteArray> start = service.takeOutbound(1);
+    require(start.size() == 1,
+            "file-transfer rejection test did not consume the start command");
+    quint32 transferSessionId = 0;
+    bool producerHasBacklog = false;
+    QElapsedTimer timeout;
+    timeout.start();
+    while ((!producerHasBacklog || transferSessionId == 0) &&
+           timeout.elapsed() < 5000) {
+        for (const AppleFileTransferEvent& event : service.takeEvents()) {
+            if (event.direction != AppleFileTransferEvent::Direction::ToRemote) {
+                continue;
+            }
+            if (event.kind == AppleFileTransferEvent::Kind::Started) {
+                transferSessionId = event.sessionId;
+            }
+            producerHasBacklog = producerHasBacklog ||
+                    (event.kind == AppleFileTransferEvent::Kind::Progress &&
+                     event.progress >= 0.25);
+        }
+        QThread::yieldCurrentThread();
+    }
+    require(transferSessionId != 0 && producerHasBacklog,
+            "file-transfer rejection test could not create producer backlog");
+
+    require(service.receive(AppleFileTransferProtocol::completion(
+                                    transferSessionId,
+                                    5,
+                                    QStringLiteral("rejected 2.dmg")),
+                            &error),
+            qPrintable(error));
+    bool failedImmediately = false;
+    bool explainedExternalVolumeFailure = false;
+    for (const AppleFileTransferEvent& event : service.takeEvents()) {
+        if (event.sessionId == transferSessionId &&
+                event.kind == AppleFileTransferEvent::Kind::Failed) {
+            failedImmediately = true;
+            explainedExternalVolumeFailure =
+                    event.errorText.contains(QStringLiteral("external volume")) &&
+                    event.errorText.contains(QStringLiteral("internal disk")) &&
+                    event.errorText.contains(QStringLiteral("error code 5"));
+        }
+    }
+    require(failedImmediately,
+            "an early Mac rejection allowed the producer to continue to 100 percent");
+    require(explainedExternalVolumeFailure,
+            "an external-volume rejection did not explain the macOS workaround");
+    require(service.takeOutbound(1).isEmpty(),
+            "queued file payload survived an early Mac rejection");
+    service.close();
+}
+
+void testAppleRemoteFileDragWaitsUntilPointerLeavesStream()
+{
+    AppleRemoteFileDrag drag;
+    drag.sessionId = 0x3300;
+    drag.sourcePaths = {QStringLiteral("/Users/test/report.pdf")};
+
+    AppleRemoteFileDragGate gate;
+    gate.update(drag);
+    require(!gate.takeIfEligible(true, true).has_value(),
+            "remote file drag activated while the pointer was still in the stream");
+    require(gate.hasPending(),
+            "remote file drag was discarded before it could leave the stream");
+    require(!gate.takeIfEligible(false, false).has_value(),
+            "remote file drag activated without the left button held");
+    const std::optional<AppleRemoteFileDrag> activated =
+            gate.takeIfEligible(true, false);
+    require(activated.has_value() && activated->sessionId == drag.sessionId,
+            "remote file drag did not activate after leaving the stream");
+    require(!gate.hasPending(),
+            "activated remote file drag remained pending");
+
+    // Native type-32 session IDs are informational and may be reused. Swift
+    // replaces its published drag on every non-empty notification, so the
+    // Windows gate must not permanently suppress a later drag with the same
+    // ID after the preceding native drag session has ended.
+    gate.update(drag);
+    require(gate.hasPending(),
+            "a later remote drag reusing its session ID was suppressed");
+    const std::optional<AppleRemoteFileDrag> repeated =
+            gate.takeIfEligible(true, false);
+    require(repeated.has_value() && repeated->sessionId == drag.sessionId,
+            "a later remote drag with the same session ID could not activate");
+}
+
+void testAppleRemoteFileDragEndDoesNotDropAgainOnTheMac()
+{
+    AppleRemoteFileDragInputState input;
+    AppleRemoteFileDragInputTransition transition = input.nativeDragBegan(1);
+    require(transition.buttons == 0 && !transition.forwardToRemote,
+            "starting a local promised-file drag forwarded a remote release");
+
+    transition = input.nativeDragEnded(transition.buttons);
+    require(transition.buttons == 0 && !transition.forwardToRemote,
+            "ending a local promised-file drag completed a duplicate Mac drop");
+
+    transition = input.localLeftButtonChanged(false, transition.buttons);
+    require(transition.buttons == 0 && !transition.forwardToRemote,
+            "the stale SDL mouse-up escaped native drag ownership");
+
+    transition = input.localLeftButtonChanged(true, transition.buttons);
+    require(transition.buttons == 1 && transition.forwardToRemote,
+            "a new physical drag remained suppressed after the prior drag ended");
+    transition = input.localLeftButtonChanged(false, transition.buttons);
+    require(transition.buttons == 0 && transition.forwardToRemote,
+            "a new physical drag did not regain normal remote input ownership");
+
+    transition = input.nativeDragBegan(1);
+    transition = input.nativeDragStartFailed(transition.buttons);
+    require(transition.buttons == 1 && !transition.forwardToRemote,
+            "a native drag startup failure lost the held remote button state");
+}
+
+#ifdef Q_OS_WIN
+void testAppleWindowsPromisedFileExposesDescriptorAndContents()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(),
+            "promised-file data-object temporary directory failed");
+    QByteArray expected("remote promised file contents");
+    expected.append('\0');
+    expected.append("with binary");
+    const QString stagedPath = temporary.filePath(
+            QStringLiteral("unrelated-staging-name.tmp"));
+    QFile stagedFile(stagedPath);
+    require(stagedFile.open(QIODevice::WriteOnly),
+            "promised-file test payload could not be created");
+    require(stagedFile.write(expected) == expected.size(),
+            "promised-file test payload was truncated");
+    stagedFile.close();
+
+    QString descriptorName;
+    QByteArray actual;
+    QString error;
+    require(testAppleWindowsPromisedFileDataObject(
+                    QStringLiteral("/Users/test/Report.pkg"),
+                    stagedPath,
+                    &descriptorName,
+                    &actual,
+                    &error),
+            qPrintable(QStringLiteral(
+                    "Windows promised-file formats were unavailable: %1")
+                    .arg(error)));
+    require(descriptorName == QStringLiteral("Report.pkg"),
+            "the promised-file descriptor exposed the staging filename");
+    require(actual == expected,
+            "the promised-file content stream did not match the remote file");
+}
+
+void testAppleWindowsPromisedFileMetadataDoesNotStartTransfer()
+{
+    QString error;
+    require(testAppleWindowsPromisedFileMetadataIsLazy(&error),
+            qPrintable(error));
+}
+
+void testAppleWindowsPromisedFileAsyncCompletionCanRepeat()
+{
+    QString error;
+    require(testAppleWindowsPromisedFileAsyncCompletionIsReusable(&error),
+            qPrintable(error));
+}
+
+void testAppleWindowsPromisedFilesReachTwoShellFolders()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(),
+            "repeated Shell drop temporary directory failed");
+    const QString firstStaged = temporary.filePath(
+            QStringLiteral("first-staged.bin"));
+    const QString secondStaged = temporary.filePath(
+            QStringLiteral("second-staged.bin"));
+    const QString firstDestination = temporary.filePath(
+            QStringLiteral("first-destination"));
+    const QString secondDestination = temporary.filePath(
+            QStringLiteral("second-destination"));
+    require(QDir().mkpath(firstDestination) &&
+                    QDir().mkpath(secondDestination),
+            "repeated Shell drop destinations could not be created");
+    QFile first(firstStaged);
+    QFile second(secondStaged);
+    require(first.open(QIODevice::WriteOnly) &&
+                    first.write("first") == 5 &&
+                    second.open(QIODevice::WriteOnly) &&
+                    second.write("second") == 6,
+            "repeated Shell drop fixtures could not be created");
+    first.close();
+    second.close();
+
+    QString error;
+    require(testAppleWindowsPromisedFilesDropIntoShellFolders(
+                    QStringLiteral("/Users/test/First.pkg"),
+                    firstStaged,
+                    firstDestination,
+                    QStringLiteral("/Users/test/Second.pkg"),
+                    secondStaged,
+                    secondDestination,
+                    &error),
+            qPrintable(error));
+    QFile firstResult(QDir(firstDestination).filePath(
+            QStringLiteral("First.pkg")));
+    QFile secondResult(QDir(secondDestination).filePath(
+            QStringLiteral("Second.pkg")));
+    require(firstResult.open(QIODevice::ReadOnly) &&
+                    firstResult.readAll() == QByteArrayLiteral("first") &&
+                    secondResult.open(QIODevice::ReadOnly) &&
+                    secondResult.readAll() == QByteArrayLiteral("second"),
+            "a repeated promised-file drop did not reach its selected Shell folder");
+}
+#endif
+
+void testAppleLocalFileDragTracksTheHoveredRemoteTarget()
+{
+    QStringList actions;
+    AppleLocalFileDragLifecycle lifecycle(
+            [](const AppleFileDragPoint&) { return true; },
+            [&actions](const QStringList& paths) {
+                actions.append(QStringLiteral("announce:%1").arg(paths.first()));
+                return true;
+            },
+            [&actions](const AppleFileDragPoint& point,
+                       AppleLocalFileDragPointerAction action) {
+                actions.append(QStringLiteral("pointer:%1,%2:%3")
+                                       .arg(point.x)
+                                       .arg(point.y)
+                                       .arg(action ==
+                                                    AppleLocalFileDragPointerAction::Release
+                                            ? QStringLiteral("up")
+                                            : QStringLiteral("down")));
+            },
+            [&actions]() {
+                actions.append(QStringLiteral("cancel"));
+            });
+    require(lifecycle.enter(1, {QStringLiteral("C:/test/report.pdf")},
+                            {100, 120, 0}),
+            "local file drag did not enter the remote stream");
+    lifecycle.move({180, 210, 0});
+    lifecycle.drop({240, 260, 0});
+    require(actions == QStringList{
+                        QStringLiteral("announce:C:/test/report.pdf"),
+                        QStringLiteral("pointer:100,120:down"),
+                        QStringLiteral("pointer:180,210:down"),
+                        QStringLiteral("pointer:240,260:up")},
+            "local file drag did not preserve enter, hover, and drop coordinates");
+}
+
+void testAppleLocalFileDragSurvivesAWindowBoundary()
+{
+    QStringList actions;
+    AppleLocalFileDragLifecycle lifecycle(
+            [](const AppleFileDragPoint&) { return true; },
+            [&actions](const QStringList& paths) {
+                actions.append(QStringLiteral("announce:%1").arg(paths.first()));
+                return true;
+            },
+            [&actions](const AppleFileDragPoint& point,
+                       AppleLocalFileDragPointerAction action) {
+                actions.append(QStringLiteral("pointer:%1,%2:%3")
+                                       .arg(point.x)
+                                       .arg(point.y)
+                                       .arg(action ==
+                                                    AppleLocalFileDragPointerAction::Release
+                                            ? QStringLiteral("up")
+                                            : QStringLiteral("down")));
+            },
+            [&actions]() {
+                actions.append(QStringLiteral("cancel"));
+            });
+    const QStringList paths{QStringLiteral("C:/test/report.pdf")};
+    require(lifecycle.enter(1, paths, {100, 120, 0}),
+            "local file drag did not enter the remote stream");
+    lifecycle.leave();
+    require(lifecycle.enter(1, paths, {180, 210, 0}),
+            "a system drag could not re-enter after Windows changed drop targets");
+    lifecycle.drop({240, 260, 0});
+    require(actions == QStringList{
+                        QStringLiteral("announce:C:/test/report.pdf"),
+                        QStringLiteral("pointer:100,120:down"),
+                        QStringLiteral("pointer:180,210:down"),
+                        QStringLiteral("pointer:240,260:up")},
+            "crossing a native window boundary restarted the remote drag");
+}
+
+void testAppleLocalFileDragSeparatesRepeatedDragsOfTheSameFile()
+{
+    QStringList actions;
+    AppleLocalFileDragLifecycle lifecycle(
+            [](const AppleFileDragPoint&) { return true; },
+            [&actions](const QStringList&) {
+                actions.append(QStringLiteral("announce"));
+                return true;
+            },
+            [&actions](const AppleFileDragPoint&,
+                       AppleLocalFileDragPointerAction action) {
+                actions.append(action ==
+                                       AppleLocalFileDragPointerAction::Release
+                               ? QStringLiteral("up")
+                               : QStringLiteral("down"));
+            },
+            [&actions]() { actions.append(QStringLiteral("cancel")); });
+    const QStringList paths{QStringLiteral("C:/test/report.pdf")};
+    require(lifecycle.enter(1, paths, {100, 120, 0}),
+            "the first system drag did not start");
+    lifecycle.leave();
+    require(lifecycle.enter(2, paths, {180, 210, 0}),
+            "a later system drag of the same path did not start");
+    lifecycle.drop({180, 210, 0});
+    require(actions == QStringList{
+                        QStringLiteral("announce"),
+                        QStringLiteral("down"),
+                        QStringLiteral("cancel"),
+                        QStringLiteral("up"),
+                        QStringLiteral("announce"),
+                        QStringLiteral("down"),
+                        QStringLiteral("up")},
+            "two physical drags of the same path shared one remote offer");
+}
+
+void testAppleLocalFileDragRejectsNonVideoCoordinatesBeforeAnnouncing()
+{
+    int announcements = 0;
+    int pointers = 0;
+    AppleLocalFileDragLifecycle lifecycle(
+            [](const AppleFileDragPoint& point) { return point.x >= 0; },
+            [&announcements](const QStringList&) {
+                ++announcements;
+                return true;
+            },
+            [&pointers](const AppleFileDragPoint&,
+                        AppleLocalFileDragPointerAction) { ++pointers; },
+            []() {});
+    require(!lifecycle.enter(
+                    1,
+                    {QStringLiteral("C:/test/report.pdf")},
+                    {-1, 120, 0}),
+            "a file drag started outside the remote video viewport");
+    require(announcements == 0 && pointers == 0 && !lifecycle.isActive(),
+            "an invalid drop point emitted partial remote drag state");
+}
+
+void testWindowsPromisedFileDragRequiresTheWindowThread()
+{
+#ifdef Q_OS_WIN
+    HWND window = CreateWindowExW(
+            0, L"STATIC", L"Apple drag affinity test",
+            WS_OVERLAPPED, 0, 0, 64, 64,
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    require(window != nullptr,
+            "the promised-file affinity test window could not be created");
+    AppleWindowsRemoteFileDragSource source(window);
+    require(source.isValid(),
+            "the promised-file source rejected a valid test window");
+
+    bool began = true;
+    QString error;
+    std::thread wrongThread([&]() {
+        began = source.begin(
+                {},
+                [](const std::atomic_bool&, QStringList*, QString*) {
+                    return false;
+                },
+                [](AppleWindowsRemoteFileDragResult, const QString&) {},
+                &error);
+    });
+    wrongThread.join();
+    DestroyWindow(window);
+    require(!began && error.contains(QStringLiteral("window thread")),
+            "a promised-file drag was allowed to run outside its HWND thread");
+#endif
+}
+
+void testAppleFileTransferServiceReceivesRemoteFile()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(), "file-transfer service temporary directory failed");
+    const QByteArray contents(140000, 'R');
+    const QString source = QDir(temporary.path()).filePath(
+            QStringLiteral("sender-source.bin"));
+    QFile sourceFile(source);
+    require(sourceFile.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
+                    sourceFile.write(contents) == contents.size(),
+            "file-transfer service source could not be created");
+    sourceFile.close();
+
+    AppleFileTransferService service;
+    service.setAvailable(true);
+    AppleRemoteFileDrag drag;
+    drag.sessionId = 0x5000;
+    drag.sourcePaths = {QStringLiteral("/Users/test/remote-source.bin")};
+    const QString destination = QDir(temporary.path()).filePath(
+            QStringLiteral("downloads"));
+    std::atomic_bool cancelled{false};
+    QStringList materializedPaths;
+    QString materializeError;
+    bool materialized = false;
+    std::thread materializer([&]() {
+        materialized = service.materializeRemoteDrag(
+                drag,
+                destination,
+                cancelled,
+                &materializedPaths,
+                &materializeError);
+    });
+
+    QList<QByteArray> commands;
+    QElapsedTimer commandTimeout;
+    commandTimeout.start();
+    while (commands.isEmpty() && commandTimeout.elapsed() < 5000) {
+        commands = service.takeOutbound(8);
+        QThread::yieldCurrentThread();
+    }
+    require(commands.size() == 1 &&
+                    static_cast<quint8>(commands.first().at(0)) == 0x22,
+            "remote receive did not queue its native start command");
+    bool ok = false;
+    const quint32 sessionId = AppleWire::readUInt32(
+            commands.first(), 10, &ok);
+    require(ok && sessionId != 0,
+            "remote receive start command omitted its session ID");
+
+    QString error;
+    AppleFileCopySender sender;
+    require(sender.run(
+                    source,
+                    sessionId,
+                    [&service](const QByteArray& message,
+                               quint64,
+                               QString* callbackError) {
+                        for (const QByteArray& fragment :
+                             AppleFileTransferProtocol::fragments(message)) {
+                            if (!service.receive(fragment, callbackError)) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    },
+                    {},
+                    &cancelled,
+                    &error),
+            qPrintable(error));
+    materializer.join();
+    require(materialized &&
+                    materializedPaths == QStringList{
+                            QDir(destination).filePath(
+                                    QStringLiteral("remote-source.bin"))},
+            qPrintable(materializeError));
+
+    const QString received = QDir(destination).filePath(
+            QStringLiteral("remote-source.bin"));
+    QFile receivedFile(received);
+    require(receivedFile.open(QIODevice::ReadOnly) &&
+                    receivedFile.readAll() == contents,
+            "file-transfer service changed received remote file contents");
+    bool completed = false;
+    for (const AppleFileTransferEvent& event : service.takeEvents()) {
+        completed = completed ||
+                (event.kind == AppleFileTransferEvent::Kind::Completed &&
+                 event.direction ==
+                         AppleFileTransferEvent::Direction::FromRemote &&
+                 event.sessionId == sessionId && event.path == received);
+    }
+    require(completed,
+            "file-transfer service did not publish remote completion");
+    service.close();
+}
+
+void testAppleFileTransferServiceLimitsConcurrentCopies()
+{
+    QTemporaryDir temporary;
+    require(temporary.isValid(),
+            "file-transfer concurrency temporary directory failed");
+    AppleFileTransferService service;
+    service.setAvailable(true);
+    AppleRemoteFileDrag drag;
+    drag.sessionId = 0x7000;
+    for (int index = 0; index < 5; ++index) {
+        drag.sourcePaths.append(
+                QStringLiteral("/Users/test/remote-%1.bin").arg(index));
+    }
+    QString error;
+    require(service.acceptRemoteDrag(drag, temporary.path(), &error),
+            qPrintable(error));
+    const QList<QByteArray> initial = service.takeOutbound(8);
+    require(initial.size() == 4,
+            "file-transfer service started more than four concurrent copies");
+
+    bool ok = false;
+    const quint32 sessionId = AppleWire::readUInt32(initial.first(), 10, &ok);
+    require(ok && sessionId != 0,
+            "file-transfer concurrency start omitted its session ID");
+    AppleFileCopySummary summary;
+    summary.rootIsFile = true;
+    summary.logicalBytes = 1;
+    summary.physicalBytes = 1;
+    summary.fileCount = 1;
+    AppleFileCopyItemMetadata item;
+    item.type = AppleFileCopyItemType::File;
+    item.dataForkSize = 1;
+    item.mode = 0100600;
+    item.name = QStringLiteral("remote-0.bin");
+    const QList<QByteArray> frames = {
+        AppleFileTransferProtocol::senderSummary(sessionId, summary, &error),
+        AppleFileTransferProtocol::senderItem(sessionId, item, &error),
+        AppleFileTransferProtocol::senderData(
+                sessionId, QByteArrayLiteral("X"), &error),
+        AppleFileTransferProtocol::senderDone(sessionId, 0, &error),
+    };
+    for (const QByteArray& frame : frames) {
+        require(!frame.isEmpty() && service.receive(frame, &error),
+                qPrintable(error));
+    }
+    const QList<QByteArray> replacement = service.takeOutbound(8);
+    require(replacement.size() == 1 &&
+                    AppleWire::readUInt16(replacement.first(), 8, &ok) == 1 &&
+                    ok,
+            "file-transfer service did not start the next queued copy");
+    service.close();
+}
+
 void testLocalClipboardRefreshesWhenStreamWindowRegainsFocus()
 {
     AppleLocalClipboardTracker tracker;
@@ -1739,6 +2862,24 @@ void testNativePresentationFactoryUsesLowLatencyAdapter()
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
+#ifdef Q_OS_WIN
+    if (application.arguments().contains(
+                QStringLiteral("--windows-promised-file-test"))) {
+        std::fprintf(stderr,
+                     "testAppleWindowsPromisedFileExposesDescriptorAndContents\n");
+        testAppleWindowsPromisedFileExposesDescriptorAndContents();
+        std::fprintf(stderr,
+                     "testAppleWindowsPromisedFileMetadataDoesNotStartTransfer\n");
+        testAppleWindowsPromisedFileMetadataDoesNotStartTransfer();
+        std::fprintf(stderr,
+                     "testAppleWindowsPromisedFileAsyncCompletionCanRepeat\n");
+        testAppleWindowsPromisedFileAsyncCompletionCanRepeat();
+        std::fprintf(stderr,
+                     "testAppleWindowsPromisedFilesReachTwoShellFolders\n");
+        testAppleWindowsPromisedFilesReachTwoShellFolders();
+        return 0;
+    }
+#endif
     std::fprintf(stderr, "testFeatureEnabledBuildDiscoversByDefault\n");
     testFeatureEnabledBuildDiscoversByDefault();
     std::fprintf(stderr, "testSavedConnectionIdentityAndSecretBoundary\n");
@@ -1783,6 +2924,8 @@ int main(int argc, char* argv[])
     testDecodedTilesPublishAsAtomicSenderFrames();
     std::fprintf(stderr, "testDecodedTilesPublishOnFlsEndOfDataWithoutTearing\n");
     testDecodedTilesPublishOnFlsEndOfDataWithoutTearing();
+    std::fprintf(stderr, "testDecodedTilesDoNotRetainFramesBehindMissingDecoderOutput\n");
+    testDecodedTilesDoNotRetainFramesBehindMissingDecoderOutput();
     std::fprintf(stderr, "testUdpPunchIgnoresClosedOptimisticPortReset\n");
     testUdpPunchIgnoresClosedOptimisticPortReset();
     std::fprintf(stderr, "testStageFourCursorAndDisplayLayoutEvents\n");
@@ -1793,6 +2936,46 @@ int main(int argc, char* argv[])
     testRemoteCursorCacheMatchesSwiftFallbacks();
     std::fprintf(stderr, "testStageFourTextOnlyClipboardExchange\n");
     testStageFourTextOnlyClipboardExchange();
+    std::fprintf(stderr, "testAppleFileTransferNativeWireContract\n");
+    testAppleFileTransferNativeWireContract();
+    std::fprintf(stderr, "testAppleFileCopyDirectoryRoundTrip\n");
+    testAppleFileCopyDirectoryRoundTrip();
+    std::fprintf(stderr, "testAppleFileCopySenderBeginsWithNativeUncompressedData\n");
+    testAppleFileCopySenderBeginsWithNativeUncompressedData();
+    std::fprintf(stderr, "testAppleFileTransferKeepsLogicalMessageFragmentsAtomic\n");
+    testAppleFileTransferKeepsLogicalMessageFragmentsAtomic();
+    std::fprintf(stderr, "testAppleFileTransferProgressNeverMovesBackward\n");
+    testAppleFileTransferProgressNeverMovesBackward();
+    std::fprintf(stderr, "testAppleFileTransferStopsImmediatelyAfterRemoteRejection\n");
+    testAppleFileTransferStopsImmediatelyAfterRemoteRejection();
+    std::fprintf(stderr, "testAppleRemoteFileDragWaitsUntilPointerLeavesStream\n");
+    testAppleRemoteFileDragWaitsUntilPointerLeavesStream();
+    std::fprintf(stderr, "testAppleRemoteFileDragEndDoesNotDropAgainOnTheMac\n");
+    testAppleRemoteFileDragEndDoesNotDropAgainOnTheMac();
+#ifdef Q_OS_WIN
+    std::fprintf(stderr, "testAppleWindowsPromisedFileExposesDescriptorAndContents\n");
+    testAppleWindowsPromisedFileExposesDescriptorAndContents();
+    std::fprintf(stderr, "testAppleWindowsPromisedFileMetadataDoesNotStartTransfer\n");
+    testAppleWindowsPromisedFileMetadataDoesNotStartTransfer();
+    std::fprintf(stderr, "testAppleWindowsPromisedFileAsyncCompletionCanRepeat\n");
+    testAppleWindowsPromisedFileAsyncCompletionCanRepeat();
+    std::fprintf(stderr, "testAppleWindowsPromisedFilesReachTwoShellFolders\n");
+    testAppleWindowsPromisedFilesReachTwoShellFolders();
+#endif
+    std::fprintf(stderr, "testAppleLocalFileDragTracksTheHoveredRemoteTarget\n");
+    testAppleLocalFileDragTracksTheHoveredRemoteTarget();
+    std::fprintf(stderr, "testAppleLocalFileDragSurvivesAWindowBoundary\n");
+    testAppleLocalFileDragSurvivesAWindowBoundary();
+    std::fprintf(stderr, "testAppleLocalFileDragSeparatesRepeatedDragsOfTheSameFile\n");
+    testAppleLocalFileDragSeparatesRepeatedDragsOfTheSameFile();
+    std::fprintf(stderr, "testAppleLocalFileDragRejectsNonVideoCoordinatesBeforeAnnouncing\n");
+    testAppleLocalFileDragRejectsNonVideoCoordinatesBeforeAnnouncing();
+    std::fprintf(stderr, "testWindowsPromisedFileDragRequiresTheWindowThread\n");
+    testWindowsPromisedFileDragRequiresTheWindowThread();
+    std::fprintf(stderr, "testAppleFileTransferServiceReceivesRemoteFile\n");
+    testAppleFileTransferServiceReceivesRemoteFile();
+    std::fprintf(stderr, "testAppleFileTransferServiceLimitsConcurrentCopies\n");
+    testAppleFileTransferServiceLimitsConcurrentCopies();
     std::fprintf(stderr, "testLocalClipboardRefreshesWhenStreamWindowRegainsFocus\n");
     testLocalClipboardRefreshesWhenStreamWindowRegainsFocus();
     std::fprintf(stderr, "testApplePerformanceOverlayFollowsSharedSettingsAndPlacement\n");

@@ -8,13 +8,18 @@ INCLUDEPATH += \
     ../../app
 
 win32 {
+    DEFINES += APPLE_FILE_DRAG_TESTS
     INCLUDEPATH += \
         ../../libs/windows/include/x64 \
         ../../libs/windows/include/x64/SDL2 \
         ../../libs/windows/include
-    LIBS += -L../../libs/windows/lib/x64 -llibcrypto -lavcodec -lavutil -lswscale -lSDL2 -ladvapi32 -ld3d11 -ldxgi -luser32 -lws2_32
-    SOURCES += ../../app/backend/apple/appled3d11renderer.cpp
-    HEADERS += ../../app/backend/apple/appled3d11renderer.h
+    LIBS += -L../../libs/windows/lib/x64 -llibcrypto -lavcodec -lavutil -lswscale -lSDL2 -ladvapi32 -ld3d11 -ldxgi -luser32 -lgdi32 -lws2_32 -lole32 -lshell32 -lshlwapi -luuid
+    SOURCES += \
+        ../../app/backend/apple/appled3d11renderer.cpp \
+        ../../app/backend/apple/applefiledrag_win.cpp
+    HEADERS += \
+        ../../app/backend/apple/appled3d11renderer.h \
+        ../../app/backend/apple/applefiledrag_win.h
 }
 
 macx {
@@ -38,6 +43,10 @@ SOURCES += \
     ../../app/backend/apple/applecredentialstore.cpp \
     ../../app/backend/apple/applekeyboardmapper.cpp \
     ../../app/backend/apple/appleprotocol.cpp \
+    ../../app/backend/apple/applefiledrag.cpp \
+    ../../app/backend/apple/applefiletransfer.cpp \
+    ../../app/backend/apple/applefilecopy.cpp \
+    ../../app/backend/apple/applefiletransferservice.cpp \
     ../../app/backend/apple/applecontrolfeatures.cpp \
     ../../app/backend/apple/appleaudiostream.cpp \
     ../../app/backend/apple/appleauthenticator.cpp \
@@ -54,6 +63,10 @@ HEADERS += \
     ../../app/backend/apple/applecredentialstore.h \
     ../../app/backend/apple/applekeyboardmapper.h \
     ../../app/backend/apple/appleprotocol.h \
+    ../../app/backend/apple/applefiledrag.h \
+    ../../app/backend/apple/applefiletransfer.h \
+    ../../app/backend/apple/applefilecopy.h \
+    ../../app/backend/apple/applefiletransferservice.h \
     ../../app/backend/apple/applecontrolfeatures.h \
     ../../app/backend/apple/appleaudiostream.h \
     ../../app/backend/apple/appleauthenticator.h \

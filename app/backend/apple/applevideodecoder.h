@@ -131,7 +131,7 @@ class AppleHevcDecoder
 public:
     using Backend = AppleVideoDecoderBackend;
 
-    explicit AppleHevcDecoder(bool preferHardware);
+    explicit AppleHevcDecoder(bool preferHardware, int tileCount = 1);
     ~AppleHevcDecoder();
 
     AppleHevcDecoder(const AppleHevcDecoder&) = delete;
@@ -148,10 +148,13 @@ public:
     bool isOpen() const { return m_Context != nullptr; }
     Backend backend() const { return m_Backend; }
     bool hardwareFallbackOccurred() const { return m_HardwareFallbackOccurred; }
+    quint64 generation() const { return m_Generation; }
     std::shared_ptr<AppleVideoBackendContext> presentationContext() const;
 
 private:
-    bool openBackend(bool hardware, QString* error);
+    bool openBackend(bool hardware,
+                     QString* error,
+                     AVBufferRef* reusableHardwareDevice = nullptr);
     QList<AppleDecodedTile> decodePacket(const QByteArray& annexB,
                                          int tileIndex,
                                          quint32 timestamp,
@@ -168,8 +171,11 @@ private:
     bool prepareHardwareFramesContext(AVCodecContext* context, int format);
 
     bool m_PreferHardware = false;
+    int m_HardwareSurfaceSlack = 3;
     bool m_ParameterSetsSubmitted = false;
     bool m_HardwareFallbackOccurred = false;
+    int m_ConsecutiveHardwareFailures = 0;
+    quint64 m_Generation = 0;
     Backend m_Backend = Backend::Software;
     const AVCodec* m_Codec = nullptr;
     AVCodecContext* m_Context = nullptr;

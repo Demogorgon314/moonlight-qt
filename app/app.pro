@@ -26,6 +26,11 @@ apple-screen-sharing {
         backend/apple/applecredentialstore.cpp \
         backend/apple/applekeyboardmapper.cpp \
         backend/apple/appleprotocol.cpp \
+        backend/apple/applefiledrag.cpp \
+        backend/apple/applefiletransfer.cpp \
+        backend/apple/applefilecopy.cpp \
+        backend/apple/applefiletransferservice.cpp \
+        backend/apple/applefiletransferprogress.cpp \
         backend/apple/applecontrolfeatures.cpp \
         backend/apple/appleaudiostream.cpp \
         backend/apple/appleauthenticator.cpp \
@@ -42,6 +47,12 @@ apple-screen-sharing {
         backend/apple/applecredentialstore.h \
         backend/apple/applekeyboardmapper.h \
         backend/apple/appleprotocol.h \
+        backend/apple/applefiledrag.h \
+        backend/apple/applefiletransfer.h \
+        backend/apple/applefilecopy.h \
+        backend/apple/applefiletransferservice.h \
+        backend/apple/applefiletransferprogress.h \
+        backend/apple/applefiletransferdialog.h \
         backend/apple/applecontrolfeatures.h \
         backend/apple/appleaudiostream.h \
         backend/apple/appleauthenticator.h \
@@ -55,16 +66,22 @@ apple-screen-sharing {
     DISTFILES += backend/apple/LICENSE.ScreenSharingProtocol
 
     win32 {
-        LIBS += -ladvapi32
-        SOURCES += backend/apple/appled3d11renderer.cpp
-        HEADERS += backend/apple/appled3d11renderer.h
+        LIBS += -ladvapi32 -lshell32 -lshlwapi
+        SOURCES += \
+            backend/apple/appled3d11renderer.cpp \
+            backend/apple/applefiledrag_win.cpp \
+            backend/apple/applefiletransferdialog_win.cpp
+        HEADERS += \
+            backend/apple/appled3d11renderer.h \
+            backend/apple/applefiledrag_win.h
     }
 
     macx {
         LIBS += -framework Security -framework AudioToolbox
         SOURCES += \
             backend/apple/applemetalrenderer.mm \
-            backend/apple/appleaudiodecoder_macos.mm
+            backend/apple/appleaudiodecoder_macos.mm \
+            backend/apple/applefiletransferdialog_macos.mm
         HEADERS += backend/apple/applemetalrenderer.h
     }
 }

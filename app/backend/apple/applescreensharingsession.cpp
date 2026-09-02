@@ -1,5 +1,12 @@
 #include "applescreensharingsession.h"
 
+#include "applefiletransferdialog.h"
+#include "applefiledrag.h"
+#include "applefiletransferprogress.h"
+#ifdef Q_OS_WIN
+#include "applefiledrag_win.h"
+#endif
+
 #include "appleauthenticator.h"
 #include "appleaudiostream.h"
 #include "applecredentialstore.h"
@@ -15,6 +22,7 @@
 #include <QClipboard>
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFont>
 #include <QFontDatabase>
 #include <QFontMetrics>
@@ -29,9 +37,11 @@
 #include <QRunnable>
 #include <QSemaphore>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QThread>
 #include <QThreadPool>
+#include <QTemporaryDir>
 #include <QTimer>
 
 #ifdef Q_OS_WIN
@@ -571,7 +581,7 @@ private:
                     m_SourceToTile.insert(m_Sources.at(index), index);
                 }
                 m_Decoder = std::make_unique<AppleHevcDecoder>(
-                        m_PreferHardware);
+                        m_PreferHardware, m_Negotiation.canvas.tileCount);
                 if (!m_Decoder->open(error) ||
                         !requestKeyFrames(media, error)) {
                     return false;
@@ -602,10 +612,30 @@ private:
             QString decodeError;
             QElapsedTimer decodeClock;
             decodeClock.start();
+            const quint64 decoderGeneration = m_Decoder->generation();
             QList<AppleDecodedTile> frames = m_Decoder->decode(
                     ready, m_Assembler.parameterSets(), tile, &decodeError);
             ++m_PerformanceDecodeCalls;
             m_PerformanceDecodeNanoseconds += decodeClock.nsecsElapsed();
+            if (m_Decoder->generation() != decoderGeneration) {
+                // A decoder replacement is a hard reference discontinuity.
+                // Do not let the submitted tile remain at the head of the
+                // atomic frame queue or feed inter pictures into the fresh
+                // codec before the requested random-access picture arrives.
+                m_FrameBatcher.reset();
+                m_Assembler.discardIncomplete();
+                m_DecodingOrder.reset();
+                m_AwaitingRandomAccessPicture = true;
+                m_EnteredRefreshState = true;
+                if (!requestKeyFrames(media, error)) {
+                    return false;
+                }
+                m_LastKeyFrameAt = now;
+                qWarning().noquote()
+                        << "Apple display 2 HEVC decoder reset:"
+                        << decodeError;
+                return true;
+            }
             if (!frames.isEmpty()) {
                 m_PerformanceDecodedTiles +=
                         static_cast<quint64>(frames.size());
@@ -917,6 +947,10 @@ private:
     {
         m_Session->m_ReconnectRequested.store(false);
         m_Session->m_NativePrecisionScrollSupported.store(false);
+        m_Session->m_FileTransferSupported.store(false);
+        m_Session->m_FileTransferService->reset();
+        m_Session->m_FileTransferService->setControlling(
+                !m_Session->m_Observing.load());
         AppleTcpTransport tcp;
         AppleAuthenticator authenticator;
         AppleAuthenticatedControl authenticated;
@@ -946,10 +980,17 @@ private:
         if (succeeded) {
             const bool precisionScroll =
                     authenticated.supportsServerCommand(23);
+            const bool fileTransfer =
+                    authenticated.supportsServerCommand(32) &&
+                    authenticated.supportsServerCommand(34);
             m_Session->m_NativePrecisionScrollSupported.store(
                     precisionScroll);
+            m_Session->m_FileTransferSupported.store(fileTransfer);
+            m_Session->m_FileTransferService->setAvailable(fileTransfer);
             qInfo() << "Apple Screen Sharing native precision scrolling:"
                     << (precisionScroll ? "supported" : "legacy fallback");
+            qInfo() << "Apple Screen Sharing native file transfer:"
+                    << (fileTransfer ? "supported" : "unavailable");
         }
 
         AppleControlChannel control;
@@ -1024,6 +1065,7 @@ private:
         }
 
         m_Session->m_ControlReady.store(false);
+        m_Session->m_FileTransferService->setAvailable(false);
         media.close();
         tcp.close();
         return succeeded;
@@ -1201,6 +1243,22 @@ private:
             }
         };
 
+        const auto dispatchFileTransferEvents = [&]() {
+            QList<AppleFileTransferEvent> fileEvents =
+                    m_Session->m_FileTransferService->takeEvents();
+            if (fileEvents.isEmpty()) return;
+            const QPointer<AppleScreenSharingSession> session = m_Session;
+            QMetaObject::invokeMethod(
+                    session,
+                    [session, fileEvents = std::move(fileEvents)]() mutable {
+                        if (session != nullptr) {
+                            session->applyFileTransferEvents(
+                                    std::move(fileEvents));
+                        }
+                    },
+                    Qt::QueuedConnection);
+        };
+
         while (!m_Cancelled->load()) {
             if (m_Session->m_ReconnectRequested.exchange(false)) {
                 if (error != nullptr) {
@@ -1261,10 +1319,32 @@ private:
                 recordControlSent(outbound);
             }
 
+            // File payload is deliberately lower priority than input and
+            // display control. Send one complete logical file-copy message
+            // per loop; its encrypted-record fragments must remain adjacent
+            // just like the Swift writer's atomic send(messages) operation.
+            for (const QByteArray& message :
+                 m_Session->m_FileTransferService->takeOutbound(1)) {
+                if (!control.sendEncrypted(
+                            tcp, message, m_Cancelled, error)) {
+                    return false;
+                }
+            }
+            dispatchFileTransferEvents();
+
             if (tcp.hasPendingData()) {
                 QByteArray message;
                 if (!control.receiveEncrypted(tcp, &message, m_Cancelled, error)) {
                     return false;
+                }
+                QString fileDiagnostic;
+                if (m_Session->m_FileTransferService->receive(
+                            message, &fileDiagnostic)) {
+                    if (!fileDiagnostic.isEmpty()) {
+                        qWarning().noquote()
+                                << "Apple file transfer:" << fileDiagnostic;
+                    }
+                    dispatchFileTransferEvents();
                 }
                 const AppleControlEvents events =
                         AppleControlEventParser::parse(message);
@@ -1452,7 +1532,8 @@ private:
                             }
                             if (!decoder) {
                                 decoder = std::make_unique<AppleHevcDecoder>(
-                                        m_PreferHardware);
+                                        m_PreferHardware,
+                                        activeCanvas.tileCount);
                                 if (!decoder->open(error)) {
                                     return false;
                                 }
@@ -1498,12 +1579,46 @@ private:
                             QElapsedTimer decodeClock;
                             decodeClock.start();
                             ++performanceDecodeCalls;
+                            const quint64 decoderGeneration =
+                                    decoder->generation();
                             QList<AppleDecodedTile> frames = decoder->decode(
                                     ready, assembler.parameterSets(), tile,
                                     &decodeError);
                             performanceDecodeNanoseconds += decodeClock.nsecsElapsed();
                             performanceDecodedTiles +=
                                     static_cast<quint64>(frames.size());
+                            if (decoder->generation() != decoderGeneration) {
+                                // FFmpeg has no VideoToolbox-style completion
+                                // callback for an accepted sample that later
+                                // produces no frame. A codec replacement is
+                                // therefore an explicit discontinuity across
+                                // the decoder, DON queue, and tile batcher.
+                                frames.clear();
+                                frameBatcher.reset();
+                                assembler.discardIncomplete();
+                                decodingOrder.reset();
+                                awaitingRandomAccessPicture = true;
+                                hasEnteredDecodeRefreshState = true;
+                                decoderBackend = decoder->backend();
+                                hardwareFallback =
+                                        decoder->hardwareFallbackOccurred();
+                                if (!requestKeyFrames(
+                                            media, feedback,
+                                            negotiation.offers.videoSynchronizationSource,
+                                            sources, &keyFrameSequence, error)) {
+                                    return false;
+                                }
+                                performanceFirs += static_cast<quint64>(
+                                        sources.size());
+                                lastKeyFrameAt = now;
+                                qWarning().noquote()
+                                        << "Apple HEVC decoder reset:"
+                                        << decodeError
+                                        << "backend="
+                                        << appleVideoDecoderBackendName(
+                                                   decoderBackend);
+                                continue;
+                            }
                             for (const AppleDecodedTile& frame : frames) {
                                 if (!performanceDecodedSourceTimestamps.contains(
                                             frame.rtpTimestamp)) {
@@ -1929,7 +2044,11 @@ AppleScreenSharingSession::AppleScreenSharingSession(
         QObject* parent)
     : StreamSession(parent),
       m_Connection(std::move(connection)),
-      m_Runtime(std::make_unique<LocalStreamRuntime>())
+      m_Runtime(std::make_unique<LocalStreamRuntime>()),
+      m_FileTransferService(std::make_shared<AppleFileTransferService>()),
+      m_RemoteFileDragGate(std::make_unique<AppleRemoteFileDragGate>()),
+      m_RemoteFileDragInputState(
+              std::make_unique<AppleRemoteFileDragInputState>())
 {
     m_WorkerPool.setMaxThreadCount(1);
     m_WorkerPool.setExpiryTimeout(-1);
@@ -1938,6 +2057,7 @@ AppleScreenSharingSession::AppleScreenSharingSession(
 AppleScreenSharingSession::~AppleScreenSharingSession()
 {
     m_Cancelled.store(true);
+    m_FileTransferService->close();
     if (m_Runtime) {
         m_Runtime->requestStop();
     }
@@ -2176,6 +2296,7 @@ void AppleScreenSharingSession::startSession()
 void AppleScreenSharingSession::interruptSession()
 {
     m_Cancelled.store(true);
+    m_FileTransferService->close();
     if (m_Runtime) {
         m_Runtime->requestStop();
     }
@@ -2275,6 +2396,108 @@ QList<AppleOutboundControl> AppleScreenSharingSession::takePendingControls()
     return result;
 }
 
+#ifdef Q_OS_WIN
+void AppleScreenSharingSession::ensureWindowsFileDragLifecycle()
+{
+    if (m_LocalFileDragLifecycle != nullptr) return;
+    m_LocalFileDragLifecycle =
+            std::make_shared<AppleLocalFileDragLifecycle>(
+                    [this](const AppleFileDragPoint& point) {
+                        return remotePoint(
+                                point.x,
+                                point.y,
+                                point.displayIndex).has_value();
+                    },
+                    [this](const QStringList& paths) {
+                        QList<QByteArray> messages;
+                        QString error;
+                        if (!m_FileTransferService->beginLocalDrop(
+                                    paths, &messages, &error)) {
+                            qWarning().noquote()
+                                    << "Apple local file drag could not start:"
+                                    << error;
+                            return false;
+                        }
+                        for (QByteArray& message : messages) {
+                            AppleOutboundControl outbound;
+                            outbound.kind = AppleOutboundControl::Kind::Message;
+                            outbound.message = std::move(message);
+                            queueControl(std::move(outbound));
+                        }
+                        qInfo() << "Apple local file drag entered the remote display";
+                        return true;
+                    },
+                    [this](const AppleFileDragPoint& point,
+                           AppleLocalFileDragPointerAction action) {
+                        const bool pressed = action !=
+                                AppleLocalFileDragPointerAction::Release;
+                        if (!remotePoint(
+                                    point.x,
+                                    point.y,
+                                    point.displayIndex).has_value()) {
+                            if (!pressed && m_LocalFileDragPointerActive) {
+                                queueLocalFileDragPointer(
+                                        m_LastLocalFileDragX,
+                                        m_LastLocalFileDragY,
+                                        m_LastLocalFileDragDisplayIndex,
+                                        false,
+                                        false);
+                                m_LocalFileDragPointerActive = false;
+                            }
+                            return;
+                        }
+                        m_LastLocalFileDragX = point.x;
+                        m_LastLocalFileDragY = point.y;
+                        m_LastLocalFileDragDisplayIndex = point.displayIndex;
+                        m_LocalFileDragPointerActive = pressed;
+                        m_LastMouseX = point.x;
+                        m_LastMouseY = point.y;
+                        queueLocalFileDragPointer(
+                                point.x,
+                                point.y,
+                                point.displayIndex,
+                                pressed,
+                                action ==
+                                        AppleLocalFileDragPointerAction::Move);
+                    },
+                    [this]() {
+                        QList<QByteArray> messages;
+                        m_FileTransferService->cancelLocalDrop(&messages);
+                        for (QByteArray& message : messages) {
+                            AppleOutboundControl outbound;
+                            outbound.kind = AppleOutboundControl::Kind::Message;
+                            outbound.message = std::move(message);
+                            queueControl(std::move(outbound));
+                        }
+                    });
+}
+
+void AppleScreenSharingSession::installWindowsFileDropTarget(
+        SDL_Window* window,
+        int displayIndex)
+{
+    if (window == nullptr) return;
+    ensureWindowsFileDragLifecycle();
+    void* const nativeWindow = nativeHandleForWindow(window);
+    auto target = std::make_unique<AppleWindowsFileDropTarget>(
+            nativeWindow,
+            displayIndex,
+            m_LocalFileDragLifecycle);
+    if (!target->isValid()) {
+        qWarning().noquote()
+                << "Apple native Windows file drop unavailable:"
+                << target->errorString();
+        return;
+    }
+    m_WindowsFileDropTargets.push_back(std::move(target));
+    if (m_WindowsRemoteFileDragSource != nullptr) {
+        m_WindowsRemoteFileDragSource->addStreamWindow(nativeWindow);
+    }
+    qInfo() << "Apple native Windows file drop target enabled for display"
+            << displayIndex + 1;
+}
+#endif
+
 void AppleScreenSharingSession::mediaReady(
         const AppleCanvas& canvas,
         AppleVideoDecoderBackend decoderBackend,
@@ -2328,6 +2551,9 @@ void AppleScreenSharingSession::mediaReady(
                                     .arg(rendererError));
             return;
         }
+#ifdef Q_OS_WIN
+        installWindowsFileDropTarget(m_SecondaryWindow, 1);
+#endif
         m_SecondaryMediaReady = true;
         m_EverMediaReady.store(true);
         qInfo().nospace()
@@ -2368,6 +2594,23 @@ void AppleScreenSharingSession::mediaReady(
         emit displayLaunchError(tr("Couldn’t create the Apple Screen Sharing video window."));
         return;
     }
+#ifdef Q_OS_WIN
+    void* const nativeWindow = nativeHandleForWindow(window);
+    installWindowsFileDropTarget(window, 0);
+    m_WindowsRemoteFileDragSource =
+            std::make_unique<AppleWindowsRemoteFileDragSource>(nativeWindow);
+    if (!m_WindowsRemoteFileDragSource->isValid()) {
+        qWarning() << "Apple native Windows promised-file drag source unavailable";
+        m_WindowsRemoteFileDragSource.reset();
+    }
+    else {
+        if (m_SecondaryWindow != nullptr) {
+            m_WindowsRemoteFileDragSource->addStreamWindow(
+                    nativeHandleForWindow(m_SecondaryWindow));
+        }
+        qInfo() << "Apple native Windows promised-file drag source enabled";
+    }
+#endif
     captureWindowGeometry(window, AppleWindowRole::Primary);
     QString rendererError;
     m_VideoRenderer = createAppleVideoRenderer(
@@ -2666,13 +2909,341 @@ void AppleScreenSharingSession::applyRemoteClipboardText(const QString& text)
             << " UTF-8 bytes";
 }
 
+void AppleScreenSharingSession::activateRemoteFileDragIfEligible(
+        bool pointerInsideStream)
+{
+    if (m_RemoteFileDragGate == nullptr) return;
+    bool leftButtonDown = (m_MouseButtons & 1) != 0;
+#ifdef Q_OS_WIN
+    if (m_WindowsRemoteFileDragSource != nullptr &&
+            m_WindowsRemoteFileDragSource->isValid()) {
+        // SDL can lose its button state as soon as the cursor leaves the
+        // client area. The async type-32 promise must use physical Windows
+        // state and the actual HWND client rectangle instead.
+        leftButtonDown = m_WindowsRemoteFileDragSource->leftButtonDown();
+        pointerInsideStream =
+                m_WindowsRemoteFileDragSource->pointerInsideWindow();
+    }
+#endif
+    const std::optional<AppleRemoteFileDrag> drag =
+            m_RemoteFileDragGate->takeIfEligible(
+                    leftButtonDown, pointerInsideStream);
+    if (!drag.has_value()) return;
+
+    const QPointer<AppleScreenSharingSession> session(this);
+    QTimer::singleShot(0, this, [session, drag]() {
+        if (session == nullptr || session->m_Cancelled.load()) return;
+#ifdef Q_OS_WIN
+        if (session->m_WindowsRemoteFileDragSource != nullptr &&
+                session->m_WindowsRemoteFileDragSource->isValid()) {
+            const QString temporaryRoot = QStandardPaths::writableLocation(
+                    QStandardPaths::TempLocation);
+            auto staging = std::make_shared<QTemporaryDir>(
+                    QDir(temporaryRoot).filePath(
+                            QStringLiteral("Moonlight-AppleDrag-XXXXXX")));
+            if (!staging->isValid()) {
+                const QString error = tr("Couldn’t create temporary storage for the remote drag.");
+                qWarning().noquote() << "Apple promised-file drag:" << error;
+                session->addLaunchWarning(error);
+                return;
+            }
+            // Explorer may complete the copy asynchronously after DoDragDrop
+            // returns, so cleanup is delayed after a successful drop.
+            staging->setAutoRemove(false);
+            const QString stagingPath = staging->path();
+            const std::shared_ptr<AppleFileTransferService> service =
+                    session->m_FileTransferService;
+            // OLE owns the physical mouse-up once DoDragDrop begins. Transfer
+            // ownership before entering its nested message loop.
+            const AppleRemoteFileDragInputTransition began =
+                    session->m_RemoteFileDragInputState->nativeDragBegan(
+                            session->m_MouseButtons);
+            session->m_MouseButtons = began.buttons;
+            qInfo() << "Apple remote promised-file drag entered Windows Explorer";
+            QString startError;
+            const bool started = session->m_WindowsRemoteFileDragSource->begin(
+                    *drag,
+                    [service, drag, staging](
+                            const std::atomic_bool& nativeCancelled,
+                            QStringList* paths,
+                            QString* error) {
+                        return service != nullptr &&
+                                service->materializeRemoteDrag(
+                                        *drag,
+                                        staging->path(),
+                                        nativeCancelled,
+                                        paths,
+                                        error);
+                    },
+                    [session, stagingPath](
+                            AppleWindowsRemoteFileDragResult result,
+                            const QString& error) {
+                        if (session == nullptr) {
+                            QDir(stagingPath).removeRecursively();
+                            return;
+                        }
+                        QMetaObject::invokeMethod(
+                                session,
+                                [session, stagingPath, result, error]() {
+                                    if (session == nullptr) {
+                                        QDir(stagingPath).removeRecursively();
+                                        return;
+                                    }
+                                    if (result == AppleWindowsRemoteFileDragResult::Failed) {
+                                        qWarning().noquote()
+                                                << "Apple promised-file drag failed:"
+                                                << error;
+                                        if (!error.isEmpty()) {
+                                            session->addLaunchWarning(error);
+                                        }
+                                    }
+                                    else if (result == AppleWindowsRemoteFileDragResult::Dropped) {
+                                        qInfo() << "Apple promised files were dropped through Windows Explorer";
+                                    }
+                                    const int cleanupDelay =
+                                            result == AppleWindowsRemoteFileDragResult::Dropped
+                                            ? 10 * 60 * 1000 : 0;
+                                    QTimer::singleShot(
+                                            cleanupDelay,
+                                            QCoreApplication::instance(),
+                                            [stagingPath]() {
+                                                QDir(stagingPath).removeRecursively();
+                                            });
+                                },
+                                Qt::QueuedConnection);
+                    },
+                    &startError);
+            if (started) {
+                const AppleRemoteFileDragInputTransition ended =
+                        session->m_RemoteFileDragInputState->nativeDragEnded(
+                                session->m_MouseButtons);
+                session->m_MouseButtons = ended.buttons;
+                return;
+            }
+            const AppleRemoteFileDragInputTransition failed =
+                    session->m_RemoteFileDragInputState->nativeDragStartFailed(
+                            session->m_MouseButtons);
+            session->m_MouseButtons = failed.buttons;
+            QDir(stagingPath).removeRecursively();
+            qWarning().noquote()
+                    << "Apple promised-file drag could not start:"
+                    << startError;
+            return;
+        }
+#endif
+        // Keep a portable fallback for platforms without a native promised-
+        // file source. Windows normally takes the OLE branch above.
+        QSettings settings;
+        const QString fallbackDirectory =
+                QStandardPaths::writableLocation(
+                        QStandardPaths::DownloadLocation);
+        const QString initialDirectory = settings.value(
+                QStringLiteral("appleScreenSharing/fileTransferDownloadDirectory"),
+                fallbackDirectory).toString();
+        void* ownerWindow = nullptr;
+#ifdef Q_OS_WIN
+        ownerWindow = nativeHandleForWindow(
+                session->m_Runtime != nullptr
+                        ? session->m_Runtime->streamWindow() : nullptr);
+#endif
+        const QString destination = chooseAppleFileTransferDirectory(
+                tr("Save files from %1").arg(session->m_Connection.displayName),
+                initialDirectory,
+                ownerWindow);
+        if (destination.isEmpty()) {
+            qInfo() << "Apple remote file drag was declined after leaving the stream";
+            return;
+        }
+        settings.setValue(
+                QStringLiteral("appleScreenSharing/fileTransferDownloadDirectory"),
+                destination);
+        QString error;
+        if (!session->m_FileTransferService->acceptRemoteDrag(
+                    *drag, destination, &error)) {
+            qWarning().noquote()
+                    << "Apple remote file transfer could not start:"
+                    << error;
+            session->addLaunchWarning(error);
+        }
+    });
+}
+
+void AppleScreenSharingSession::applyFileTransferEvents(
+        QList<AppleFileTransferEvent> events)
+{
+    for (const AppleFileTransferEvent& event : std::as_const(events)) {
+        if (event.kind == AppleFileTransferEvent::Kind::RemoteDrag) {
+            m_RemoteFileDragGate->update(event.remoteDrag);
+            if (!event.remoteDrag.sourcePaths.isEmpty()) {
+                SDL_Window* window = m_Runtime != nullptr
+                        ? m_Runtime->streamWindow() : nullptr;
+                int globalX = 0;
+                int globalY = 0;
+                SDL_GetGlobalMouseState(&globalX, &globalY);
+                int windowX = 0;
+                int windowY = 0;
+                int width = 0;
+                int height = 0;
+                if (window != nullptr) {
+                    SDL_GetWindowPosition(window, &windowX, &windowY);
+                    SDL_GetWindowSize(window, &width, &height);
+                }
+                const bool inside = window != nullptr &&
+                        globalX >= windowX && globalY >= windowY &&
+                        globalX < windowX + width &&
+                        globalY < windowY + height;
+                activateRemoteFileDragIfEligible(inside);
+            }
+            continue;
+        }
+
+        const bool incoming = event.direction ==
+                AppleFileTransferEvent::Direction::FromRemote;
+        if (!m_FileTransferProgressWindow) {
+            const QPointer<AppleScreenSharingSession> session(this);
+            m_FileTransferProgressWindow =
+                    std::make_unique<AppleFileTransferProgressWindow>(
+                            [session](quint32 sessionId, bool paused) {
+                                if (session != nullptr) {
+                                    session->m_FileTransferService->setPaused(
+                                            sessionId, paused);
+                                }
+                            },
+                            [session](quint32 sessionId) {
+                                if (session != nullptr) {
+                                    session->m_FileTransferService->cancel(
+                                            sessionId);
+                                }
+                            });
+        }
+        if (event.kind == AppleFileTransferEvent::Kind::Started ||
+                event.kind == AppleFileTransferEvent::Kind::Progress ||
+                event.kind == AppleFileTransferEvent::Kind::Paused) {
+            m_ActiveFileTransferSessionId = event.sessionId;
+            m_ActiveFileTransferPaused =
+                    event.kind == AppleFileTransferEvent::Kind::Paused;
+        }
+        QString state;
+        switch (event.kind) {
+        case AppleFileTransferEvent::Kind::Started:
+            state = incoming ? tr("receiving") : tr("sending");
+            break;
+        case AppleFileTransferEvent::Kind::Progress:
+            state = tr("%1%2")
+                    .arg(qRound(event.progress * 100))
+                    .arg(QLatin1Char('%'));
+            if (event.bytesPerSecond > 0) {
+                state += tr(" · %1 MB/s")
+                        .arg(event.bytesPerSecond / 1000000.0, 0, 'f', 1);
+            }
+            break;
+        case AppleFileTransferEvent::Kind::Paused:
+            state = tr("paused");
+            break;
+        case AppleFileTransferEvent::Kind::Completing:
+            state = tr("finishing");
+            break;
+        case AppleFileTransferEvent::Kind::Completed:
+            state = tr("completed");
+            break;
+        case AppleFileTransferEvent::Kind::Failed:
+            state = tr("failed");
+            break;
+        case AppleFileTransferEvent::Kind::Cancelled:
+            state = tr("cancelled");
+            break;
+        case AppleFileTransferEvent::Kind::RemoteDrag:
+            break;
+        }
+
+        AppleFileTransferProgressEntry progressEntry;
+        progressEntry.sessionId = event.sessionId;
+        progressEntry.name = event.name;
+        progressEntry.remoteName = m_Connection.displayName;
+        progressEntry.incoming = incoming;
+        progressEntry.path = event.path;
+        progressEntry.progress = event.progress;
+        progressEntry.bytesPerSecond = event.bytesPerSecond;
+        progressEntry.hasProgress =
+                event.kind == AppleFileTransferEvent::Kind::Progress ||
+                event.kind == AppleFileTransferEvent::Kind::Completed;
+        switch (event.kind) {
+        case AppleFileTransferEvent::Kind::Started:
+            progressEntry.state = incoming
+                    ? AppleFileTransferProgressState::Receiving
+                    : AppleFileTransferProgressState::Sending;
+            break;
+        case AppleFileTransferEvent::Kind::Progress:
+            progressEntry.state = incoming
+                    ? AppleFileTransferProgressState::Receiving
+                    : AppleFileTransferProgressState::Sending;
+            break;
+        case AppleFileTransferEvent::Kind::Paused:
+            progressEntry.state = AppleFileTransferProgressState::Paused;
+            break;
+        case AppleFileTransferEvent::Kind::Completing:
+            progressEntry.state = AppleFileTransferProgressState::Completing;
+            progressEntry.progress = 1.0;
+            progressEntry.hasProgress = true;
+            break;
+        case AppleFileTransferEvent::Kind::Completed:
+            progressEntry.state = AppleFileTransferProgressState::Completed;
+            progressEntry.progress = 1.0;
+            break;
+        case AppleFileTransferEvent::Kind::Failed:
+            progressEntry.state = AppleFileTransferProgressState::Failed;
+            progressEntry.errorText = event.errorText.isEmpty()
+                    ? event.path : event.errorText;
+            progressEntry.path.clear();
+            break;
+        case AppleFileTransferEvent::Kind::Cancelled:
+            progressEntry.state = AppleFileTransferProgressState::Cancelled;
+            break;
+        case AppleFileTransferEvent::Kind::RemoteDrag:
+            break;
+        }
+        m_FileTransferProgressWindow->update(progressEntry);
+
+        const QString summary = tr("FILE %1 %2 · %3")
+                .arg(incoming ? QStringLiteral("↓") : QStringLiteral("↑"),
+                     event.name,
+                     state);
+        {
+            QMutexLocker locker(&m_PerformanceMutex);
+            m_FileTransferSummary = summary;
+        }
+        qInfo().noquote() << "Apple Screen Sharing" << summary;
+        requestPerformanceOverlayUpdate();
+        if (event.kind == AppleFileTransferEvent::Kind::Completed ||
+                event.kind == AppleFileTransferEvent::Kind::Failed ||
+                event.kind == AppleFileTransferEvent::Kind::Cancelled) {
+            if (m_ActiveFileTransferSessionId == event.sessionId) {
+                m_ActiveFileTransferSessionId = 0;
+                m_ActiveFileTransferPaused = false;
+            }
+            QPointer<AppleScreenSharingSession> guard(this);
+            QTimer::singleShot(4000, this, [guard, summary]() {
+                if (guard == nullptr) return;
+                {
+                    QMutexLocker locker(&guard->m_PerformanceMutex);
+                    if (guard->m_FileTransferSummary != summary) return;
+                    guard->m_FileTransferSummary.clear();
+                }
+                guard->requestPerformanceOverlayUpdate();
+            });
+        }
+    }
+}
+
 void AppleScreenSharingSession::updateControlSummary()
 {
     const QString summary = QStringLiteral(
-            "MODE %1   CLIPBOARD %2   CURSOR %3   DISPLAY %4%5   O:MODE M:MUTE")
+            "MODE %1   CLIPBOARD %2   FILES %3   CURSOR %4   DISPLAY %5%6   O:MODE M:MUTE P:PAUSE X:CANCEL")
             .arg(m_Observing.load() ? QStringLiteral("OBSERVE")
                                     : QStringLiteral("CONTROL"))
             .arg(!m_Observing.load() && m_ControlReady.load()
+                         ? QStringLiteral("ON") : QStringLiteral("OFF"))
+            .arg(!m_Observing.load() && m_FileTransferSupported.load()
                          ? QStringLiteral("ON") : QStringLiteral("OFF"))
             .arg(m_RemoteCursorUpdateCount)
             .arg(m_DisplayCount)
@@ -2726,6 +3297,7 @@ void AppleScreenSharingSession::toggleControlMode()
         releaseAllKeys();
     }
     m_Observing.store(observing);
+    m_FileTransferService->setControlling(!observing);
     m_MouseButtons = 0;
     AppleOutboundControl outbound;
     outbound.kind = AppleOutboundControl::Kind::SetObserving;
@@ -2833,6 +3405,7 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     QString presentationSummary;
     QString controlSummary;
     QString audioSummary;
+    QString fileTransferSummary;
     ApplePerformanceOverlayMetrics performanceMetrics;
     {
         QMutexLocker locker(&m_PerformanceMutex);
@@ -2841,6 +3414,7 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
         presentationSummary = m_PerformancePresentationSummary;
         controlSummary = m_ControlSummary;
         audioSummary = m_AudioSummary;
+        fileTransferSummary = m_FileTransferSummary;
         performanceMetrics = m_PerformanceMetrics;
     }
     if (!performanceMetrics.canvasSize.isValid()) {
@@ -2867,6 +3441,9 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
         }
         if (!audioSummary.isEmpty()) {
             lines.append(audioSummary);
+        }
+        if (!fileTransferSummary.isEmpty()) {
+            lines.append(fileTransferSummary);
         }
         if (!presentationSummary.isEmpty()) {
             lines.append(presentationSummary.split(
@@ -2996,20 +3573,115 @@ void AppleScreenSharingSession::pollSdlEvents()
         case SDL_QUIT:
             interrupt();
             break;
+#if SDL_VERSION_ATLEAST(2, 0, 5)
+        case SDL_DROPBEGIN:
+            m_PendingLocalDropPaths.clear();
+            SDL_GetMouseState(&m_LastMouseX, &m_LastMouseY);
+            break;
+        case SDL_DROPFILE:
+            if (event.drop.file != nullptr) {
+                m_PendingLocalDropPaths.append(
+                        QString::fromUtf8(event.drop.file));
+                SDL_free(event.drop.file);
+            }
+            break;
+        case SDL_DROPCOMPLETE: {
+#ifdef Q_OS_WIN
+            if (!m_WindowsFileDropTargets.empty()) {
+                m_PendingLocalDropPaths.clear();
+                break;
+            }
+#endif
+            if (m_PendingLocalDropPaths.isEmpty()) break;
+            QList<QByteArray> messages;
+            QString error;
+            if (!m_FileTransferService->beginLocalDrop(
+                        std::exchange(m_PendingLocalDropPaths, {}),
+                        &messages,
+                        &error)) {
+                qWarning().noquote()
+                        << "Apple local file transfer could not start:"
+                        << error;
+                addLaunchWarning(error);
+                break;
+            }
+            for (QByteArray& message : messages) {
+                AppleOutboundControl outbound;
+                outbound.kind = AppleOutboundControl::Kind::Message;
+                outbound.message = std::move(message);
+                queueControl(std::move(outbound));
+            }
+            // SDL publishes the file list only after the native drop has
+            // concluded. Mirror Swift's concluded-before-begin-completes path:
+            // advertise the drag first, then synthesize the remote press and
+            // release in that exact control-queue order so Finder asks for the
+            // destination with its type-30 response.
+            SDL_GetMouseState(&m_LastMouseX, &m_LastMouseY);
+            const int displayIndex = displayIndexForWindow(
+                    event.drop.windowID);
+            // Finder rejects file-drag pointer frames whose click count is
+            // zero. Native Apple viewers retain one through both down and up.
+            queuePointer(m_LastMouseX, m_LastMouseY, 1, 1, displayIndex);
+            queuePointer(m_LastMouseX, m_LastMouseY, 1, 0, displayIndex);
+            qInfo() << "Apple local file drag advertised to the Mac";
+            break;
+        }
+#endif
         case SDL_MOUSEMOTION:
             m_LastMouseX = event.motion.x;
             m_LastMouseY = event.motion.y;
             queuePointer(m_LastMouseX, m_LastMouseY, 0, 0,
                          displayIndexForWindow(event.motion.windowID));
+            // Motion events are inside the SDL window. A pending Mac drag must
+            // remain inert here so ordinary Finder rearrangement never opens
+            // a Windows download dialog.
+            activateRemoteFileDragIfEligible(true);
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP: {
             const quint8 button = appleButtonForSdl(event.button.button);
             if (event.type == SDL_MOUSEBUTTONDOWN) {
-                m_MouseButtons |= button;
+                if (button == 1 && m_RemoteFileDragInputState != nullptr) {
+                    const AppleRemoteFileDragInputTransition transition =
+                            m_RemoteFileDragInputState->localLeftButtonChanged(
+                                    true, m_MouseButtons);
+                    m_MouseButtons = transition.buttons;
+                }
+                else {
+                    m_MouseButtons |= button;
+                }
             }
             else {
-                m_MouseButtons &= ~button;
+                if (button == 1 && m_RemoteFileDragGate != nullptr &&
+                        m_RemoteFileDragGate->hasPending()) {
+                    SDL_Window* eventWindow = event.button.windowID == 0
+                            ? nullptr
+                            : SDL_GetWindowFromID(event.button.windowID);
+                    int width = 0;
+                    int height = 0;
+                    if (eventWindow != nullptr) {
+                        SDL_GetWindowSize(eventWindow, &width, &height);
+                    }
+                    const bool inside = eventWindow != nullptr &&
+                            event.button.x >= 0 && event.button.y >= 0 &&
+                            event.button.x < width && event.button.y < height;
+                    activateRemoteFileDragIfEligible(inside);
+                    if (inside) m_RemoteFileDragGate->clear();
+                }
+                if (button == 1 && m_RemoteFileDragInputState != nullptr) {
+                    const AppleRemoteFileDragInputTransition transition =
+                            m_RemoteFileDragInputState->localLeftButtonChanged(
+                                    false, m_MouseButtons);
+                    m_MouseButtons = transition.buttons;
+                    if (!transition.forwardToRemote) {
+                        m_LastMouseX = event.button.x;
+                        m_LastMouseY = event.button.y;
+                        break;
+                    }
+                }
+                else {
+                    m_MouseButtons &= ~button;
+                }
             }
             m_LastMouseX = event.button.x;
             m_LastMouseY = event.button.y;
@@ -3096,6 +3768,29 @@ void AppleScreenSharingSession::pollSdlEvents()
                 }
                 break;
             }
+            if (event.key.keysym.sym == SDLK_p &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+                        m_ActiveFileTransferSessionId != 0 &&
+                        m_FileTransferService->setPaused(
+                                m_ActiveFileTransferSessionId,
+                                !m_ActiveFileTransferPaused)) {
+                    m_ActiveFileTransferPaused =
+                            !m_ActiveFileTransferPaused;
+                }
+                break;
+            }
+            if (event.key.keysym.sym == SDLK_x &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+                        m_ActiveFileTransferSessionId != 0) {
+                    m_FileTransferService->cancel(
+                            m_ActiveFileTransferSessionId);
+                }
+                break;
+            }
             if (event.type == SDL_KEYUP || event.key.repeat == 0) {
                 queueKey(event.type == SDL_KEYDOWN,
                          event.key.keysym.sym,
@@ -3123,6 +3818,9 @@ void AppleScreenSharingSession::pollSdlEvents()
                     event.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED) {
                 refreshRemoteCursor(changedWindow, false);
             }
+            if (event.window.event == SDL_WINDOWEVENT_LEAVE) {
+                activateRemoteFileDragIfEligible(false);
+            }
             if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
                 updateKeyboardGrabState(changedWindow);
                 // Match the native client: copying normally occurs while the
@@ -3133,11 +3831,6 @@ void AppleScreenSharingSession::pollSdlEvents()
                 refreshLocalClipboard(true);
             }
             else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-                qInfo().nospace()
-                        << "[DEBUG-APPLE-CMD-CV-FOCUS] lost window="
-                        << event.window.windowID
-                        << " pressed=" << (m_KeyboardMapper != nullptr
-                                ? m_KeyboardMapper->pressedKeyCount() : 0);
                 // System shortcuts can move focus before SDL delivers their
                 // key-up events. Match both native iScreenSharing and the
                 // Moonlight input path by releasing the exact remote keys now.
@@ -3239,6 +3932,43 @@ void AppleScreenSharingSession::queuePointer(
     if (m_Observing.load()) {
         return;
     }
+    queuePointerFrame(
+            windowX,
+            windowY,
+            m_MouseButtons | extraButtons,
+            clickCount,
+            displayIndex,
+            clickCount == 0 && extraButtons == 0
+                    ? AppleOutboundControl::Coalescing::PointerMotion
+                    : AppleOutboundControl::Coalescing::None);
+}
+
+void AppleScreenSharingSession::queueLocalFileDragPointer(
+        int windowX,
+        int windowY,
+        int displayIndex,
+        bool pressed,
+        bool moving)
+{
+    if (m_Observing.load()) return;
+    queuePointerFrame(
+            windowX,
+            windowY,
+            pressed ? static_cast<quint8>(1) : static_cast<quint8>(0),
+            1,
+            displayIndex,
+            moving ? AppleOutboundControl::Coalescing::FileDragMotion
+                   : AppleOutboundControl::Coalescing::None);
+}
+
+void AppleScreenSharingSession::queuePointerFrame(
+        int windowX,
+        int windowY,
+        quint8 buttons,
+        int clickCount,
+        int displayIndex,
+        AppleOutboundControl::Coalescing coalescing)
+{
     const auto point = remotePoint(windowX, windowY, displayIndex);
     if (!point.has_value()) {
         return;
@@ -3268,23 +3998,24 @@ void AppleScreenSharingSession::queuePointer(
     input.kind = AppleOutboundControl::Kind::Input;
     input.queuedAtNanoseconds = steadyNanoseconds();
     input.timestampDeltaMicroseconds = delta;
-    input.coalesciblePointerMotion = clickCount == 0 && extraButtons == 0;
+    input.coalescing = coalescing;
     input.input = AppleMediaWire::pointerEvent(
-            m_MouseButtons | extraButtons,
+            buttons,
             point->first,
             point->second,
             clickCount,
             delta);
-    if (input.coalesciblePointerMotion && !m_PendingControls.isEmpty() &&
-            m_PendingControls.last().coalesciblePointerMotion) {
+    if (input.coalescing != AppleOutboundControl::Coalescing::None &&
+            !m_PendingControls.isEmpty() &&
+            m_PendingControls.last().coalescing == input.coalescing) {
         const quint32 accumulatedDelta =
                 m_PendingControls.last().timestampDeltaMicroseconds + delta;
         input.timestampDeltaMicroseconds = accumulatedDelta;
         input.input = AppleMediaWire::pointerEvent(
-                m_MouseButtons,
+                buttons,
                 point->first,
                 point->second,
-                0,
+                clickCount,
                 accumulatedDelta);
         m_PendingControls.last() = std::move(input);
         m_PointerMotionsCoalesced.fetch_add(1, std::memory_order_relaxed);
@@ -3419,12 +4150,6 @@ void AppleScreenSharingSession::updateKeyboardGrabState(SDL_Window* window)
     // Reapply on focus gain because some SDL platform adapters ignore a grab
     // requested while the stream window is still hidden.
     SDL_SetWindowKeyboardGrab(window, shouldGrab ? SDL_TRUE : SDL_FALSE);
-    qInfo().nospace()
-            << "[DEBUG-APPLE-CMD-CV-GRAB] window="
-            << SDL_GetWindowID(window)
-            << " requested=" << shouldGrab
-            << " reported=" << SDL_GetWindowKeyboardGrab(window)
-            << " focus=" << (SDL_GetKeyboardFocus() == window);
 #else
     shouldGrab = false;
 #endif
@@ -3718,6 +4443,9 @@ void AppleScreenSharingSession::renderLatestFrames()
 void AppleScreenSharingSession::destroyPresentation()
 {
 #ifdef Q_OS_WIN
+    m_WindowsRemoteFileDragSource.reset();
+    m_WindowsFileDropTargets.clear();
+    m_LocalFileDragLifecycle.reset();
     m_WindowsKeyboardHook.reset();
 #endif
     releaseAllKeys();
@@ -3796,6 +4524,13 @@ void AppleScreenSharingSession::prepareForReconnect(
     qWarning().nospace()
             << "Apple Screen Sharing reconnect " << attempt << "/"
             << MaximumReconnectAttempts << ": " << reason;
+    if (m_FileTransferProgressWindow) {
+        m_FileTransferProgressWindow->failActive(reason);
+    }
+    if (m_RemoteFileDragGate) m_RemoteFileDragGate->clear();
+    if (m_RemoteFileDragInputState) m_RemoteFileDragInputState->reset();
+    m_ActiveFileTransferSessionId = 0;
+    m_ActiveFileTransferPaused = false;
     emit stageStarting(tr("Reconnecting to the Mac (%1/%2)")
                        .arg(attempt)
                        .arg(MaximumReconnectAttempts));
@@ -3820,6 +4555,7 @@ void AppleScreenSharingSession::prepareForReconnect(
         m_SecondaryPerformanceSummary.clear();
         m_PerformancePresentationSummary.clear();
         m_AudioSummary.clear();
+        m_FileTransferSummary.clear();
     }
     m_PresentationWindowStartedAt = 0;
     m_PresentationCount = 0;

@@ -2,6 +2,7 @@
 
 #include "appleconnectionstore.h"
 #include "applecontrolfeatures.h"
+#include "applefiletransferservice.h"
 #include "applemediaprotocol.h"
 #include "applevideodecoder.h"
 #include "applevideorenderer.h"
@@ -19,6 +20,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <vector>
 
 class LocalStreamRuntime;
 class QTimer;
@@ -26,8 +28,14 @@ class AppleHighPerformanceSessionTask;
 class AppleSecondaryVideoStream;
 class ApplePresentationThread;
 class AppleKeyboardMapper;
+class AppleRemoteFileDragGate;
+class AppleRemoteFileDragInputState;
+class AppleLocalFileDragLifecycle;
+class AppleFileTransferProgressWindow;
 #ifdef Q_OS_WIN
 class AppleWindowsKeyboardHook;
+class AppleWindowsFileDropTarget;
+class AppleWindowsRemoteFileDragSource;
 #endif
 struct AppleRemoteKeyEvent;
 struct SDL_Renderer;
@@ -45,6 +53,13 @@ struct AppleOutboundControl
         SetObserving,
     };
 
+    enum class Coalescing
+    {
+        None,
+        PointerMotion,
+        FileDragMotion,
+    };
+
     Kind kind = Kind::Message;
     AppleInputEncryptionRequest input;
     QByteArray message;
@@ -52,7 +67,7 @@ struct AppleOutboundControl
     quint64 queuedAtNanoseconds = 0;
     quint32 timestampDeltaMicroseconds = 0;
     bool observing = false;
-    bool coalesciblePointerMotion = false;
+    Coalescing coalescing = Coalescing::None;
 };
 
 class AppleScreenSharingSession final : public StreamSession,
@@ -106,6 +121,8 @@ private:
     void refreshRemoteCursor(SDL_Window* window, bool force);
     void useDefaultRemoteCursor();
     void applyRemoteClipboardText(const QString& text);
+    void applyFileTransferEvents(QList<AppleFileTransferEvent> events);
+    void activateRemoteFileDragIfEligible(bool pointerInsideStream);
     void updateControlSummary();
     void localClipboardChanged();
     void refreshLocalClipboard(bool windowFocusGained);
@@ -124,6 +141,18 @@ private:
     void updatePerformanceOverlayTexture();
     void queuePointer(int windowX, int windowY, int clickCount = 0,
                       quint8 extraButtons = 0, int displayIndex = 0);
+    void queuePointerFrame(int windowX,
+                           int windowY,
+                           quint8 buttons,
+                           int clickCount,
+                           int displayIndex,
+                           AppleOutboundControl::Coalescing coalescing);
+    void queueLocalFileDragPointer(
+            int windowX,
+            int windowY,
+            int displayIndex,
+            bool pressed,
+            bool moving);
     void queueScroll(int windowX,
                      int windowY,
                      qint32 deltaX,
@@ -142,6 +171,10 @@ private:
     void updateKeyboardGrabState(SDL_Window* window);
     bool systemKeyCaptureRequestedForWindow(quint32 windowId) const;
     void queueControl(AppleOutboundControl control);
+#ifdef Q_OS_WIN
+    void ensureWindowsFileDragLifecycle();
+    void installWindowsFileDropTarget(SDL_Window* window, int displayIndex);
+#endif
     std::optional<QRect> restoredWindowGeometry(AppleWindowRole role) const;
     void captureWindowGeometry(SDL_Window* window, AppleWindowRole role);
     void persistWindowGeometry(SDL_Window* window, AppleWindowRole role);
@@ -157,6 +190,22 @@ private:
     QPointer<QQuickWindow> m_QtWindow;
     std::unique_ptr<LocalStreamRuntime> m_Runtime;
     std::unique_ptr<AppleKeyboardMapper> m_KeyboardMapper;
+    std::shared_ptr<AppleFileTransferService> m_FileTransferService;
+    std::unique_ptr<AppleRemoteFileDragGate> m_RemoteFileDragGate;
+    std::unique_ptr<AppleRemoteFileDragInputState> m_RemoteFileDragInputState;
+    std::unique_ptr<AppleFileTransferProgressWindow>
+            m_FileTransferProgressWindow;
+#ifdef Q_OS_WIN
+    std::shared_ptr<AppleLocalFileDragLifecycle> m_LocalFileDragLifecycle;
+    std::vector<std::unique_ptr<AppleWindowsFileDropTarget>>
+            m_WindowsFileDropTargets;
+    std::unique_ptr<AppleWindowsRemoteFileDragSource>
+            m_WindowsRemoteFileDragSource;
+    bool m_LocalFileDragPointerActive = false;
+    int m_LastLocalFileDragX = 0;
+    int m_LastLocalFileDragY = 0;
+    int m_LastLocalFileDragDisplayIndex = 0;
+#endif
     AppleWindowPlacementStore m_WindowPlacementStore;
     std::optional<QRect> m_PrimaryWindowGeometry;
     std::optional<QRect> m_SecondaryWindowGeometry;
@@ -215,6 +264,7 @@ private:
     QString m_PerformancePresentationSummary;
     QString m_ControlSummary;
     QString m_AudioSummary;
+    QString m_FileTransferSummary;
     ApplePerformanceOverlayMetrics m_PerformanceMetrics;
     ApplePerformanceOverlayStyle m_PerformanceOverlayStyle =
             ApplePerformanceOverlayStyle::Moonlight;
@@ -223,6 +273,9 @@ private:
     double m_ActiveRemoteCursorScale = 0.0;
     quint64 m_RemoteCursorUpdateCount = 0;
     AppleLocalClipboardTracker m_LocalClipboardTracker;
+    QStringList m_PendingLocalDropPaths;
+    quint32 m_ActiveFileTransferSessionId = 0;
+    bool m_ActiveFileTransferPaused = false;
     QSize m_PendingDynamicResolution;
     QSize m_LastRequestedDynamicResolution;
     quint64 m_LastDynamicResolutionRequestAt = 0;
@@ -238,6 +291,7 @@ private:
     std::atomic_bool m_Observing{false};
     std::atomic_bool m_ControlReady{false};
     std::atomic_bool m_NativePrecisionScrollSupported{false};
+    std::atomic_bool m_FileTransferSupported{false};
     std::atomic_bool m_AudioMuted{false};
     std::atomic_bool m_EverMediaReady{false};
     std::atomic_bool m_ReconnectRequested{false};
