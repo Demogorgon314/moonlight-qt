@@ -414,6 +414,9 @@ struct AppleMacInputBridge::Private
     NSButton* closeButton = nil;
     id originalCloseTarget = nil;
     SEL originalCloseAction = nullptr;
+    NSButton* zoomButton = nil;
+    id originalZoomTarget = nil;
+    SEL originalZoomAction = nullptr;
     Class originalClass = Nil;
     bool valid = false;
 };
@@ -468,6 +471,17 @@ AppleMacInputBridge::AppleMacInputBridge(
             d->closeButton.action =
                     sel_registerName("moonlightCloseWindow:");
         }
+        d->zoomButton = [[view.window
+                standardWindowButton:NSWindowZoomButton] retain];
+        if (d->zoomButton != nil) {
+            d->originalZoomTarget = [d->zoomButton.target retain];
+            d->originalZoomAction = d->zoomButton.action;
+            // SDL's FULLSCREEN_DESKTOP path explicitly hides the macOS menu
+            // bar. Let AppKit own the transition so the menu bar and Dock keep
+            // their native edge-reveal behavior, matching the Swift client.
+            d->zoomButton.target = view.window;
+            d->zoomButton.action = @selector(toggleFullScreen:);
+        }
         [view.window setAcceptsMouseMovedEvents:YES];
         [view.window makeFirstResponder:view];
         d->valid = true;
@@ -478,6 +492,14 @@ AppleMacInputBridge::~AppleMacInputBridge()
 {
     @autoreleasepool {
         if (d->view != nil) {
+            if (d->zoomButton != nil) {
+                d->zoomButton.target = d->originalZoomTarget;
+                d->zoomButton.action = d->originalZoomAction;
+                [d->originalZoomTarget release];
+                d->originalZoomTarget = nil;
+                [d->zoomButton release];
+                d->zoomButton = nil;
+            }
             if (d->closeButton != nil) {
                 d->closeButton.target = d->originalCloseTarget;
                 d->closeButton.action = d->originalCloseAction;

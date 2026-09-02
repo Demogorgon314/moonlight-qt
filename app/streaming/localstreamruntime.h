@@ -21,7 +21,7 @@ struct LocalStreamRuntimeConfig
 {
     int streamWidth = 0;
     int streamHeight = 0;
-    int windowMode = 0;
+    bool useFullScreenSpaces = true;
     bool nativeTouchpadEnabled = false;
 };
 

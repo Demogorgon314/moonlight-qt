@@ -1,7 +1,6 @@
 #include "localstreamruntime.h"
 
 #include "SDL_compat.h"
-#include "settings/streamingpreferences.h"
 #include "streamutils.h"
 #include "audio/renderers/renderer.h"
 
@@ -33,8 +32,7 @@ bool LocalStreamRuntime::initialize(QQuickWindow* window,
 
 #ifdef Q_OS_DARWIN
     if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
-        bool shouldUseFullScreenSpaces =
-                config.windowMode != StreamingPreferences::WM_FULLSCREEN;
+        bool shouldUseFullScreenSpaces = config.useFullScreenSpaces;
         SDL_DisplayMode desktopMode;
         SDL_Rect safeArea;
         for (int displayIndex = 0;

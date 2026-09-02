@@ -1746,7 +1746,8 @@ bool Session::initializeSession(QQuickWindow* qtWindow)
     LocalStreamRuntimeConfig runtimeConfig;
     runtimeConfig.streamWidth = m_Preferences->width;
     runtimeConfig.streamHeight = m_Preferences->height;
-    runtimeConfig.windowMode = m_Preferences->windowMode;
+    runtimeConfig.useFullScreenSpaces =
+            m_Preferences->windowMode != StreamingPreferences::WM_FULLSCREEN;
     runtimeConfig.nativeTouchpadEnabled = m_Preferences->enableNativeTouchpad;
     if (!m_LocalRuntime->initialize(qtWindow, runtimeConfig)) {
         return false;

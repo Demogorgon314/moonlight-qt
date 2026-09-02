@@ -36,7 +36,8 @@ macx {
     SOURCES += \
         ../../app/backend/apple/applemacinputbridge.mm \
         ../../app/backend/apple/applemetalrenderer.mm \
-        ../../app/backend/apple/appleaudiodecoder_macos.mm
+        ../../app/backend/apple/appleaudiodecoder_macos.mm \
+        mac_input_bridge_tests.mm
     HEADERS += \
         ../../app/backend/apple/applemacinputbridge.h \
         ../../app/backend/apple/applemetalrenderer.h

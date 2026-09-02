@@ -15,6 +15,8 @@
 #ifdef Q_OS_DARWIN
 #include "backend/apple/applemacinputbridge.h"
 #include <ApplicationServices/ApplicationServices.h>
+
+bool testAppleMacZoomButtonUsesNativeFullscreen();
 #endif
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -2984,6 +2986,9 @@ int main(int argc, char* argv[])
 #ifdef Q_OS_DARWIN
     std::fprintf(stderr, "testMacNativeScrollPreservesCgEventFields\n");
     testMacNativeScrollPreservesCgEventFields();
+    std::fprintf(stderr, "testAppleMacZoomButtonUsesNativeFullscreen\n");
+    require(testAppleMacZoomButtonUsesNativeFullscreen(),
+            "the macOS zoom button must use native fullscreen and restore its original action");
 #endif
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
     testAppleStreamWindowPlacementPersistence();
