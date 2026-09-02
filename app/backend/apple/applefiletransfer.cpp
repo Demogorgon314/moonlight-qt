@@ -2,7 +2,7 @@
 
 #include "appleprotocol.h"
 
-#include <QtZlib/zlib.h>
+#include <zlib.h>
 
 #include <cmath>
 #include <cstring>

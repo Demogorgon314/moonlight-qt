@@ -1,4 +1,6 @@
-QT += core gui network zlib-private
+QT += core gui network
+macx: LIBS += -lz
+else: QT += zlib-private
 CONFIG += console c++17
 CONFIG -= app_bundle
 TEMPLATE = app

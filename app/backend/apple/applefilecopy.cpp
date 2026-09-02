@@ -7,7 +7,7 @@
 #include <QSet>
 #include <QTimeZone>
 
-#include <QtZlib/zlib.h>
+#include <zlib.h>
 
 #include <chrono>
 #include <limits>

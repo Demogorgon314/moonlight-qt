@@ -18,7 +18,8 @@ MOONLIGHT_APPLE_SCREEN_SHARING_BUILD = $$(MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING)
 }
 
 apple-screen-sharing {
-    QT += zlib-private
+    macx: LIBS += -lz
+    else: QT += zlib-private
     DEFINES += MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
     SOURCES += \
         backend/apple/applefeaturegate.cpp \
@@ -77,12 +78,15 @@ apple-screen-sharing {
     }
 
     macx {
-        LIBS += -framework Security -framework AudioToolbox
+        LIBS += -framework Security -framework AudioToolbox -framework Carbon
         SOURCES += \
+            backend/apple/applemacinputbridge.mm \
             backend/apple/applemetalrenderer.mm \
             backend/apple/appleaudiodecoder_macos.mm \
             backend/apple/applefiletransferdialog_macos.mm
-        HEADERS += backend/apple/applemetalrenderer.h
+        HEADERS += \
+            backend/apple/applemacinputbridge.h \
+            backend/apple/applemetalrenderer.h
     }
 }
 

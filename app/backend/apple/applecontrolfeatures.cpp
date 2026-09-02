@@ -7,7 +7,7 @@
 #include <QUrl>
 #include <QImage>
 
-#include <QtZlib/zlib.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <cmath>

@@ -28,6 +28,9 @@ class AppleHighPerformanceSessionTask;
 class AppleSecondaryVideoStream;
 class ApplePresentationThread;
 class AppleKeyboardMapper;
+#ifdef Q_OS_DARWIN
+class AppleMacInputBridge;
+#endif
 class AppleRemoteFileDragGate;
 class AppleRemoteFileDragInputState;
 class AppleLocalFileDragLifecycle;
@@ -136,6 +139,10 @@ private:
                                    bool waitsForViewportToSettle = true);
     void sendPendingDynamicResolution();
     void pollSdlEvents();
+    void handleMouseMotion(int x, int y, int displayIndex);
+    void handleMouseButton(bool down, quint8 button, int clickCount,
+                           int x, int y, int displayIndex,
+                           SDL_Window* eventWindow);
     void renderLatestFrames();
     void renderSecondaryFrames();
     void updatePerformanceOverlayTexture();
@@ -190,6 +197,9 @@ private:
     QPointer<QQuickWindow> m_QtWindow;
     std::unique_ptr<LocalStreamRuntime> m_Runtime;
     std::unique_ptr<AppleKeyboardMapper> m_KeyboardMapper;
+#ifdef Q_OS_DARWIN
+    std::unique_ptr<AppleMacInputBridge> m_AppleMacInputBridge;
+#endif
     std::shared_ptr<AppleFileTransferService> m_FileTransferService;
     std::unique_ptr<AppleRemoteFileDragGate> m_RemoteFileDragGate;
     std::unique_ptr<AppleRemoteFileDragInputState> m_RemoteFileDragInputState;

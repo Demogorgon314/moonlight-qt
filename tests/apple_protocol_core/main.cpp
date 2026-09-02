@@ -872,6 +872,27 @@ void testEncryptedInputWireBoundary()
 
 void testAppleKeyboardMappingAndFocusRelease()
 {
+    AppleKeyboardMapper printableMapper(false, 40);
+    const auto firstDown = printableMapper.update(
+            true, SDLK_a, SDL_SCANCODE_A, false);
+    const auto heldRepeat = printableMapper.update(
+            true, SDLK_a, SDL_SCANCODE_A, false);
+    const auto firstUp = printableMapper.update(
+            false, SDLK_a, SDL_SCANCODE_A, false);
+    const auto secondDown = printableMapper.update(
+            true, SDLK_a, SDL_SCANCODE_A, false);
+    const auto secondUp = printableMapper.update(
+            false, SDLK_a, SDL_SCANCODE_A, false);
+    require(firstDown.has_value() && firstDown->isDown &&
+                    firstDown->keyboardType == 40 &&
+                    !heldRepeat.has_value() &&
+                    firstUp.has_value() && !firstUp->isDown &&
+                    firstUp->keyboardType == 40 &&
+                    secondDown.has_value() && secondDown->isDown &&
+                    secondUp.has_value() && !secondUp->isDown &&
+                    printableMapper.pressedKeyCount() == 0,
+            "ordinary keys must preserve physical down/up duration and remain repeatable");
+
     AppleKeyboardMapper swallowedWinMapper(false, 40);
     const QList<AppleRemoteKeyEvent> recoveredShortcut =
             swallowedWinMapper.updateWithModifiers(

@@ -11,6 +11,9 @@
 #include "appleaudiostream.h"
 #include "applecredentialstore.h"
 #include "applekeyboardmapper.h"
+#ifdef Q_OS_DARWIN
+#include "applemacinputbridge.h"
+#endif
 #include "applevideorenderer.h"
 #include "applemediatransport.h"
 #include "settings/streamingpreferences.h"
@@ -43,6 +46,10 @@
 #include <QThreadPool>
 #include <QTemporaryDir>
 #include <QTimer>
+
+#ifdef Q_OS_DARWIN
+#include <Carbon/Carbon.h>
+#endif
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
@@ -153,6 +160,57 @@ quint32 currentMicroseconds()
             SDL_GetPerformanceCounter() * 1000000ULL / SDL_GetPerformanceFrequency());
 }
 
+#ifdef Q_OS_DARWIN
+std::optional<quint32> nativeSpecialKeySymbol(quint16 keyCode)
+{
+    switch (keyCode) {
+    case 53: return 0xff1b;
+    case 48: return 0xff09;
+    case 51: return 0xff08;
+    case 36: return 0xff0d;
+    case 117: return 0xffff;
+    case 114: return 0xff63;
+    case 115: return 0xff50;
+    case 119: return 0xff57;
+    case 116: return 0xff55;
+    case 121: return 0xff56;
+    case 123: return 0xff51;
+    case 126: return 0xff52;
+    case 124: return 0xff53;
+    case 125: return 0xff54;
+    case 122: return 0xffbe;
+    case 120: return 0xffbf;
+    case 99: return 0xffc0;
+    case 118: return 0xffc1;
+    case 96: return 0xffc2;
+    case 97: return 0xffc3;
+    case 98: return 0xffc4;
+    case 100: return 0xffc5;
+    case 101: return 0xffc6;
+    case 109: return 0xffc7;
+    case 103: return 0xffc8;
+    case 111: return 0xffc9;
+    default: return std::nullopt;
+    }
+}
+
+std::optional<quint32> nativeModifierKeySymbol(quint16 keyCode)
+{
+    switch (keyCode) {
+    case 56: return 0xffe1;
+    case 60: return 0xffe2;
+    case 59: return 0xffe3;
+    case 62: return 0xffe4;
+    case 58: return 0xffe9;
+    case 61: return 0xffea;
+    case 55: return 0xffeb;
+    case 54: return 0xffec;
+    case 57: return 0xffe5;
+    default: return std::nullopt;
+    }
+}
+#endif
+
 quint64 steadyNanoseconds()
 {
     return static_cast<quint64>(
@@ -176,22 +234,11 @@ double cursorDpiScale(SDL_Window* window)
         }
     }
 #elif defined(Q_OS_DARWIN)
-    if (window != nullptr) {
-        int pointWidth = 0;
-        int pointHeight = 0;
-        int pixelWidth = 0;
-        int pixelHeight = 0;
-        SDL_GetWindowSize(window, &pointWidth, &pointHeight);
-        SDL_Metal_GetDrawableSize(window, &pixelWidth, &pixelHeight);
-        if (pointWidth > 0 && pointHeight > 0 &&
-                pixelWidth > 0 && pixelHeight > 0) {
-            const double horizontalScale =
-                    static_cast<double>(pixelWidth) / pointWidth;
-            const double verticalScale =
-                    static_cast<double>(pixelHeight) / pointHeight;
-            return qMax(1.0, (horizontalScale + verticalScale) / 2.0);
-        }
-    }
+    // Cocoa SDL window sizes and cursor surfaces are already expressed in
+    // logical points. Applying the Metal drawable scale here halves dynamic
+    // resolution requests and doubles the visible cursor on Retina displays.
+    Q_UNUSED(window)
+    return 1.0;
 #else
     Q_UNUSED(window)
 #endif
@@ -241,6 +288,18 @@ quint8 appleButtonForSdl(quint8 button)
     default: return 0;
     }
 }
+
+#ifdef Q_OS_DARWIN
+quint8 appleButtonForNative(unsigned char buttonNumber)
+{
+    switch (buttonNumber) {
+    case 0: return 1 << 0;
+    case 1: return 1 << 1;
+    case 2: return 1 << 2;
+    default: return 0;
+    }
+}
+#endif
 
 QImage renderMoonlightPerformanceOverlay(
         const QList<ApplePerformanceOverlayTextRun>& runs,
@@ -2081,8 +2140,14 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     QSettings settings;
     const StreamingPreferences* preferences = StreamingPreferences::get();
     m_RememberWindowPlacement = preferences->rememberWindowPosition;
+    quint16 keyboardType = 0;
+#ifdef Q_OS_DARWIN
+    // Apple's high-performance input record contains the physical keyboard
+    // type as well as the virtual key code. Match native AppKit key events.
+    keyboardType = static_cast<quint16>(LMGetKbdType());
+#endif
     m_KeyboardMapper = std::make_unique<AppleKeyboardMapper>(
-            preferences->swapWinAltKeys);
+            preferences->swapWinAltKeys, keyboardType);
     m_CaptureSystemKeysMode = static_cast<int>(
             preferences->captureSysKeysMode);
     // Match Moonlight's established streaming input behavior. These hints keep
@@ -2622,6 +2687,128 @@ void AppleScreenSharingSession::mediaReady(
                                         .arg(rendererError));
         return;
     }
+#ifdef Q_OS_DARWIN
+    // Attach only after renderer initialization so the bridge owns the final
+    // SDL content view. This mirrors the native Swift canvas: one view owns
+    // keyboard, pointer, and scroll delivery through shortcut transitions.
+    m_AppleMacInputBridge = std::make_unique<AppleMacInputBridge>(
+            window,
+            [this](const AppleMacKeyEvent& event) {
+                if (m_Observing.load()) {
+                    return;
+                }
+
+                const quint16 keyboardType = event.keyboardType != 0
+                        ? event.keyboardType
+                        : static_cast<quint16>(LMGetKbdType());
+                const auto sendKey = [this, keyboardType](
+                        bool isDown, quint32 symbol, quint16 keyCode) {
+                    queueRemoteKey(AppleRemoteKeyEvent{
+                            isDown, symbol, keyboardType, keyCode,
+                    });
+                };
+
+                if (event.type == AppleMacKeyEvent::Type::Modifier) {
+                    const auto symbol = nativeModifierKeySymbol(event.keyCode);
+                    if (symbol.has_value()) {
+                        sendKey(event.modifierDown, *symbol, event.keyCode);
+                    }
+                }
+                else if (const auto symbol =
+                         nativeSpecialKeySymbol(event.keyCode);
+                         symbol.has_value()) {
+                    sendKey(event.type == AppleMacKeyEvent::Type::Down,
+                            *symbol,
+                            event.keyCode);
+                }
+                else {
+                    const bool hasCommandModifier = event.commandDown ||
+                            event.controlDown || event.optionDown;
+                    const std::u32string& characters = hasCommandModifier
+                            ? event.charactersIgnoringModifiers
+                            : event.characters;
+                    if (event.type == AppleMacKeyEvent::Type::Down) {
+                        if (event.controlDown &&
+                                !event.controlEventObserved) {
+                            sendKey(true, 0xffe3, 59);
+                        }
+                        if (event.optionDown &&
+                                !event.optionEventObserved) {
+                            sendKey(true, 0xffe9, 58);
+                        }
+                        if (event.commandDown &&
+                                !event.commandEventObserved) {
+                            sendKey(true, 0xffeb, 55);
+                        }
+                        for (char32_t character : characters) {
+                            sendKey(true, character, event.keyCode);
+                            if (!hasCommandModifier) {
+                                sendKey(false, character, event.keyCode);
+                            }
+                        }
+                    }
+                    else if (hasCommandModifier) {
+                        for (char32_t character : characters) {
+                            sendKey(false, character, event.keyCode);
+                        }
+                        if (event.commandDown &&
+                                !event.commandEventObserved) {
+                            sendKey(false, 0xffeb, 55);
+                        }
+                        if (event.optionDown &&
+                                !event.optionEventObserved) {
+                            sendKey(false, 0xffe9, 58);
+                        }
+                        if (event.controlDown &&
+                                !event.controlEventObserved) {
+                            sendKey(false, 0xffe3, 59);
+                        }
+                    }
+                }
+            },
+            [this, window](const AppleMacPointerEvent& event) {
+                switch (event.type) {
+                case AppleMacPointerEvent::Type::Motion:
+                    handleMouseMotion(event.x, event.y, 0);
+                    break;
+                case AppleMacPointerEvent::Type::ButtonDown:
+                case AppleMacPointerEvent::Type::ButtonUp:
+                    handleMouseButton(
+                            event.type ==
+                                    AppleMacPointerEvent::Type::ButtonDown,
+                            appleButtonForNative(event.buttonNumber),
+                            event.clickCount,
+                            event.x,
+                            event.y,
+                            0,
+                            window);
+                    break;
+                case AppleMacPointerEvent::Type::Scroll:
+                    m_LastMouseX = event.x;
+                    m_LastMouseY = event.y;
+                    queueScroll(
+                            event.x,
+                            event.y,
+                            event.deltaX,
+                            event.deltaY,
+                            event.preciseDeltaX,
+                            event.preciseDeltaY,
+                            event.scrollingDirectionInverted,
+                            0);
+                    break;
+                }
+            },
+            [this]() {
+                interrupt();
+            });
+    if (!m_AppleMacInputBridge->isValid()) {
+        addLaunchWarning(tr("Native macOS input could not be attached."));
+        m_AppleMacInputBridge.reset();
+    }
+    else {
+        qInfo() << "Apple macOS window-owned input adapter enabled";
+    }
+#endif
     updateKeyboardGrabState(window);
     qInfo().nospace()
             << "Apple High Performance renderer="
@@ -3539,6 +3726,75 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
             updateTimer.nsecsElapsed() / 1000000.0);
 }
 
+void AppleScreenSharingSession::handleMouseMotion(
+        int x, int y, int displayIndex)
+{
+    m_LastMouseX = x;
+    m_LastMouseY = y;
+    queuePointer(x, y, 0, 0, displayIndex);
+    // Motion events are inside the stream window. A pending remote drag must
+    // remain inert so ordinary Finder rearrangement never starts a download.
+    activateRemoteFileDragIfEligible(true);
+}
+
+void AppleScreenSharingSession::handleMouseButton(
+        bool down,
+        quint8 button,
+        int clickCount,
+        int x,
+        int y,
+        int displayIndex,
+        SDL_Window* eventWindow)
+{
+    if (button == 0) {
+        return;
+    }
+    if (down) {
+        if (button == 1 && m_RemoteFileDragInputState != nullptr) {
+            const AppleRemoteFileDragInputTransition transition =
+                    m_RemoteFileDragInputState->localLeftButtonChanged(
+                            true, m_MouseButtons);
+            m_MouseButtons = transition.buttons;
+        }
+        else {
+            m_MouseButtons |= button;
+        }
+    }
+    else {
+        if (button == 1 && m_RemoteFileDragGate != nullptr &&
+                m_RemoteFileDragGate->hasPending()) {
+            int width = 0;
+            int height = 0;
+            if (eventWindow != nullptr) {
+                SDL_GetWindowSize(eventWindow, &width, &height);
+            }
+            const bool inside = eventWindow != nullptr &&
+                    x >= 0 && y >= 0 && x < width && y < height;
+            activateRemoteFileDragIfEligible(inside);
+            if (inside) {
+                m_RemoteFileDragGate->clear();
+            }
+        }
+        if (button == 1 && m_RemoteFileDragInputState != nullptr) {
+            const AppleRemoteFileDragInputTransition transition =
+                    m_RemoteFileDragInputState->localLeftButtonChanged(
+                            false, m_MouseButtons);
+            m_MouseButtons = transition.buttons;
+            if (!transition.forwardToRemote) {
+                m_LastMouseX = x;
+                m_LastMouseY = y;
+                return;
+            }
+        }
+        else {
+            m_MouseButtons &= ~button;
+        }
+    }
+    m_LastMouseX = x;
+    m_LastMouseY = y;
+    queuePointer(x, y, clickCount, 0, displayIndex);
+}
+
 void AppleScreenSharingSession::pollSdlEvents()
 {
     const auto displayIndexForWindow = [this](quint32 windowId) {
@@ -3628,68 +3884,43 @@ void AppleScreenSharingSession::pollSdlEvents()
         }
 #endif
         case SDL_MOUSEMOTION:
-            m_LastMouseX = event.motion.x;
-            m_LastMouseY = event.motion.y;
-            queuePointer(m_LastMouseX, m_LastMouseY, 0, 0,
-                         displayIndexForWindow(event.motion.windowID));
-            // Motion events are inside the SDL window. A pending Mac drag must
-            // remain inert here so ordinary Finder rearrangement never opens
-            // a Windows download dialog.
-            activateRemoteFileDragIfEligible(true);
+#ifdef Q_OS_DARWIN
+            if (m_AppleMacInputBridge != nullptr) {
+                break;
+            }
+#endif
+            handleMouseMotion(
+                    event.motion.x,
+                    event.motion.y,
+                    displayIndexForWindow(event.motion.windowID));
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP: {
+#ifdef Q_OS_DARWIN
+            if (m_AppleMacInputBridge != nullptr) {
+                break;
+            }
+#endif
             const quint8 button = appleButtonForSdl(event.button.button);
-            if (event.type == SDL_MOUSEBUTTONDOWN) {
-                if (button == 1 && m_RemoteFileDragInputState != nullptr) {
-                    const AppleRemoteFileDragInputTransition transition =
-                            m_RemoteFileDragInputState->localLeftButtonChanged(
-                                    true, m_MouseButtons);
-                    m_MouseButtons = transition.buttons;
-                }
-                else {
-                    m_MouseButtons |= button;
-                }
-            }
-            else {
-                if (button == 1 && m_RemoteFileDragGate != nullptr &&
-                        m_RemoteFileDragGate->hasPending()) {
-                    SDL_Window* eventWindow = event.button.windowID == 0
-                            ? nullptr
-                            : SDL_GetWindowFromID(event.button.windowID);
-                    int width = 0;
-                    int height = 0;
-                    if (eventWindow != nullptr) {
-                        SDL_GetWindowSize(eventWindow, &width, &height);
-                    }
-                    const bool inside = eventWindow != nullptr &&
-                            event.button.x >= 0 && event.button.y >= 0 &&
-                            event.button.x < width && event.button.y < height;
-                    activateRemoteFileDragIfEligible(inside);
-                    if (inside) m_RemoteFileDragGate->clear();
-                }
-                if (button == 1 && m_RemoteFileDragInputState != nullptr) {
-                    const AppleRemoteFileDragInputTransition transition =
-                            m_RemoteFileDragInputState->localLeftButtonChanged(
-                                    false, m_MouseButtons);
-                    m_MouseButtons = transition.buttons;
-                    if (!transition.forwardToRemote) {
-                        m_LastMouseX = event.button.x;
-                        m_LastMouseY = event.button.y;
-                        break;
-                    }
-                }
-                else {
-                    m_MouseButtons &= ~button;
-                }
-            }
-            m_LastMouseX = event.button.x;
-            m_LastMouseY = event.button.y;
-            queuePointer(m_LastMouseX, m_LastMouseY, event.button.clicks, 0,
-                         displayIndexForWindow(event.button.windowID));
+            SDL_Window* eventWindow = event.button.windowID == 0
+                    ? nullptr
+                    : SDL_GetWindowFromID(event.button.windowID);
+            handleMouseButton(
+                    event.type == SDL_MOUSEBUTTONDOWN,
+                    button,
+                    event.button.clicks,
+                    event.button.x,
+                    event.button.y,
+                    displayIndexForWindow(event.button.windowID),
+                    eventWindow);
             break;
         }
         case SDL_MOUSEWHEEL: {
+#ifdef Q_OS_DARWIN
+            if (m_AppleMacInputBridge != nullptr) {
+                break;
+            }
+#endif
             const int displayIndex = displayIndexForWindow(
                     event.wheel.windowID);
             m_LastMouseX = event.wheel.mouseX;
@@ -3721,29 +3952,6 @@ void AppleScreenSharingSession::pollSdlEvents()
         }
         case SDL_KEYDOWN:
         case SDL_KEYUP: {
-            const bool commandClipboardKey =
-                    event.key.keysym.scancode == SDL_SCANCODE_LGUI ||
-                    event.key.keysym.scancode == SDL_SCANCODE_RGUI ||
-                    event.key.keysym.scancode == SDL_SCANCODE_C ||
-                    event.key.keysym.scancode == SDL_SCANCODE_V;
-            if (commandClipboardKey) {
-                SDL_Window* keyboardFocus = SDL_GetKeyboardFocus();
-                qInfo().nospace()
-                        << "[DEBUG-APPLE-CMD-CV-EVENT] "
-                        << (event.type == SDL_KEYDOWN ? "down" : "up")
-                        << " window=" << event.key.windowID
-                        << " focus=" << (keyboardFocus != nullptr
-                                ? SDL_GetWindowID(keyboardFocus) : 0)
-                        << " sym=" << event.key.keysym.sym
-                        << " scan=" << event.key.keysym.scancode
-                        << " mod=0x" << Qt::hex
-                        << static_cast<quint32>(event.key.keysym.mod)
-                        << Qt::dec
-                        << " repeat=" << static_cast<int>(event.key.repeat)
-                        << " capture="
-                        << systemKeyCaptureRequestedForWindow(
-                                event.key.windowID);
-            }
             if (event.key.keysym.sym == SDLK_s &&
                     (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
                             (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
@@ -3791,6 +3999,13 @@ void AppleScreenSharingSession::pollSdlEvents()
                 }
                 break;
             }
+#ifdef Q_OS_DARWIN
+            // AppleMacInputBridge owns keyboard delivery on the SDL content
+            // view. Ignore SDL's duplicate keyboard events on macOS.
+            if (m_AppleMacInputBridge != nullptr) {
+                break;
+            }
+#endif
             if (event.type == SDL_KEYUP || event.key.repeat == 0) {
                 queueKey(event.type == SDL_KEYDOWN,
                          event.key.keysym.sym,
@@ -3805,6 +4020,15 @@ void AppleScreenSharingSession::pollSdlEvents()
             const int displayIndex = displayIndexForWindow(event.window.windowID);
             SDL_Window* changedWindow = displayIndex == 1
                     ? m_SecondaryWindow : m_Runtime->streamWindow();
+            if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+                if (displayIndex == 0) {
+                    interrupt();
+                }
+                else if (changedWindow != nullptr) {
+                    SDL_HideWindow(changedWindow);
+                }
+                break;
+            }
             if (event.window.event == SDL_WINDOWEVENT_MOVED ||
                     event.window.event == SDL_WINDOWEVENT_RESTORED ||
                     event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
@@ -4075,15 +4299,6 @@ void AppleScreenSharingSession::queueKey(
 void AppleScreenSharingSession::queueRemoteKey(
         const AppleRemoteKeyEvent& key)
 {
-    if (key.symbol == 0xffeb || key.symbol == 0xffec ||
-            key.symbol == 'c' || key.symbol == 'v') {
-        qInfo().nospace()
-                << "[DEBUG-APPLE-CMD-CV-WIRE] "
-                << (key.isDown ? "down" : "up")
-                << " symbol=0x" << Qt::hex << key.symbol << Qt::dec
-                << " keyCode=" << key.keyCode
-                << " keyboardType=" << key.keyboardType;
-    }
     const quint32 now = currentMicroseconds();
     const quint32 delta = now - m_PreviousInputTimestamp;
     m_PreviousInputTimestamp = now;
@@ -4489,6 +4704,9 @@ void AppleScreenSharingSession::destroyPresentation()
     persistWindowGeometry(m_Runtime ? m_Runtime->streamWindow() : nullptr,
                           AppleWindowRole::Primary);
     persistWindowGeometry(m_SecondaryWindow, AppleWindowRole::Secondary);
+#ifdef Q_OS_DARWIN
+    m_AppleMacInputBridge.reset();
+#endif
     m_VideoRenderer.reset();
     m_SecondaryVideoRenderer.reset();
     if (m_SecondaryWindow != nullptr) {
