@@ -857,6 +857,12 @@ macx {
 
         QMAKE_RPATHDIR += @executable_path/../Frameworks
     }
+
+    # Keep the main executable's designated requirement stable across local
+    # rebuilds so macOS Keychain does not repeatedly request credential access.
+    MACOS_DEVELOPMENT_SIGN_SCRIPT = $$clean_path($$PWD/../scripts/sign-macos-development-app.sh)
+    MACOS_APP_BUNDLE = $${TARGET}.app
+    QMAKE_POST_LINK += $$shell_quote($$MACOS_DEVELOPMENT_SIGN_SCRIPT) $$shell_quote($$MACOS_APP_BUNDLE)
 }
 
 VERSION = "$$MOONLIGHT_NUMERIC_VERSION"
