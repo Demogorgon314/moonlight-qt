@@ -15,6 +15,15 @@
 
 namespace {
 
+void setError(QString* error, const QString& value)
+{
+    if (error != nullptr) {
+        *error = value;
+    }
+}
+
+#ifndef Q_OS_DARWIN
+
 // AudioToolbox's magic cookie wraps this AudioSpecificConfig in an ESDS
 // descriptor. FDK-AAC consumes the AudioSpecificConfig itself.
 constexpr unsigned char AacEldAudioSpecificConfig[] = {
@@ -57,18 +66,13 @@ constexpr FdkError FdkDecodeErrorLast = 0x4fff;
 constexpr int FdkMp4Raw = 0;
 constexpr int MaximumFdkPcmSamples = 2048 * 8;
 
-void setError(QString* error, const QString& value)
-{
-    if (error != nullptr) {
-        *error = value;
-    }
-}
-
 QString fdkError(FdkError code)
 {
     return QStringLiteral("FDK-AAC error 0x%1")
             .arg(static_cast<unsigned int>(code), 4, 16, QLatin1Char('0'));
 }
+
+#endif // !Q_OS_DARWIN
 
 } // namespace
 

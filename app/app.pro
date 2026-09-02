@@ -78,7 +78,7 @@ apple-screen-sharing {
     }
 
     macx {
-        LIBS += -framework Security -framework AudioToolbox -framework Carbon
+        LIBS += -framework Security -framework AudioToolbox -framework AVFAudio -framework Carbon
         SOURCES += \
             backend/apple/applemacinputbridge.mm \
             backend/apple/applemetalrenderer.mm \

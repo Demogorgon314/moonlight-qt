@@ -30,7 +30,7 @@ macx {
         ../../libs/mac/include/SDL2
     LIBS += -L../../libs/mac/lib \
         -lcrypto.3 -lavcodec.63 -lavutil.61 -lswscale.10 -lSDL2 \
-        -framework Security -framework AudioToolbox -framework CoreVideo \
+        -framework Security -framework AudioToolbox -framework AVFAudio -framework CoreVideo \
         -framework CoreGraphics -framework Metal -framework QuartzCore \
         -framework AppKit
     SOURCES += \
