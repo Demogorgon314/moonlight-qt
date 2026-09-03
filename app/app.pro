@@ -26,6 +26,8 @@ apple-screen-sharing {
         backend/apple/appleclipboard.cpp \
         backend/apple/appleconnectionstore.cpp \
         backend/apple/applecredentialstore.cpp \
+        backend/apple/appleinputsourceplatform.cpp \
+        backend/apple/applekeyboardinputsource.cpp \
         backend/apple/applekeyboardmapper.cpp \
         backend/apple/appleprotocol.cpp \
         backend/apple/applefiledrag.cpp \
@@ -52,6 +54,8 @@ apple-screen-sharing {
         backend/apple/appleclipboard.h \
         backend/apple/appleconnectionstore.h \
         backend/apple/applecredentialstore.h \
+        backend/apple/appleinputsourceplatform.h \
+        backend/apple/applekeyboardinputsource.h \
         backend/apple/applekeyboardmapper.h \
         backend/apple/appleprotocol.h \
         backend/apple/applefiledrag.h \
@@ -78,6 +82,7 @@ apple-screen-sharing {
         LIBS += -ladvapi32 -lshell32 -lshlwapi
         SOURCES += \
             backend/apple/appled3d11renderer.cpp \
+            backend/apple/appleinputsourceplatform_win.cpp \
             backend/apple/applefiledrag_win.cpp \
             backend/apple/applefiletransferdialog_win.cpp
         HEADERS += \
@@ -90,6 +95,7 @@ apple-screen-sharing {
         SOURCES += \
             backend/apple/appleclipboard_mac.mm \
             backend/apple/applefiledrag_mac.mm \
+            backend/apple/appleinputsourceplatform_mac.mm \
             backend/apple/applemacinputbridge.mm \
             backend/apple/applemetalrenderer.mm \
             backend/apple/appleaudiodecoder_macos.mm \

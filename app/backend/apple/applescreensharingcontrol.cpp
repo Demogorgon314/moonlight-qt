@@ -5,6 +5,8 @@
 #include "applefiledrag.h"
 #include "applefiletransferdialog.h"
 #include "applefiletransferprogress.h"
+#include "appleinputsourceplatform.h"
+#include "applekeyboardmapper.h"
 #include "appleprotocol.h"
 #ifdef Q_OS_DARWIN
 #include "applefiledrag_mac.h"
@@ -12,6 +14,9 @@
 #endif
 #ifdef Q_OS_WIN
 #include "applefiledrag_win.h"
+#include "gui/windowsdisplaygeometry.h"
+#include "streaming/video/overlaymenubutton.h"
+#include "streaming/video/overlaymenupanel.h"
 #endif
 #include "streaming/localstreamruntime.h"
 
@@ -23,6 +28,7 @@
 #include <QMutexLocker>
 #include <QPointer>
 #include <QSettings>
+#include <QScreen>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -30,6 +36,9 @@
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
 #include "SDL_syswm.h"
+#endif
+#ifdef Q_OS_DARWIN
+#include <Carbon/Carbon.h>
 #endif
 
 #include <chrono>
@@ -40,6 +49,45 @@ using AppleScreenSharingSessionPrivate::cursorDpiScale;
 using AppleScreenSharingSessionPrivate::steadyNanoseconds;
 #ifdef Q_OS_WIN
 using AppleScreenSharingSessionPrivate::nativeHandleForWindow;
+#endif
+
+#ifdef Q_OS_WIN
+namespace {
+
+QRect windowsOverlayGeometryForSdlWindow(SDL_Window* window)
+{
+    if (window == nullptr) {
+        return {};
+    }
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowPosition(window, &x, &y);
+    SDL_GetWindowSize(window, &width, &height);
+    if (width <= 0 || height <= 0) {
+        return {};
+    }
+    WindowsDisplayGeometry::Monitor monitor;
+    if (!WindowsDisplayGeometry::monitorForRect(
+                QRect(x, y, width, height), monitor)) {
+        return QRect(x, y, width, height);
+    }
+    QScreen* screen = WindowsDisplayGeometry::screenForMonitor(monitor);
+    if (screen == nullptr) {
+        return QRect(x, y, width, height);
+    }
+    const qreal scale =
+            WindowsDisplayGeometry::scaleFactor(monitor, screen);
+    const QPoint origin = screen->geometry().topLeft();
+    return QRect(
+            origin.x() + qRound((x - monitor.bounds.left()) / scale),
+            origin.y() + qRound((y - monitor.bounds.top()) / scale),
+            qMax(1, qRound(width / scale)),
+            qMax(1, qRound(height / scale)));
+}
+
+} // namespace
 #endif
 
 void AppleScreenSharingSession::ensureLocalFileDragLifecycle()
@@ -168,7 +216,20 @@ void AppleScreenSharingSession::applyControlEvents(
                 << layout.displays.size() << " display(s), backing="
                 << layout.backingWidth << "x" << layout.backingHeight;
     }
-    if (!events.cursorUpdates.isEmpty()) {
+    for (const QSet<quint32>& symbols :
+         events.availableKeySymbolUpdates) {
+        m_AvailableSystemKeySymbols = symbols;
+    }
+    for (const AppleKeyboardInputSourceState& state :
+         events.keyboardInputSourceUpdates) {
+        queueKeyboardInputSourceMessage(
+                m_KeyboardInputSourceSharing.receiveRemoteState(state));
+        m_KeyEventSubtype.store(
+                m_KeyboardInputSourceSharing.keyEventSubtype());
+    }
+    if (!events.cursorUpdates.isEmpty() ||
+            !events.availableKeySymbolUpdates.isEmpty() ||
+            !events.keyboardInputSourceUpdates.isEmpty()) {
         updateControlSummary();
     }
 }
@@ -748,11 +809,20 @@ void AppleScreenSharingSession::updateControlSummary()
                     ? QStringLiteral("SHARED")
                     : QStringLiteral("MANUAL");
     const QString summary = QStringLiteral(
-            "MODE %1   CLIPBOARD %2   FILES %3   CURSOR %4   DISPLAY %5%6   O:MODE C:SHARE G:GET V:SEND M:MUTE P:PAUSE X:CANCEL")
+            "MODE %1   CLIPBOARD %2   INPUT %3   REMOTE %4   FILES %5   CURSOR %6   DISPLAY %7%8   O:MODE C:SHARE G:GET V:SEND M:MUTE P:PAUSE X:CANCEL")
             .arg(m_Observing.load() ? QStringLiteral("OBSERVE")
                                     : QStringLiteral("CONTROL"))
             .arg(!m_Observing.load() && m_ControlReady.load()
                          ? clipboard : QStringLiteral("OFF"))
+            .arg(!m_KeyboardInputSourceSharing.supported()
+                         ? QStringLiteral("N/A")
+                         : m_KeyboardInputSourceSharing.sharingEnabled()
+                                 ? QStringLiteral("SYNC")
+                                 : m_KeyboardInputSourceSharing
+                                           .usesSameInputSource()
+                                         ? QStringLiteral("MATCH")
+                                         : QStringLiteral("LOCAL"))
+            .arg(m_AvailableSystemKeySymbols.size())
             .arg(!m_Observing.load() && m_FileTransferSupported.load()
                          ? QStringLiteral("ON") : QStringLiteral("OFF"))
             .arg(m_RemoteCursorUpdateCount)
@@ -776,10 +846,111 @@ void AppleScreenSharingSession::updateControlSummary()
                 m_SharedClipboardSupported.load(),
                 m_ClipboardSharingEnabled.load(),
                 m_ControlReady.load() && !m_Observing.load());
+        const bool controlling =
+                m_ControlReady.load() && !m_Observing.load();
+        m_AppleMacInputBridge->updateRemoteMenuState(
+                m_KeyboardInputSourceSharing.supported(),
+                m_KeyboardInputSourceSharing.sharingEnabled(),
+                m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                        AppleRemoteSystemCommand::MissionControl)),
+                m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                        AppleRemoteSystemCommand::ApplicationWindows)),
+                m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                        AppleRemoteSystemCommand::ShowDesktop)),
+                m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                        AppleRemoteSystemCommand::Launchpad)),
+                controlling);
     }
+#endif
+#ifdef Q_OS_WIN
+    updateWindowsRemoteMenuState();
 #endif
     requestPerformanceOverlayUpdate();
 }
+
+#ifdef Q_OS_WIN
+void AppleScreenSharingSession::updateWindowsRemoteMenuState()
+{
+    if (m_WindowsRemoteMenuPanel == nullptr) {
+        return;
+    }
+    OverlayMenuPanel::AppleRemoteMenuState state;
+    state.controlling = m_ControlReady.load() && !m_Observing.load();
+    state.inputSourceSupported =
+            m_KeyboardInputSourceSharing.supported();
+    state.inputSourceSharingEnabled =
+            m_KeyboardInputSourceSharing.sharingEnabled();
+    state.inputSourceMapped =
+            !m_KeyboardInputSourceSharing.localIdentifier().isEmpty();
+    state.missionControlSupported =
+            m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                    AppleRemoteSystemCommand::MissionControl));
+    state.applicationWindowsSupported =
+            m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                    AppleRemoteSystemCommand::ApplicationWindows));
+    state.showDesktopSupported =
+            m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                    AppleRemoteSystemCommand::ShowDesktop));
+    state.launchpadSupported =
+            m_AvailableSystemKeySymbols.contains(static_cast<quint32>(
+                    AppleRemoteSystemCommand::Launchpad));
+    m_WindowsRemoteMenuPanel->setAppleRemoteMenuState(state);
+}
+
+void AppleScreenSharingSession::showWindowsRemoteMenu()
+{
+    if (m_WindowsRemoteMenuPanel == nullptr || m_Runtime == nullptr ||
+            m_Runtime->streamWindow() == nullptr) {
+        return;
+    }
+    if (m_WindowsRemoteMenuPanel->isMenuVisible()) {
+        m_WindowsRemoteMenuPanel->closeMenu();
+        return;
+    }
+    if (m_InputSourceMonitor != nullptr) {
+        m_InputSourceMonitor->refresh();
+    }
+    const QRect geometry = windowsOverlayGeometryForSdlWindow(
+            m_Runtime->streamWindow());
+    if (!geometry.isValid()) {
+        return;
+    }
+    updateWindowsRemoteMenuState();
+    const QPoint anchor = m_WindowsRemoteMenuButton != nullptr
+            ? m_WindowsRemoteMenuButton->geometry().center()
+            : geometry.topRight();
+    if (m_WindowsRemoteMenuButton != nullptr) {
+        m_WindowsRemoteMenuButton->hideButton();
+    }
+    m_WindowsRemoteMenuPanel->showAtCursor(
+            geometry.x(), geometry.y(), geometry.width(), geometry.height(),
+            anchor, false);
+}
+
+void AppleScreenSharingSession::syncWindowsRemoteMenuButton()
+{
+    if (m_Cancelled.load() || m_WindowsRemoteMenuButton == nullptr ||
+            m_Runtime == nullptr ||
+            m_Runtime->streamWindow() == nullptr) {
+        return;
+    }
+    const Uint32 flags = SDL_GetWindowFlags(m_Runtime->streamWindow());
+    if ((flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)) != 0 ||
+            (m_WindowsRemoteMenuPanel != nullptr &&
+             (m_WindowsRemoteMenuPanel->isMenuVisible() ||
+              m_WindowsRemoteMenuPanel->isClosing()))) {
+        m_WindowsRemoteMenuButton->hideButton();
+        return;
+    }
+    const QRect geometry = windowsOverlayGeometryForSdlWindow(
+            m_Runtime->streamWindow());
+    if (geometry.isValid()) {
+        m_WindowsRemoteMenuButton->showButton(
+                geometry.x(), geometry.y(),
+                geometry.width(), geometry.height());
+    }
+}
+#endif
 
 void AppleScreenSharingSession::localClipboardChanged()
 {
@@ -902,6 +1073,68 @@ void AppleScreenSharingSession::sendLocalClipboard()
             << "item(s)";
 }
 
+void AppleScreenSharingSession::queueKeyboardInputSourceMessage(
+        const std::optional<QByteArray>& message)
+{
+    if (!message.has_value() || message->isEmpty()) {
+        return;
+    }
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::Message;
+    outbound.message = *message;
+    queueControl(std::move(outbound));
+}
+
+void AppleScreenSharingSession::localKeyboardInputSourceChanged(
+        const QString& identifier)
+{
+    queueKeyboardInputSourceMessage(
+            m_KeyboardInputSourceSharing.setLocalIdentifier(identifier));
+    m_KeyEventSubtype.store(
+            m_KeyboardInputSourceSharing.keyEventSubtype());
+    updateControlSummary();
+}
+
+void AppleScreenSharingSession::toggleKeyboardInputSourceSharing()
+{
+    if (!m_ControlReady.load() || m_Observing.load() ||
+            !m_KeyboardInputSourceSharing.supported()) {
+        return;
+    }
+    const bool enabled =
+            !m_KeyboardInputSourceSharing.sharingEnabled();
+    queueKeyboardInputSourceMessage(
+            m_KeyboardInputSourceSharing.setSharingEnabled(enabled));
+    m_KeyEventSubtype.store(
+            m_KeyboardInputSourceSharing.keyEventSubtype());
+    m_Connection.keyboardInputSourceSharingEnabled = enabled;
+    emit keyboardInputSourceSharingChanged(m_Connection.id, enabled);
+    updateControlSummary();
+    qInfo() << "Apple keyboard input-source sharing"
+            << (enabled ? "enabled" : "disabled");
+}
+
+void AppleScreenSharingSession::performRemoteSystemCommand(
+        AppleRemoteSystemCommand command)
+{
+    const quint32 symbol = static_cast<quint32>(command);
+    if (!m_ControlReady.load() || m_Observing.load() ||
+            !m_AvailableSystemKeySymbols.contains(symbol)) {
+        return;
+    }
+#ifdef Q_OS_DARWIN
+    const quint16 keyboardType = static_cast<quint16>(LMGetKbdType());
+#else
+    const quint16 keyboardType = 0;
+#endif
+    queueRemoteKey(AppleRemoteKeyEvent{
+            true,
+            symbol,
+            keyboardType,
+            static_cast<quint16>(symbol),
+    });
+}
+
 void AppleScreenSharingSession::toggleControlMode()
 {
     const bool observing = !m_Observing.load();
@@ -909,6 +1142,10 @@ void AppleScreenSharingSession::toggleControlMode()
         releaseAllKeys();
     }
     m_Observing.store(observing);
+    const auto inputSourceMessage =
+            m_KeyboardInputSourceSharing.setControlling(!observing);
+    m_KeyEventSubtype.store(
+            m_KeyboardInputSourceSharing.keyEventSubtype());
     m_FileTransferService->setControlling(!observing);
     updateClipboardAutomaticEligibility(!observing);
     m_MouseButtons = 0;
@@ -916,6 +1153,9 @@ void AppleScreenSharingSession::toggleControlMode()
     outbound.kind = AppleOutboundControl::Kind::SetObserving;
     outbound.observing = observing;
     queueControl(std::move(outbound));
+    // The host must leave observe mode before it can accept an input-source
+    // selection. Keep both messages in the same ordered control queue.
+    queueKeyboardInputSourceMessage(inputSourceMessage);
     updateControlSummary();
     if (!observing) {
         localClipboardChanged();

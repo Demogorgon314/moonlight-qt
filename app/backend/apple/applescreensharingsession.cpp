@@ -6,10 +6,13 @@
 #ifdef Q_OS_WIN
 #include "applefiledrag_win.h"
 #include "applewindowskeyboardhook_p.h"
+#include "streaming/video/overlaymenubutton.h"
+#include "streaming/video/overlaymenupanel.h"
 #endif
 
 #include "appleaudiostream.h"
 #include "applecredentialstore.h"
+#include "appleinputsourceplatform.h"
 #include "applekeyboardmapper.h"
 #ifdef Q_OS_DARWIN
 #include "applefiledrag_mac.h"
@@ -198,6 +201,8 @@ AppleScreenSharingSession::AppleScreenSharingSession(
               std::make_unique<AppleRemoteFileDragInputState>())
 {
     m_ClipboardSharingEnabled.store(m_Connection.sharedClipboardEnabled);
+    m_KeyboardInputSourceSharing.setSharingEnabled(
+            m_Connection.keyboardInputSourceSharingEnabled);
     m_WorkerPool.setMaxThreadCount(1);
     m_WorkerPool.setExpiryTimeout(-1);
 }
@@ -282,6 +287,18 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
 #endif
     m_KeyboardMapper = std::make_unique<AppleKeyboardMapper>(
             preferences->swapWinAltKeys, keyboardType);
+    m_InputSourceMonitor = createAppleLocalInputSourceMonitor(
+            [this](const QString& identifier) {
+                localKeyboardInputSourceChanged(identifier);
+            });
+    if (m_InputSourceMonitor != nullptr) {
+        localKeyboardInputSourceChanged(
+                m_InputSourceMonitor->currentIdentifier());
+        if (!m_InputSourceMonitor->isValid()) {
+            addLaunchWarning(tr(
+                    "The local keyboard input source could not be monitored."));
+        }
+    }
     m_CaptureSystemKeysMode = static_cast<int>(
             preferences->captureSysKeysMode);
     // Match Moonlight's established streaming input behavior. These hints keep
@@ -357,6 +374,44 @@ bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
     }
 #ifdef Q_OS_WIN
     m_WindowsKeyboardHook = std::make_unique<AppleWindowsKeyboardHook>();
+    m_WindowsRemoteMenuPanel = std::make_unique<OverlayMenuPanel>();
+    m_WindowsRemoteMenuButton = std::make_unique<OverlayMenuButton>();
+    m_WindowsRemoteMenuPanel->setActionCallback(
+            [this](OverlayMenuPanel::MenuAction action) {
+                switch (action) {
+                case OverlayMenuPanel::MenuAction::ToggleAppleInputSourceSharing:
+                    toggleKeyboardInputSourceSharing();
+                    break;
+                case OverlayMenuPanel::MenuAction::AppleMissionControl:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::MissionControl);
+                    break;
+                case OverlayMenuPanel::MenuAction::AppleApplicationWindows:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::ApplicationWindows);
+                    break;
+                case OverlayMenuPanel::MenuAction::AppleShowDesktop:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::ShowDesktop);
+                    break;
+                case OverlayMenuPanel::MenuAction::AppleLaunchpad:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::Launchpad);
+                    break;
+                case OverlayMenuPanel::MenuAction::Quit:
+                    interrupt();
+                    break;
+                default:
+                    break;
+                }
+            });
+    m_WindowsRemoteMenuPanel->setCloseCallback([this]() {
+        syncWindowsRemoteMenuButton();
+    });
+    m_WindowsRemoteMenuButton->setClickCallback(
+            [this](const QPoint&, bool) {
+                showWindowsRemoteMenu();
+            });
 #endif
     if (QCoreApplication::instance() != nullptr) {
         QCoreApplication::instance()->installNativeEventFilter(this);
@@ -724,14 +779,18 @@ void AppleScreenSharingSession::mediaReady(
                         if (event.keyCode == 8) character = U'c';
                         if (event.keyCode == 5) character = U'g';
                         if (event.keyCode == 9) character = U'v';
+                        if (event.keyCode == 34) character = U'i';
                     }
                     if (character == U'c' || character == U'g' ||
-                            character == U'v') {
+                            character == U'v' || character == U'i') {
                         if (event.type == AppleMacKeyEvent::Type::Down &&
                                 !event.isRepeat) {
                             if (character == U'c') toggleClipboardSharing();
                             if (character == U'g') requestRemoteClipboard();
                             if (character == U'v') sendLocalClipboard();
+                            if (character == U'i') {
+                                toggleKeyboardInputSourceSharing();
+                            }
                         }
                         return;
                     }
@@ -882,6 +941,29 @@ void AppleScreenSharingSession::mediaReady(
                     sendLocalClipboard();
                     break;
                 }
+            },
+            [this](AppleMacRemoteCommand command) {
+                switch (command) {
+                case AppleMacRemoteCommand::ToggleInputSourceSharing:
+                    toggleKeyboardInputSourceSharing();
+                    break;
+                case AppleMacRemoteCommand::MissionControl:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::MissionControl);
+                    break;
+                case AppleMacRemoteCommand::ApplicationWindows:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::ApplicationWindows);
+                    break;
+                case AppleMacRemoteCommand::ShowDesktop:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::ShowDesktop);
+                    break;
+                case AppleMacRemoteCommand::Launchpad:
+                    performRemoteSystemCommand(
+                            AppleRemoteSystemCommand::Launchpad);
+                    break;
+                }
             });
     if (!m_AppleMacInputBridge->isValid()) {
         addLaunchWarning(tr("Native macOS input could not be attached."));
@@ -965,12 +1047,21 @@ void AppleScreenSharingSession::mediaReady(
         SDL_ShowWindow(guard->m_Runtime->streamWindow());
         SDL_RaiseWindow(guard->m_Runtime->streamWindow());
         guard->updateKeyboardGrabState(guard->m_Runtime->streamWindow());
+#ifdef Q_OS_WIN
+        guard->syncWindowsRemoteMenuButton();
+#endif
     });
 }
 
 void AppleScreenSharingSession::destroyPresentation()
 {
 #ifdef Q_OS_WIN
+    if (m_WindowsRemoteMenuPanel != nullptr) {
+        m_WindowsRemoteMenuPanel->closeMenu();
+    }
+    if (m_WindowsRemoteMenuButton != nullptr) {
+        m_WindowsRemoteMenuButton->hideButton();
+    }
     m_WindowsRemoteFileDragSource.reset();
     m_WindowsFileDropTargets.clear();
     m_WindowsKeyboardHook.reset();
@@ -1052,6 +1143,9 @@ void AppleScreenSharingSession::destroyPresentation()
     m_Renderer = nullptr;
     useDefaultRemoteCursor();
     m_RemoteCursorStore.clear();
+    m_KeyboardInputSourceSharing.resetForReconnect();
+    m_AvailableSystemKeySymbols.clear();
+    m_KeyEventSubtype.store(1);
     if (m_Runtime) {
         m_Runtime->shutdown();
     }

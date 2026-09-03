@@ -477,6 +477,8 @@ QVariantMap AppleProtocolAdapter::sessionOptions(
          connection.virtualDisplayCount},
         {QStringLiteral("sharedClipboardEnabled"),
          connection.sharedClipboardEnabled},
+        {QStringLiteral("keyboardInputSourceSharingEnabled"),
+         connection.keyboardInputSourceSharingEnabled},
     };
 }
 
@@ -498,9 +500,16 @@ bool AppleProtocolAdapter::setSessionOptions(
     const bool sharedClipboardEnabled = options.value(
             QStringLiteral("sharedClipboardEnabled"),
             found ? connection.sharedClipboardEnabled : true).toBool();
+    const bool keyboardInputSourceSharingEnabled = options.value(
+            QStringLiteral("keyboardInputSourceSharingEnabled"),
+            found ? connection.keyboardInputSourceSharingEnabled
+                  : false).toBool();
     if (!m_Store.setVirtualDisplayCount(identity.stableId(), displayCount) ||
             !m_Store.setSharedClipboardEnabled(
-                    identity.stableId(), sharedClipboardEnabled)) {
+                    identity.stableId(), sharedClipboardEnabled) ||
+            !m_Store.setKeyboardInputSourceSharingEnabled(
+                    identity.stableId(),
+                    keyboardInputSourceSharingEnabled)) {
         setError(error, tr("The Screen Sharing options could not be saved."));
         return false;
     }
@@ -557,6 +566,19 @@ StreamSession* AppleProtocolAdapter::createSession(
                 if (!adapter->m_Store.setSharedClipboardEnabled(
                             connectionId, enabled)) {
                     qWarning() << "Apple clipboard preference could not be saved";
+                    return;
+                }
+                emit adapter->connectionChanged(ConnectionIdentity(
+                        ProtocolKind::AppleScreenSharing,
+                        connectionId).toString());
+            });
+    connect(session,
+            &AppleScreenSharingSession::keyboardInputSourceSharingChanged,
+            adapter,
+            [adapter](const QString& connectionId, bool enabled) {
+                if (!adapter->m_Store.setKeyboardInputSourceSharingEnabled(
+                            connectionId, enabled)) {
+                    qWarning() << "Apple keyboard input source preference could not be saved";
                     return;
                 }
                 emit adapter->connectionChanged(ConnectionIdentity(

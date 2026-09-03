@@ -1,6 +1,8 @@
 #include "applescreensharingsession.h"
 #include "applescreensharingsession_p.h"
 
+#include "appleinputsourceplatform.h"
+
 #include "applefiledrag.h"
 #include "applekeyboardmapper.h"
 #include "applewindowskeyboardhook_p.h"
@@ -358,7 +360,8 @@ void AppleScreenSharingSession::queueRemoteKey(
                 key.symbol,
                 delta,
                 key.keyboardType,
-                key.keyCode);
+                key.keyCode,
+                m_KeyEventSubtype.load());
     queueControl(std::move(outbound));
 }
 
@@ -611,6 +614,31 @@ void AppleScreenSharingSession::pollSdlEvents()
         }
         case SDL_KEYDOWN:
         case SDL_KEYUP: {
+#ifdef Q_OS_WIN
+            if (m_InputSourceMonitor != nullptr) {
+                m_InputSourceMonitor->refresh();
+            }
+#endif
+#ifdef Q_OS_WIN
+            if (event.key.keysym.sym == SDLK_r &&
+                    (event.key.keysym.mod &
+                     (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    showWindowsRemoteMenu();
+                }
+                break;
+            }
+            if (event.key.keysym.sym == SDLK_i &&
+                    (event.key.keysym.mod &
+                     (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    toggleKeyboardInputSourceSharing();
+                }
+                break;
+            }
+#endif
             if (event.key.keysym.sym == SDLK_s &&
                     (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
                             (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
@@ -714,9 +742,15 @@ void AppleScreenSharingSession::pollSdlEvents()
             }
             if (event.window.event == SDL_WINDOWEVENT_MINIMIZED) {
                 setWindowMiniaturized(displayIndex, true);
+#ifdef Q_OS_WIN
+                if (displayIndex == 0) syncWindowsRemoteMenuButton();
+#endif
             }
             else if (event.window.event == SDL_WINDOWEVENT_RESTORED) {
                 setWindowMiniaturized(displayIndex, false);
+#ifdef Q_OS_WIN
+                if (displayIndex == 0) syncWindowsRemoteMenuButton();
+#endif
             }
             if (event.window.event == SDL_WINDOWEVENT_MOVED ||
                     event.window.event == SDL_WINDOWEVENT_RESTORED ||
@@ -725,6 +759,9 @@ void AppleScreenSharingSession::pollSdlEvents()
                         changedWindow,
                         displayIndex == 1 ? AppleWindowRole::Secondary
                                           : AppleWindowRole::Primary);
+#ifdef Q_OS_WIN
+                if (displayIndex == 0) syncWindowsRemoteMenuButton();
+#endif
             }
             if (event.window.event == SDL_WINDOWEVENT_ENTER ||
                     event.window.event == SDL_WINDOWEVENT_MOVED ||

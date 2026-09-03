@@ -204,6 +204,58 @@ AppleDisplayLayout parseDisplayLayout(const QByteArray& payload)
     return layout.isUsable() ? layout : AppleDisplayLayout();
 }
 
+std::optional<QSet<quint32>> parseAvailableKeySymbols(
+        const QByteArray& payload)
+{
+    if (payload.size() < 4) {
+        return std::nullopt;
+    }
+    bool ok = false;
+    const quint16 version = AppleWire::readUInt16(payload, 0, &ok);
+    if (!ok || version != 1) {
+        return std::nullopt;
+    }
+    const quint16 count = AppleWire::readUInt16(payload, 2, &ok);
+    if (!ok || count > (payload.size() - 4) / 4) {
+        return std::nullopt;
+    }
+    QSet<quint32> symbols;
+    for (int index = 0; index < count; ++index) {
+        symbols.insert(AppleWire::readUInt32(payload, 4 + index * 4, &ok));
+        if (!ok) {
+            return std::nullopt;
+        }
+    }
+    return symbols;
+}
+
+std::optional<AppleKeyboardInputSourceState> parseKeyboardInputSource(
+        const QByteArray& payload)
+{
+    if (payload.size() < 8) {
+        return std::nullopt;
+    }
+    bool ok = false;
+    AppleKeyboardInputSourceState state;
+    state.field = AppleWire::readUInt16(payload, 0, &ok);
+    if (!ok) {
+        return std::nullopt;
+    }
+    const quint32 flags = AppleWire::readUInt32(payload, 2, &ok);
+    if (!ok) {
+        return std::nullopt;
+    }
+    const quint16 identifierLength = AppleWire::readUInt16(payload, 6, &ok);
+    if (!ok || identifierLength == 0 ||
+            identifierLength > payload.size() - 8) {
+        return std::nullopt;
+    }
+    const QByteArray identifierBytes = payload.mid(8, identifierLength);
+    state.identifier = QString::fromUtf8(identifierBytes);
+    state.secureInput = (flags & 1) != 0;
+    return state;
+}
+
 } // namespace
 
 namespace {
@@ -459,6 +511,20 @@ AppleControlEvents AppleControlEventParser::parse(const QByteArray& message)
                     message.mid(payloadOffset, length));
             if (layout.isUsable()) {
                 events.displayLayouts.append(layout);
+            }
+        }
+        else if (encoding == 1107) {
+            const auto symbols = parseAvailableKeySymbols(
+                    message.mid(payloadOffset, length));
+            if (symbols.has_value()) {
+                events.availableKeySymbolUpdates.append(*symbols);
+            }
+        }
+        else if (encoding == 1109) {
+            const auto state = parseKeyboardInputSource(
+                    message.mid(payloadOffset, length));
+            if (state.has_value()) {
+                events.keyboardInputSourceUpdates.append(*state);
             }
         }
         offset = payloadOffset + length;

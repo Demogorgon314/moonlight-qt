@@ -520,3 +520,90 @@ bool testAppleMacClipboardMenuRoutesCommandsAndTracksState()
                         AppleMacClipboardCommand::Send};
     }
 }
+
+bool testAppleMacRemoteMenuRoutesSupportedCommands()
+{
+    @autoreleasepool {
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) return false;
+        SDL_Window* window = SDL_CreateWindow(
+                "Apple macOS remote menu test",
+                SDL_WINDOWPOS_UNDEFINED,
+                SDL_WINDOWPOS_UNDEFINED,
+                640,
+                360,
+                SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_METAL);
+        if (window == nullptr) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+            return false;
+        }
+
+        NSMenu* originalMenu = [NSApp.mainMenu retain];
+        NSMenu* testMenu = [[NSMenu alloc] initWithTitle:@""];
+        NSApp.mainMenu = testMenu;
+        std::vector<AppleMacRemoteCommand> commands;
+        bool stateIsCorrect = false;
+        bool disabledInObserveMode = false;
+        bool removedOnDestruction = false;
+        {
+            AppleMacInputBridge bridge(
+                    window,
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    0,
+                    {},
+                    [&commands](AppleMacRemoteCommand command) {
+                        commands.push_back(command);
+                    });
+            NSMenuItem* root = [testMenu itemWithTitle:@"Remote Mac"];
+            NSMenuItem* sharing = [root.submenu
+                    itemWithTitle:@"Follow This Mac's Input Source"];
+            NSMenuItem* mission = [root.submenu
+                    itemWithTitle:@"Mission Control"];
+            NSMenuItem* windows = [root.submenu
+                    itemWithTitle:@"Application Windows"];
+            NSMenuItem* desktop = [root.submenu
+                    itemWithTitle:@"Show Desktop"];
+            NSMenuItem* launchpad = [root.submenu itemWithTitle:@"Launchpad"];
+
+            bridge.updateRemoteMenuState(
+                    true, true, true, false, true, false, true);
+            stateIsCorrect = bridge.isValid() && root.enabled &&
+                    sharing.enabled &&
+                    sharing.state == NSControlStateValueOn &&
+                    mission.enabled && !windows.enabled &&
+                    desktop.enabled && !launchpad.enabled;
+            stateIsCorrect = stateIsCorrect &&
+                    [NSApp sendAction:sharing.action
+                                   to:sharing.target
+                                 from:sharing] &&
+                    [NSApp sendAction:mission.action
+                                   to:mission.target
+                                 from:mission] &&
+                    [NSApp sendAction:desktop.action
+                                   to:desktop.target
+                                 from:desktop];
+
+            bridge.updateRemoteMenuState(
+                    true, true, true, true, true, true, false);
+            disabledInObserveMode = !root.enabled && !sharing.enabled &&
+                    !mission.enabled && !windows.enabled &&
+                    !desktop.enabled && !launchpad.enabled;
+        }
+        removedOnDestruction = [testMenu itemWithTitle:@"Remote Mac"] == nil;
+
+        NSApp.mainMenu = originalMenu;
+        [originalMenu release];
+        [testMenu release];
+        SDL_DestroyWindow(window);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return stateIsCorrect && disabledInObserveMode &&
+                removedOnDestruction &&
+                commands == std::vector<AppleMacRemoteCommand>{
+                        AppleMacRemoteCommand::ToggleInputSourceSharing,
+                        AppleMacRemoteCommand::MissionControl,
+                        AppleMacRemoteCommand::ShowDesktop};
+    }
+}

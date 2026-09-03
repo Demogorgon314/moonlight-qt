@@ -160,6 +160,53 @@ void OverlayMenuPanel::buildMenuLevels()
 {
     m_MenuLevels.clear();
 
+    if (m_AppleRemoteMenuMode) {
+        const AppleRemoteMenuState& state = m_AppleRemoteMenuState;
+        MenuLevel remote;
+        remote.title = tr("Remote Mac");
+        const QString inputSourceLabel = !state.inputSourceSupported
+                ? tr("Input Source Sharing")
+                : state.inputSourceMapped
+                        ? tr("Follow This Device's Input Source")
+                        : tr("Input Source (Unmapped)");
+        remote.items.push_back({
+                inputSourceLabel,
+                QString(),
+                MenuItemType::Toggle,
+                MenuAction::ToggleAppleInputSourceSharing,
+                0,
+                state.controlling && state.inputSourceSupported &&
+                        state.inputSourceMapped,
+                state.inputSourceSharingEnabled,
+                true});
+        remote.items.push_back({
+                tr("Mission Control"), QString(), MenuItemType::Action,
+                MenuAction::AppleMissionControl, 0,
+                state.controlling && state.missionControlSupported,
+                false, false});
+        remote.items.push_back({
+                tr("Application Windows"), QString(), MenuItemType::Action,
+                MenuAction::AppleApplicationWindows, 0,
+                state.controlling && state.applicationWindowsSupported,
+                false, false});
+        remote.items.push_back({
+                tr("Show Desktop"), QString(), MenuItemType::Action,
+                MenuAction::AppleShowDesktop, 0,
+                state.controlling && state.showDesktopSupported,
+                false, false});
+        remote.items.push_back({
+                tr("Launchpad"), QString(), MenuItemType::Action,
+                MenuAction::AppleLaunchpad, 0,
+                state.controlling && state.launchpadSupported,
+                false, true});
+        remote.items.push_back({
+                tr("Disconnect"), QString(), MenuItemType::Action,
+                MenuAction::Quit, 0, true, false, false});
+        m_MenuLevels.push_back(std::move(remote));
+        m_CurrentLevel = 0;
+        return;
+    }
+
     // === Level 0: Top-level categories ===
     MenuLevel top;
     top.title = tr("Overlay Menu");
@@ -323,6 +370,15 @@ void OverlayMenuPanel::buildMenuLevels()
     if (m_CurrentLevel >= static_cast<int>(m_MenuLevels.size())) {
         m_CurrentLevel = 0;
     }
+}
+
+void OverlayMenuPanel::setAppleRemoteMenuState(
+        const AppleRemoteMenuState& state)
+{
+    m_AppleRemoteMenuMode = true;
+    m_AppleRemoteMenuState = state;
+    buildMenuLevels();
+    forceRepaint();
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +965,11 @@ void OverlayMenuPanel::paintEvent(QPaintEvent*)
         case MenuAction::UngrabInput:       return QChar(0xE785); // Mouse back
         case MenuAction::PasteText:         return QChar(0xE77F); // Paste
         case MenuAction::TogglePointerRegionLock: return QChar(0xE72E); // Lock
+        case MenuAction::ToggleAppleInputSourceSharing: return QChar(0xE8D4); // Keyboard
+        case MenuAction::AppleMissionControl: return QChar(0xE80F); // Tiles
+        case MenuAction::AppleApplicationWindows: return QChar(0xE737); // App view
+        case MenuAction::AppleShowDesktop: return QChar(0xE7F4); // Desktop
+        case MenuAction::AppleLaunchpad: return QChar(0xE71D); // Grid
 #ifdef MOONLIGHT_ENABLE_FUNCTION_TESTS
         case MenuAction::OpenStylusReplayPanel: return QChar(0xE943); // Developer tools
 #endif
@@ -938,6 +999,11 @@ void OverlayMenuPanel::paintEvent(QPaintEvent*)
         case MenuAction::UngrabInput:       return QChar(0xE5C4); // arrow_back
         case MenuAction::PasteText:         return QChar(0xE14F); // content_paste
         case MenuAction::TogglePointerRegionLock: return QChar(0xE897); // lock
+        case MenuAction::ToggleAppleInputSourceSharing: return QChar(0xE312); // keyboard
+        case MenuAction::AppleMissionControl: return QChar(0xE5C3); // apps
+        case MenuAction::AppleApplicationWindows: return QChar(0xE8F0); // view
+        case MenuAction::AppleShowDesktop: return QChar(0xE30A); // desktop
+        case MenuAction::AppleLaunchpad: return QChar(0xE5C3); // grid
 #ifdef MOONLIGHT_ENABLE_FUNCTION_TESTS
         case MenuAction::OpenStylusReplayPanel: return QChar(0xE869); // build
 #endif

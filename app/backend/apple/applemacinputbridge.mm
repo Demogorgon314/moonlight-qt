@@ -67,14 +67,16 @@ struct InputContext
                  AppleMacInputBridge::CloseCallback close,
                  std::shared_ptr<AppleLocalFileDragLifecycle> localFileDrag,
                  int localFileDragDisplayIndex,
-                 AppleMacInputBridge::ClipboardCommandCallback clipboardCommand)
+                 AppleMacInputBridge::ClipboardCommandCallback clipboardCommand,
+                 AppleMacInputBridge::RemoteCommandCallback remoteCommand)
         : keyCallback(std::move(key)),
           pointerCallback(std::move(pointer)),
           remoteDragCallback(std::move(remoteDrag)),
           closeCallback(std::move(close)),
           localFileDragLifecycle(std::move(localFileDrag)),
           displayIndex(localFileDragDisplayIndex),
-          clipboardCommandCallback(std::move(clipboardCommand))
+          clipboardCommandCallback(std::move(clipboardCommand)),
+          remoteCommandCallback(std::move(remoteCommand))
     {
     }
 
@@ -301,6 +303,7 @@ struct InputContext
     std::shared_ptr<AppleLocalFileDragLifecycle> localFileDragLifecycle;
     int displayIndex = 0;
     AppleMacInputBridge::ClipboardCommandCallback clipboardCommandCallback;
+    AppleMacInputBridge::RemoteCommandCallback remoteCommandCallback;
     std::unordered_map<unsigned short, unsigned short> activeModifiers;
     NSEvent* lastLeftDragEvent = nil;
 
@@ -521,6 +524,39 @@ void bridgeSendClipboard(id view, SEL, id)
     }
 }
 
+void sendRemoteCommand(id view, AppleMacRemoteCommand command)
+{
+    if (InputContext* context = inputContext(view);
+            context != nullptr && context->remoteCommandCallback) {
+        context->remoteCommandCallback(command);
+    }
+}
+
+void bridgeToggleInputSourceSharing(id view, SEL, id)
+{
+    sendRemoteCommand(view, AppleMacRemoteCommand::ToggleInputSourceSharing);
+}
+
+void bridgeMissionControl(id view, SEL, id)
+{
+    sendRemoteCommand(view, AppleMacRemoteCommand::MissionControl);
+}
+
+void bridgeApplicationWindows(id view, SEL, id)
+{
+    sendRemoteCommand(view, AppleMacRemoteCommand::ApplicationWindows);
+}
+
+void bridgeShowDesktop(id view, SEL, id)
+{
+    sendRemoteCommand(view, AppleMacRemoteCommand::ShowDesktop);
+}
+
+void bridgeLaunchpad(id view, SEL, id)
+{
+    sendRemoteCommand(view, AppleMacRemoteCommand::Launchpad);
+}
+
 bool addOverride(Class subclass, Class original, SEL selector, IMP function)
 {
     Method method = class_getInstanceMethod(original, selector);
@@ -614,6 +650,31 @@ Class inputSubclassForClass(Class original)
                     subclass,
                     sel_registerName("moonlightSendClipboard:"),
                     reinterpret_cast<IMP>(bridgeSendClipboard),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightToggleInputSourceSharing:"),
+                    reinterpret_cast<IMP>(bridgeToggleInputSourceSharing),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightMissionControl:"),
+                    reinterpret_cast<IMP>(bridgeMissionControl),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightApplicationWindows:"),
+                    reinterpret_cast<IMP>(bridgeApplicationWindows),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightShowDesktop:"),
+                    reinterpret_cast<IMP>(bridgeShowDesktop),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightLaunchpad:"),
+                    reinterpret_cast<IMP>(bridgeLaunchpad),
                     "v@:@")) {
         if (subclass != Nil) {
             objc_disposeClassPair(subclass);
@@ -710,6 +771,12 @@ struct AppleMacInputBridge::Private
     NSMenuItem* clipboardSharingItem = nil;
     NSMenuItem* receiveClipboardItem = nil;
     NSMenuItem* sendClipboardItem = nil;
+    NSMenuItem* remoteMenuItem = nil;
+    NSMenuItem* inputSourceSharingItem = nil;
+    NSMenuItem* missionControlItem = nil;
+    NSMenuItem* applicationWindowsItem = nil;
+    NSMenuItem* showDesktopItem = nil;
+    NSMenuItem* launchpadItem = nil;
     Class originalClass = Nil;
     bool valid = false;
 };
@@ -722,7 +789,8 @@ AppleMacInputBridge::AppleMacInputBridge(
         CloseCallback closeCallback,
         std::shared_ptr<AppleLocalFileDragLifecycle> localFileDragLifecycle,
         int displayIndex,
-        ClipboardCommandCallback clipboardCommandCallback)
+        ClipboardCommandCallback clipboardCommandCallback,
+        RemoteCommandCallback remoteCommandCallback)
     : d(std::make_unique<Private>())
 {
     @autoreleasepool {
@@ -745,7 +813,8 @@ AppleMacInputBridge::AppleMacInputBridge(
                 std::move(closeCallback),
                 std::move(localFileDragLifecycle),
                 displayIndex,
-                std::move(clipboardCommandCallback));
+                std::move(clipboardCommandCallback),
+                std::move(remoteCommandCallback));
         d->view = [view retain];
         d->originalClass = originalClass;
         d->originalDraggedTypes = [view.registeredDraggedTypes copy];
@@ -853,8 +922,52 @@ AppleMacInputBridge::AppleMacInputBridge(
             }
             [mainMenu insertItem:d->clipboardMenuItem
                          atIndex:insertionIndex];
+
+            d->remoteMenuItem = [[NSMenuItem alloc]
+                    initWithTitle:@"Remote Mac"
+                           action:nil
+                    keyEquivalent:@""];
+            d->remoteMenuItem.identifier =
+                    @"com.moonlight.apple-screen-sharing.remote";
+            NSMenu* remoteMenu = [[NSMenu alloc] initWithTitle:@"Remote Mac"];
+            remoteMenu.autoenablesItems = NO;
+            d->remoteMenuItem.submenu = remoteMenu;
+            d->inputSourceSharingItem = [[NSMenuItem alloc]
+                    initWithTitle:@"Follow This Mac's Input Source"
+                           action:sel_registerName(
+                                          "moonlightToggleInputSourceSharing:")
+                    keyEquivalent:@"i"];
+            d->inputSourceSharingItem.target = view;
+            d->inputSourceSharingItem.keyEquivalentModifierMask =
+                    shortcutModifiers;
+            [remoteMenu addItem:d->inputSourceSharingItem];
+            [remoteMenu addItem:[NSMenuItem separatorItem]];
+
+            const auto addRemoteItem = [view, remoteMenu](
+                    NSString* title, const char* selector) {
+                NSMenuItem* item = [[NSMenuItem alloc]
+                        initWithTitle:title
+                               action:sel_registerName(selector)
+                        keyEquivalent:@""];
+                item.target = view;
+                [remoteMenu addItem:item];
+                return item;
+            };
+            d->missionControlItem = addRemoteItem(
+                    @"Mission Control", "moonlightMissionControl:");
+            d->applicationWindowsItem = addRemoteItem(
+                    @"Application Windows", "moonlightApplicationWindows:");
+            d->showDesktopItem = addRemoteItem(
+                    @"Show Desktop", "moonlightShowDesktop:");
+            d->launchpadItem = addRemoteItem(
+                    @"Launchpad", "moonlightLaunchpad:");
+            [mainMenu insertItem:d->remoteMenuItem
+                         atIndex:insertionIndex + 1];
             [clipboardMenu release];
+            [remoteMenu release];
             updateClipboardMenuState(false, false, false, false);
+            updateRemoteMenuState(
+                    false, false, false, false, false, false, false);
         }
         d->valid = true;
     }
@@ -876,6 +989,26 @@ AppleMacInputBridge::~AppleMacInputBridge()
             d->sendClipboardItem = nil;
             [d->clipboardMenuItem release];
             d->clipboardMenuItem = nil;
+        }
+        if (d->remoteMenuItem != nil) {
+            d->inputSourceSharingItem.target = nil;
+            d->missionControlItem.target = nil;
+            d->applicationWindowsItem.target = nil;
+            d->showDesktopItem.target = nil;
+            d->launchpadItem.target = nil;
+            [d->remoteMenuItem.menu removeItem:d->remoteMenuItem];
+            [d->inputSourceSharingItem release];
+            d->inputSourceSharingItem = nil;
+            [d->missionControlItem release];
+            d->missionControlItem = nil;
+            [d->applicationWindowsItem release];
+            d->applicationWindowsItem = nil;
+            [d->showDesktopItem release];
+            d->showDesktopItem = nil;
+            [d->launchpadItem release];
+            d->launchpadItem = nil;
+            [d->remoteMenuItem release];
+            d->remoteMenuItem = nil;
         }
         if (d->view != nil) {
             [d->view unregisterDraggedTypes];
@@ -959,5 +1092,35 @@ void AppleMacInputBridge::updateClipboardMenuState(
                 ? NSControlStateValueOn : NSControlStateValueOff;
         d->receiveClipboardItem.enabled = manualMode;
         d->sendClipboardItem.enabled = manualMode;
+    }
+}
+
+void AppleMacInputBridge::updateRemoteMenuState(
+        bool inputSourceSupported,
+        bool inputSourceSharingEnabled,
+        bool missionControlSupported,
+        bool applicationWindowsSupported,
+        bool showDesktopSupported,
+        bool launchpadSupported,
+        bool controlling)
+{
+    @autoreleasepool {
+        if (d->remoteMenuItem == nil) {
+            return;
+        }
+        d->remoteMenuItem.enabled = controlling &&
+                (inputSourceSupported || missionControlSupported ||
+                 applicationWindowsSupported || showDesktopSupported ||
+                 launchpadSupported);
+        d->inputSourceSharingItem.enabled =
+                controlling && inputSourceSupported;
+        d->inputSourceSharingItem.state = inputSourceSharingEnabled
+                ? NSControlStateValueOn : NSControlStateValueOff;
+        d->missionControlItem.enabled =
+                controlling && missionControlSupported;
+        d->applicationWindowsItem.enabled =
+                controlling && applicationWindowsSupported;
+        d->showDesktopItem.enabled = controlling && showDesktopSupported;
+        d->launchpadItem.enabled = controlling && launchpadSupported;
     }
 }

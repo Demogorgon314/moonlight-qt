@@ -12,6 +12,8 @@
 #endif
 #include "backend/apple/applefiletransfer.h"
 #include "backend/apple/applefiletransferservice.h"
+#include "backend/apple/appleinputsourceplatform.h"
+#include "backend/apple/applekeyboardinputsource.h"
 #include "backend/apple/applekeyboardmapper.h"
 #ifdef Q_OS_DARWIN
 #include "backend/apple/applefiledrag_mac.h"
@@ -24,6 +26,7 @@ bool testAppleMacInputBridgeRoutesLocalFileDrag();
 bool testAppleMacInputBridgeReleasesModifiersOnFocusLoss();
 bool testAppleMacClipboardPreservesMultipleItemsAndFlavors();
 bool testAppleMacClipboardMenuRoutesCommandsAndTracksState();
+bool testAppleMacRemoteMenuRoutesSupportedCommands();
 #endif
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -99,6 +102,17 @@ QByteArray cursorRectangle(quint16 hotspotX,
     AppleWire::appendUInt32(rectangle, id);
     AppleWire::appendUInt32(rectangle, static_cast<quint32>(compressed.size()));
     rectangle.append(compressed);
+    return rectangle;
+}
+
+QByteArray lengthPrefixedRectangle(qint32 encoding,
+                                   const QByteArray& payload)
+{
+    QByteArray rectangle(12, '\0');
+    writeUInt32(rectangle, 8, static_cast<quint32>(encoding));
+    AppleWire::appendUInt16(
+            rectangle, static_cast<quint16>(payload.size()));
+    rectangle.append(payload);
     return rectangle;
 }
 
@@ -294,6 +308,9 @@ void testSavedConnectionIdentityAndSecretBoundary()
         require(store.setSharedClipboardEnabled(firstId, false) &&
                 !store.connection(firstId).sharedClipboardEnabled,
                 "the shared clipboard preference must be stored per saved Mac");
+        require(store.setKeyboardInputSourceSharingEnabled(firstId, true) &&
+                store.connection(firstId).keyboardInputSourceSharingEnabled,
+                "keyboard input-source sharing must be stored per saved Mac");
 
         updated = endpoint;
         updated.host = QStringLiteral("192.0.2.44");
@@ -323,6 +340,8 @@ void testSavedConnectionIdentityAndSecretBoundary()
                 "the replacement connection display count must persist independently");
         require(store.setSharedClipboardEnabled(readded.id, false),
                 "the replacement connection clipboard preference must persist independently");
+        require(store.setKeyboardInputSourceSharingEnabled(readded.id, true),
+                "the replacement connection input-source preference must persist independently");
     }
 
     QFile settingsFile(path);
@@ -336,7 +355,8 @@ void testSavedConnectionIdentityAndSecretBoundary()
     require(reloaded.connections().size() == 1 &&
             reloaded.connections().first().id != firstId &&
             reloaded.connections().first().virtualDisplayCount == 2 &&
-            !reloaded.connections().first().sharedClipboardEnabled,
+            !reloaded.connections().first().sharedClipboardEnabled &&
+            reloaded.connections().first().keyboardInputSourceSharingEnabled,
             "saved identity must survive process restart and removed identity must stay absent");
 }
 
@@ -1068,6 +1088,11 @@ void testEncryptedInputWireBoundary()
                     "ff010000ff0d00000009000000000028"),
             "key input must preserve X11 keysym and native scan code fields");
 
+    const AppleInputEncryptionRequest matchingSourceKey =
+            AppleMediaWire::keyEvent(true, 'a', 10, 40, 0, 3);
+    require(matchingSourceKey.header == QByteArray::fromHex("1003"),
+            "matching keyboard input sources must select key event subtype three");
+
     AppleEncryptedRecordLayer records(
             QByteArray::fromHex("00112233445566778899aabbccddeeff"),
             QByteArray::fromHex("ffeeddccbbaa99887766554433221100"));
@@ -1076,6 +1101,129 @@ void testEncryptedInputWireBoundary()
     require(inputMessage.size() == 18 && inputMessage.startsWith(key.header) &&
             inputMessage.mid(2) != key.plaintextBlock,
             "the inner input block must use the record content key without consuming record order");
+}
+
+void testKeyboardInputSourceWireAndStateMachine()
+{
+    require(appleInputSourceIdentifierForWindowsLocale(
+                    QStringLiteral("en-US")) ==
+                    QStringLiteral("com.apple.keylayout.ABC") &&
+                    appleInputSourceIdentifierForWindowsLocale(
+                            QStringLiteral("zh-Hans-CN")) ==
+                    QStringLiteral("com.apple.inputmethod.SCIM.ITABC") &&
+                    appleInputSourceIdentifierForWindowsLocale(
+                            QStringLiteral("ja-JP")).isEmpty(),
+            "Windows input locales must use conservative stable macOS mappings");
+
+    QString error;
+    const QByteArray enabled =
+            AppleKeyboardInputSourceWire::sharingMessage(
+                    QStringLiteral("com.apple.keylayout.ABC"), &error);
+    require(error.isEmpty() && enabled == QByteArray::fromHex(
+                    "1a00001b00010017636f6d2e6170706c652e6b65796c61796f75742e414243"),
+            "input-source sharing must use the native length-prefixed UTF-8 message");
+    require(AppleKeyboardInputSourceWire::sharingMessage({}) ==
+                    QByteArray::fromHex("1a00000400010000"),
+            "an empty input-source identifier must encode the native disable message");
+
+    error.clear();
+    require(AppleKeyboardInputSourceWire::sharingMessage(
+                    QString(65532, QLatin1Char('a')), &error).isEmpty() &&
+                    !error.isEmpty(),
+            "an input-source identifier that exceeds the wire length must be rejected");
+
+    AppleKeyboardInputSourceSharing sharing;
+    require(!sharing.supported() && !sharing.sharingEnabled() &&
+                    sharing.keyEventSubtype() == 1,
+            "input-source sharing must start disabled and compatible with old hosts");
+    AppleKeyboardInputSourceSharing unmapped;
+    unmapped.setSharingEnabled(true);
+    unmapped.receiveRemoteState(AppleKeyboardInputSourceState{
+            1, false, QStringLiteral("com.apple.keylayout.ABC")});
+    require(unmapped.keyEventSubtype() == 1,
+            "an unmapped local input source must retain subtype-one key semantics");
+    require(!sharing.setLocalIdentifier(
+                    QStringLiteral("com.apple.keylayout.ABC")).has_value() &&
+                    !sharing.setSharingEnabled(true).has_value(),
+            "local preferences must not emit traffic before host capability arrives");
+
+    AppleKeyboardInputSourceState remote;
+    remote.field = 1;
+    remote.secureInput = true;
+    remote.identifier = QStringLiteral("com.apple.keylayout.US");
+    const auto firstCapability = sharing.receiveRemoteState(remote);
+    require(firstCapability.has_value() && *firstCapability == enabled &&
+                    sharing.supported() && sharing.secureInput() &&
+                    sharing.keyEventSubtype() == 3,
+            "the first host state must unlock the saved sharing preference and subtype three");
+    const auto refreshed = sharing.receiveRemoteState(remote);
+    require(refreshed.has_value() && *refreshed == enabled,
+            "host input-source updates must refresh the active local selection");
+
+    require(!sharing.setControlling(false).has_value() &&
+                    !sharing.setLocalIdentifier(
+                            QStringLiteral("com.apple.keylayout.US")).has_value(),
+            "observe mode must suppress input-source control traffic");
+    const auto resumed = sharing.setControlling(true);
+    require(resumed.has_value() && resumed->endsWith("com.apple.keylayout.US"),
+            "returning to control mode must publish the latest local input source");
+    const auto disabled = sharing.setSharingEnabled(false);
+    require(disabled.has_value() &&
+                    *disabled == QByteArray::fromHex("1a00000400010000") &&
+                    sharing.keyEventSubtype() == 3,
+            "disabling sharing must notify the host while equal source identifiers retain subtype three");
+
+    sharing.resetForReconnect();
+    require(!sharing.supported() && sharing.keyEventSubtype() == 1,
+            "reconnect must discard stale host capability and input-source state");
+}
+
+void testKeyboardInputSourceAndSystemCommandEvents()
+{
+    QByteArray symbolsPayload;
+    AppleWire::appendUInt16(symbolsPayload, 1);
+    AppleWire::appendUInt16(symbolsPayload, 3);
+    AppleWire::appendUInt32(symbolsPayload, static_cast<quint32>(
+            AppleRemoteSystemCommand::MissionControl));
+    AppleWire::appendUInt32(symbolsPayload, static_cast<quint32>(
+            AppleRemoteSystemCommand::ShowDesktop));
+    AppleWire::appendUInt32(symbolsPayload, 0xdeadbeef);
+
+    const QByteArray sourceId("com.apple.inputmethod.SCIM.ITABC");
+    QByteArray sourcePayload;
+    AppleWire::appendUInt16(sourcePayload, 1);
+    AppleWire::appendUInt32(sourcePayload, 1);
+    AppleWire::appendUInt16(
+            sourcePayload, static_cast<quint16>(sourceId.size()));
+    sourcePayload.append(sourceId);
+
+    QByteArray message = QByteArray::fromHex("00000002");
+    message.append(lengthPrefixedRectangle(1107, symbolsPayload));
+    message.append(lengthPrefixedRectangle(1109, sourcePayload));
+    const AppleControlEvents events = AppleControlEventParser::parse(message);
+    require(events.availableKeySymbolUpdates.size() == 1 &&
+                    events.availableKeySymbolUpdates.first().size() == 3 &&
+                    events.availableKeySymbolUpdates.first().contains(
+                            static_cast<quint32>(
+                                    AppleRemoteSystemCommand::MissionControl)),
+            "the available-key-symbol rectangle must preserve the host capability snapshot");
+    require(events.keyboardInputSourceUpdates.size() == 1 &&
+                    events.keyboardInputSourceUpdates.first().field == 1 &&
+                    events.keyboardInputSourceUpdates.first().secureInput &&
+                    events.keyboardInputSourceUpdates.first().identifier ==
+                            QString::fromUtf8(sourceId),
+            "the keyboard-input-state rectangle must preserve flags and UTF-8 identifier");
+
+    QByteArray malformedVersion = symbolsPayload;
+    writeUInt16(malformedVersion, 0, 2);
+    QByteArray truncatedSource = sourcePayload.left(sourcePayload.size() - 1);
+    QByteArray malformed = QByteArray::fromHex("00000002");
+    malformed.append(lengthPrefixedRectangle(1107, malformedVersion));
+    malformed.append(lengthPrefixedRectangle(1109, truncatedSource));
+    const AppleControlEvents rejected = AppleControlEventParser::parse(malformed);
+    require(rejected.availableKeySymbolUpdates.isEmpty() &&
+                    rejected.keyboardInputSourceUpdates.isEmpty(),
+            "unsupported capability versions and truncated source identifiers must be ignored");
 }
 
 void testAppleKeyboardMappingAndFocusRelease()
@@ -3338,6 +3486,10 @@ int main(int argc, char* argv[])
     testHevcGlobalDecodingOrderAdmission();
     std::fprintf(stderr, "testEncryptedInputWireBoundary\n");
     testEncryptedInputWireBoundary();
+    std::fprintf(stderr, "testKeyboardInputSourceWireAndStateMachine\n");
+    testKeyboardInputSourceWireAndStateMachine();
+    std::fprintf(stderr, "testKeyboardInputSourceAndSystemCommandEvents\n");
+    testKeyboardInputSourceAndSystemCommandEvents();
     std::fprintf(stderr, "testAppleKeyboardMappingAndFocusRelease\n");
     testAppleKeyboardMappingAndFocusRelease();
     std::fprintf(stderr, "testNativePrecisionScrollWireAndDeltas\n");
@@ -3363,6 +3515,9 @@ int main(int argc, char* argv[])
     std::fprintf(stderr, "testAppleMacClipboardMenuRoutesCommandsAndTracksState\n");
     require(testAppleMacClipboardMenuRoutesCommandsAndTracksState(),
             "the macOS clipboard menu did not route commands or track session state");
+    std::fprintf(stderr, "testAppleMacRemoteMenuRoutesSupportedCommands\n");
+    require(testAppleMacRemoteMenuRoutesSupportedCommands(),
+            "the macOS remote menu did not gate and route host capabilities");
 #endif
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
     testAppleStreamWindowPlacementPersistence();

@@ -418,8 +418,7 @@ bool AppleMediaNegotiator::negotiate(
         }
         const AppleControlEvents controlEvents =
                 AppleControlEventParser::parse(response);
-        if (!controlEvents.cursorUpdates.isEmpty() ||
-                !controlEvents.displayLayouts.isEmpty()) {
+        if (!controlEvents.isEmpty()) {
             // The single-display path can receive its authoritative initial
             // layout while media answers are still being negotiated. Preserve
             // it for the session controller just like the Swift reference;

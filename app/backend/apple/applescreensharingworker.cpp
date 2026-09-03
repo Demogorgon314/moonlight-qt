@@ -819,8 +819,7 @@ private:
             if (!events.displayLayouts.isEmpty()) {
                 hasReceivedInitialLayout = true;
             }
-            if (!events.cursorUpdates.isEmpty() ||
-                    !events.displayLayouts.isEmpty()) {
+            if (!events.isEmpty()) {
                 const QPointer<AppleScreenSharingSession> session = m_Session;
                 QMetaObject::invokeMethod(
                         session,
@@ -1073,8 +1072,7 @@ private:
                         return false;
                     }
                 }
-                if (!events.cursorUpdates.isEmpty() ||
-                        !events.displayLayouts.isEmpty()) {
+                if (!events.isEmpty()) {
                     const QPointer<AppleScreenSharingSession> session = m_Session;
                     QMetaObject::invokeMethod(
                             session,

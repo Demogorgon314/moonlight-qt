@@ -2892,6 +2892,12 @@ void Session::dispatchQtMenuAction(OverlayMenuPanel::MenuAction action)
     case OverlayMenuPanel::MenuAction::TogglePointerRegionLock:
         combo = SdlInputHandler::KeyComboTogglePointerRegionLock;
         break;
+    case OverlayMenuPanel::MenuAction::ToggleAppleInputSourceSharing:
+    case OverlayMenuPanel::MenuAction::AppleMissionControl:
+    case OverlayMenuPanel::MenuAction::AppleApplicationWindows:
+    case OverlayMenuPanel::MenuAction::AppleShowDesktop:
+    case OverlayMenuPanel::MenuAction::AppleLaunchpad:
+        return;
 
     case OverlayMenuPanel::MenuAction::ShowHostFiles:
         appendFileMappingDiagnostic(

@@ -1113,10 +1113,12 @@ AppleInputEncryptionRequest keyEvent(bool isDown,
                                      quint32 keySymbol,
                                      quint32 timestampDelta,
                                      quint16 keyboardType,
-                                     quint16 keyCode)
+                                     quint16 keyCode,
+                                     quint8 subtype)
 {
     AppleInputEncryptionRequest request;
-    request.header = QByteArray::fromHex("1001");
+    request.header.append(char(0x10));
+    request.header.append(static_cast<char>(subtype));
     request.plaintextBlock = QByteArray(16, '\0');
     request.plaintextBlock[0] = char(0xff);
     request.plaintextBlock[1] = isDown ? char(1) : char(0);

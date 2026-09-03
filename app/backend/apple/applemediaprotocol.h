@@ -289,7 +289,8 @@ AppleInputEncryptionRequest keyEvent(bool isDown,
                                      quint32 keySymbol,
                                      quint32 timestampDelta,
                                      quint16 keyboardType,
-                                     quint16 keyCode);
+                                     quint16 keyCode,
+                                     quint8 subtype = 1);
 
 QByteArray receiverReport(quint32 sender);
 QByteArray receiverReport(quint32 sender,

@@ -242,6 +242,24 @@ bool AppleConnectionStore::setSharedClipboardEnabled(
     return true;
 }
 
+bool AppleConnectionStore::setKeyboardInputSourceSharingEnabled(
+        const QString& id,
+        bool enabled)
+{
+    const int index = indexOf(id);
+    if (index < 0) {
+        return false;
+    }
+    AppleSavedConnection& connection = m_Connections[index];
+    if (connection.keyboardInputSourceSharingEnabled == enabled) {
+        return true;
+    }
+    connection.keyboardInputSourceSharingEnabled = enabled;
+    ++connection.revision;
+    persist();
+    return true;
+}
+
 void AppleConnectionStore::load()
 {
     const std::unique_ptr<QSettings> settings = createSettings(m_SettingsFile);
@@ -270,6 +288,9 @@ void AppleConnectionStore::load()
                 2);
         connection.sharedClipboardEnabled = settings->value(
                 QStringLiteral("sharedClipboardEnabled"), true).toBool();
+        connection.keyboardInputSourceSharingEnabled = settings->value(
+                QStringLiteral("keyboardInputSourceSharingEnabled"),
+                false).toBool();
         connection.revision = settings->value(QStringLiteral("revision"), 1).toULongLong();
         if (connection.isValid()) {
             m_Connections.append(connection);
@@ -304,6 +325,9 @@ void AppleConnectionStore::persist() const
                            connection.virtualDisplayCount);
         settings->setValue(QStringLiteral("sharedClipboardEnabled"),
                            connection.sharedClipboardEnabled);
+        settings->setValue(
+                QStringLiteral("keyboardInputSourceSharingEnabled"),
+                connection.keyboardInputSourceSharingEnabled);
         settings->setValue(QStringLiteral("revision"), connection.revision);
     }
     settings->endArray();

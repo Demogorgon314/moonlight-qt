@@ -26,6 +26,7 @@ struct AppleSavedConnection
     QString preferredUsername;
     int virtualDisplayCount = 1;
     bool sharedClipboardEnabled = true;
+    bool keyboardInputSourceSharingEnabled = false;
     quint64 revision = 1;
 
     bool isValid() const;
@@ -54,6 +55,7 @@ public:
     bool clearCredentialBinding(const QString& id);
     bool setVirtualDisplayCount(const QString& id, int displayCount);
     bool setSharedClipboardEnabled(const QString& id, bool enabled);
+    bool setKeyboardInputSourceSharingEnabled(const QString& id, bool enabled);
 
 private:
     void load();

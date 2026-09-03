@@ -67,6 +67,11 @@ public:
         SetMenuPlacementLeft,
         SetMenuPlacementButton,
         SetMenuPlacementDisabled,
+        ToggleAppleInputSourceSharing,
+        AppleMissionControl,
+        AppleApplicationWindows,
+        AppleShowDesktop,
+        AppleLaunchpad,
 #ifdef MOONLIGHT_ENABLE_FUNCTION_TESTS
         OpenStylusReplayPanel,
 #endif
@@ -98,6 +103,17 @@ public:
         QString label;
         QString detail;
         bool supported = true;
+    };
+
+    struct AppleRemoteMenuState {
+        bool controlling = false;
+        bool inputSourceSupported = false;
+        bool inputSourceSharingEnabled = false;
+        bool inputSourceMapped = false;
+        bool missionControlSupported = false;
+        bool applicationWindowsSupported = false;
+        bool showDesktopSupported = false;
+        bool launchpadSupported = false;
     };
 
     enum class MenuItemType {
@@ -159,6 +175,7 @@ public:
                               std::vector<RemoteUsbDevice> devices,
                               const QString& activeDeviceId,
                               const QString& detail);
+    void setAppleRemoteMenuState(const AppleRemoteMenuState& state);
     void setHasGamepads(bool has) {
         if (m_HasGamepads != has) {
             m_HasGamepads = has;
@@ -240,6 +257,8 @@ private:
     std::vector<RemoteUsbDevice> m_RemoteUsbDevices;
     QString m_RemoteUsbActiveDeviceId;
     QString m_RemoteUsbDetail;
+    bool m_AppleRemoteMenuMode = false;
+    AppleRemoteMenuState m_AppleRemoteMenuState;
 
     ActionCallback m_ActionCallback;
     CloseCallback  m_CloseCallback;

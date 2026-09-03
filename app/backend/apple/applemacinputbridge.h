@@ -16,6 +16,15 @@ enum class AppleMacClipboardCommand
     Send,
 };
 
+enum class AppleMacRemoteCommand
+{
+    ToggleInputSourceSharing,
+    MissionControl,
+    ApplicationWindows,
+    ShowDesktop,
+    Launchpad,
+};
+
 struct AppleMacKeyEvent
 {
     enum class Type { Down, Up, Modifier };
@@ -73,6 +82,8 @@ public:
     using CloseCallback = std::function<void()>;
     using ClipboardCommandCallback =
             std::function<void(AppleMacClipboardCommand command)>;
+    using RemoteCommandCallback =
+            std::function<void(AppleMacRemoteCommand command)>;
 
     AppleMacInputBridge(SDL_Window* window,
                         KeyCallback keyCallback,
@@ -82,7 +93,8 @@ public:
                         std::shared_ptr<AppleLocalFileDragLifecycle>
                                 localFileDragLifecycle = {},
                         int displayIndex = 0,
-                        ClipboardCommandCallback clipboardCommandCallback = {});
+                        ClipboardCommandCallback clipboardCommandCallback = {},
+                        RemoteCommandCallback remoteCommandCallback = {});
     ~AppleMacInputBridge();
 
     AppleMacInputBridge(const AppleMacInputBridge&) = delete;
@@ -97,6 +109,13 @@ public:
                                   bool sharedClipboardSupported,
                                   bool sharingEnabled,
                                   bool controlling);
+    void updateRemoteMenuState(bool inputSourceSupported,
+                               bool inputSourceSharingEnabled,
+                               bool missionControlSupported,
+                               bool applicationWindowsSupported,
+                               bool showDesktopSupported,
+                               bool launchpadSupported,
+                               bool controlling);
 
 private:
     struct Private;

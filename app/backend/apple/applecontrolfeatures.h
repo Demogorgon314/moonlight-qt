@@ -1,10 +1,13 @@
 #pragma once
 
+#include "applekeyboardinputsource.h"
+
 #include <QByteArray>
 #include <QHash>
 #include <QList>
 #include <QPoint>
 #include <QSize>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -84,6 +87,15 @@ struct AppleControlEvents
 {
     QList<AppleCursorUpdate> cursorUpdates;
     QList<AppleDisplayLayout> displayLayouts;
+    QList<QSet<quint32>> availableKeySymbolUpdates;
+    QList<AppleKeyboardInputSourceState> keyboardInputSourceUpdates;
+
+    bool isEmpty() const
+    {
+        return cursorUpdates.isEmpty() && displayLayouts.isEmpty() &&
+                availableKeySymbolUpdates.isEmpty() &&
+                keyboardInputSourceUpdates.isEmpty();
+    }
 };
 
 // Parses the variable-length rectangles carried by one encrypted framebuffer

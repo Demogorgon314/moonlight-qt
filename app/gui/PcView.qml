@@ -749,6 +749,9 @@ CenteredGridView {
                     0, Math.min(1, options.virtualDisplayCount - 1))
             sharedClipboardCheck.checked = options.sharedClipboardEnabled === undefined
                     ? true : options.sharedClipboardEnabled
+            keyboardInputSourceCheck.checked =
+                    options.keyboardInputSourceSharingEnabled === undefined
+                    ? false : options.keyboardInputSourceSharingEnabled
             dynamicResolutionCheck.checked = appleSessionSettings.dynamicResolution
             hardwareDecodeCheck.checked = appleSessionSettings.preferHardwareDecode
             open()
@@ -756,7 +759,9 @@ CenteredGridView {
         onAccepted: {
             computerModel.setSessionOptions(connectionId, {
                 "virtualDisplayCount": displayCountCombo.currentIndex + 1,
-                "sharedClipboardEnabled": sharedClipboardCheck.checked
+                "sharedClipboardEnabled": sharedClipboardCheck.checked,
+                "keyboardInputSourceSharingEnabled":
+                        keyboardInputSourceCheck.checked
             })
             appleSessionSettings.dynamicResolution = dynamicResolutionCheck.checked
             appleSessionSettings.preferHardwareDecode = hardwareDecodeCheck.checked
@@ -807,8 +812,24 @@ CenteredGridView {
                 Layout.fillWidth: true
             }
 
+            CheckBox {
+                id: keyboardInputSourceCheck
+                text: qsTr("Let the remote Mac follow this device's keyboard input source")
+                checked: false
+                Layout.fillWidth: true
+            }
+
             Text {
                 text: qsTr("During a session, Ctrl+Alt+Shift+C toggles sharing; G gets the remote clipboard and V sends the local clipboard while sharing is off.")
+                color: Theme.textDim
+                font.family: Theme.fontSans
+                font.pointSize: Theme.fontBody
+                wrapMode: Text.Wrap
+                Layout.preferredWidth: 460
+            }
+
+            Text {
+                text: qsTr("Ctrl+Alt+Shift+I toggles keyboard input-source sharing. On Windows, Ctrl+Alt+Shift+R opens the Remote Mac menu.")
                 color: Theme.textDim
                 font.family: Theme.fontSans
                 font.pointSize: Theme.fontBody

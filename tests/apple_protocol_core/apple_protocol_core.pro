@@ -33,10 +33,11 @@ macx {
         -lcrypto.3 -lavcodec.63 -lavutil.61 -lswscale.10 -lSDL2 \
         -framework Security -framework AudioToolbox -framework AVFAudio -framework CoreVideo \
         -framework CoreGraphics -framework Metal -framework QuartzCore \
-        -framework AppKit
+        -framework AppKit -framework Carbon
     SOURCES += \
         ../../app/backend/apple/appleclipboard_mac.mm \
         ../../app/backend/apple/applefiledrag_mac.mm \
+        ../../app/backend/apple/appleinputsourceplatform_mac.mm \
         ../../app/backend/apple/applemacinputbridge.mm \
         ../../app/backend/apple/applemetalrenderer.mm \
         ../../app/backend/apple/appleaudiodecoder_macos.mm \
@@ -54,6 +55,8 @@ SOURCES += \
     ../../app/backend/apple/applefeaturegate.cpp \
     ../../app/backend/apple/appleconnectionstore.cpp \
     ../../app/backend/apple/applecredentialstore.cpp \
+    ../../app/backend/apple/appleinputsourceplatform.cpp \
+    ../../app/backend/apple/applekeyboardinputsource.cpp \
     ../../app/backend/apple/applekeyboardmapper.cpp \
     ../../app/backend/apple/appleprotocol.cpp \
     ../../app/backend/apple/applefiledrag.cpp \
@@ -74,6 +77,8 @@ HEADERS += \
     ../../app/backend/apple/applefeaturegate.h \
     ../../app/backend/apple/appleconnectionstore.h \
     ../../app/backend/apple/applecredentialstore.h \
+    ../../app/backend/apple/appleinputsourceplatform.h \
+    ../../app/backend/apple/applekeyboardinputsource.h \
     ../../app/backend/apple/applekeyboardmapper.h \
     ../../app/backend/apple/appleprotocol.h \
     ../../app/backend/apple/applefiledrag.h \

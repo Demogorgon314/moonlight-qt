@@ -30,6 +30,7 @@ class AppleHighPerformanceSessionTask;
 class AppleSecondaryVideoStream;
 class ApplePresentationThread;
 class AppleKeyboardMapper;
+class AppleLocalInputSourceMonitor;
 #ifdef Q_OS_DARWIN
 class AppleMacInputBridge;
 class AppleMacRemoteFileDragSource;
@@ -42,6 +43,8 @@ class AppleFileTransferProgressWindow;
 class AppleWindowsKeyboardHook;
 class AppleWindowsFileDropTarget;
 class AppleWindowsRemoteFileDragSource;
+class OverlayMenuButton;
+class OverlayMenuPanel;
 #endif
 struct AppleRemoteKeyEvent;
 struct SDL_Renderer;
@@ -104,6 +107,7 @@ public:
 
 signals:
     void clipboardSharingChanged(QString connectionId, bool enabled);
+    void keyboardInputSourceSharingChanged(QString connectionId, bool enabled);
 
 protected:
     bool initializeSession(QQuickWindow* qtWindow) override;
@@ -150,6 +154,11 @@ private:
     void toggleClipboardSharing();
     void requestRemoteClipboard();
     void sendLocalClipboard();
+    void toggleKeyboardInputSourceSharing();
+    void localKeyboardInputSourceChanged(const QString& identifier);
+    void queueKeyboardInputSourceMessage(
+            const std::optional<QByteArray>& message);
+    void performRemoteSystemCommand(AppleRemoteSystemCommand command);
     void requestPerformanceOverlayUpdate();
     void togglePerformanceOverlay();
     void toggleControlMode();
@@ -205,6 +214,9 @@ private:
     void ensureLocalFileDragLifecycle();
 #ifdef Q_OS_WIN
     void installWindowsFileDropTarget(SDL_Window* window, int displayIndex);
+    void showWindowsRemoteMenu();
+    void syncWindowsRemoteMenuButton();
+    void updateWindowsRemoteMenuState();
 #endif
     std::optional<QRect> restoredWindowGeometry(AppleWindowRole role) const;
     void captureWindowGeometry(SDL_Window* window, AppleWindowRole role);
@@ -221,6 +233,7 @@ private:
     QPointer<QQuickWindow> m_QtWindow;
     std::unique_ptr<LocalStreamRuntime> m_Runtime;
     std::unique_ptr<AppleKeyboardMapper> m_KeyboardMapper;
+    std::unique_ptr<AppleLocalInputSourceMonitor> m_InputSourceMonitor;
 #ifdef Q_OS_DARWIN
     std::unique_ptr<AppleMacInputBridge> m_AppleMacInputBridge;
     std::unique_ptr<AppleMacRemoteFileDragSource> m_MacRemoteFileDragSource;
@@ -240,6 +253,8 @@ private:
             m_WindowsFileDropTargets;
     std::unique_ptr<AppleWindowsRemoteFileDragSource>
             m_WindowsRemoteFileDragSource;
+    std::unique_ptr<OverlayMenuPanel> m_WindowsRemoteMenuPanel;
+    std::unique_ptr<OverlayMenuButton> m_WindowsRemoteMenuButton;
 #endif
     AppleWindowPlacementStore m_WindowPlacementStore;
     std::optional<QRect> m_PrimaryWindowGeometry;
@@ -306,6 +321,8 @@ private:
     ApplePerformanceOverlayStyle m_PerformanceOverlayStyle =
             ApplePerformanceOverlayStyle::Moonlight;
     AppleCursorStore m_RemoteCursorStore;
+    AppleKeyboardInputSourceSharing m_KeyboardInputSourceSharing;
+    QSet<quint32> m_AvailableSystemKeySymbols;
     SDL_Cursor* m_ActiveRemoteCursor = nullptr;
     double m_ActiveRemoteCursorScale = 0.0;
     quint64 m_RemoteCursorUpdateCount = 0;
@@ -336,6 +353,7 @@ private:
     std::atomic_bool m_ClipboardSharingEnabled{true};
     std::atomic_bool m_ClipboardAutomaticEligible{false};
     std::atomic_bool m_ControlReady{false};
+    std::atomic<quint8> m_KeyEventSubtype{1};
     std::atomic_bool m_NativePrecisionScrollSupported{false};
     std::atomic_bool m_FileTransferSupported{false};
     std::atomic_bool m_AudioMuted{false};
