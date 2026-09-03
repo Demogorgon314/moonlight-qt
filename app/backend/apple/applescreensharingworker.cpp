@@ -614,7 +614,15 @@ private:
 
         AppleMediaTransport media;
         AppleMediaNegotiationResult negotiation;
-        AppleTextClipboardExchange clipboard;
+        AppleClipboardExchange clipboard;
+        const bool clipboardSupported =
+                authenticated.supportsServerCommand(11) &&
+                authenticated.supportsServerCommand(31);
+        const bool sharedClipboardSupported = clipboardSupported &&
+                authenticated.supportsServerCommand(21);
+        m_Session->m_ClipboardSupported.store(clipboardSupported);
+        m_Session->m_SharedClipboardSupported.store(
+                sharedClipboardSupported);
         QString audioProbeError;
         const bool audioEnabled = AppleAudioStream::decoderIsSupported(
                 &audioProbeError);
@@ -649,12 +657,18 @@ private:
                     error);
         }
         if (succeeded) {
-            for (const QByteArray& message :
-                 clipboard.setEligible(!m_Session->m_Observing.load())) {
-                if (!control.sendEncrypted(
-                            tcp, message, m_Cancelled, error)) {
-                    succeeded = false;
-                    break;
+            clipboard.setAutomaticEligible(
+                    sharedClipboardSupported &&
+                    m_Session->m_ClipboardAutomaticEligible.load());
+            if (sharedClipboardSupported) {
+                for (const QByteArray& message : clipboard.setSharingEnabled(
+                             m_Session->m_ClipboardSharingEnabled.load() &&
+                             !m_Session->m_Observing.load())) {
+                    if (!control.sendEncrypted(
+                                tcp, message, m_Cancelled, error)) {
+                        succeeded = false;
+                        break;
+                    }
                 }
             }
         }
@@ -737,7 +751,7 @@ private:
                       AppleControlChannel& control,
                       AppleMediaTransport& media,
                       const AppleMediaNegotiationResult& negotiation,
-                      AppleTextClipboardExchange& clipboard,
+                      AppleClipboardExchange& clipboard,
                       AppleAudioStream* audio,
                       QString* error)
     {
@@ -895,16 +909,38 @@ private:
                 case AppleOutboundControl::Kind::Message:
                     messages.append(outbound.message);
                     break;
-                case AppleOutboundControl::Kind::LocalClipboardText:
-                    messages = clipboard.advertiseLocalText(
-                            outbound.text, error);
+                case AppleOutboundControl::Kind::LocalClipboardArchive:
+                    messages = clipboard.advertiseLocalArchive(
+                            outbound.clipboardArchive, error);
+                    break;
+                case AppleOutboundControl::Kind::SetClipboardSharing:
+                    messages = clipboard.setSharingEnabled(
+                            !observing && outbound.enabled);
+                    break;
+                case AppleOutboundControl::Kind::SetClipboardAutomaticEligible:
+                    clipboard.setAutomaticEligible(
+                            !observing && outbound.enabled);
+                    break;
+                case AppleOutboundControl::Kind::RequestRemoteClipboard:
+                    messages = clipboard.requestRemoteClipboard(
+                            clock.elapsed());
+                    break;
+                case AppleOutboundControl::Kind::SendClipboardArchive:
+                    messages = AppleClipboardExchange::encodeArchive(
+                            outbound.clipboardArchive, false, 0, error);
                     break;
                 case AppleOutboundControl::Kind::SetObserving:
                     messages.append(AppleMediaWire::controlMode(
                             outbound.observing));
-                    messages.append(clipboard.setEligible(
-                            !outbound.observing));
                     observing = outbound.observing;
+                    clipboard.setAutomaticEligible(
+                            !observing &&
+                            m_Session->m_ClipboardAutomaticEligible.load());
+                    if (m_Session->m_SharedClipboardSupported.load()) {
+                        messages.append(clipboard.setSharingEnabled(
+                                !observing &&
+                                m_Session->m_ClipboardSharingEnabled.load()));
+                    }
                     break;
                 }
                 for (const QByteArray& message : std::as_const(messages)) {
@@ -1028,8 +1064,8 @@ private:
                             },
                             Qt::QueuedConnection);
                 }
-                AppleTextClipboardResult clipboardResult =
-                        clipboard.receive(message, error);
+                AppleClipboardResult clipboardResult =
+                        clipboard.receive(message, error, clock.elapsed());
                 for (const QByteArray& response :
                      std::as_const(clipboardResult.outboundMessages)) {
                     if (!control.sendEncrypted(
@@ -1049,14 +1085,21 @@ private:
                             },
                             Qt::QueuedConnection);
                 }
-                if (clipboardResult.receivedText.has_value()) {
+                if (clipboardResult.receivedArchive.has_value()) {
                     const QPointer<AppleScreenSharingSession> session = m_Session;
-                    const QString text = *clipboardResult.receivedText;
+                    AppleClipboardArchive archive =
+                            std::move(*clipboardResult.receivedArchive);
+                    const bool receivedAutomatically =
+                            clipboardResult.receivedAutomatically;
                     QMetaObject::invokeMethod(
                             session,
-                            [session, text]() {
+                            [session,
+                             archive = std::move(archive),
+                             receivedAutomatically]() {
                                 if (session != nullptr) {
-                                    session->applyRemoteClipboardText(text);
+                                    session->applyRemoteClipboardArchive(
+                                            archive,
+                                            receivedAutomatically);
                                 }
                             },
                             Qt::QueuedConnection);

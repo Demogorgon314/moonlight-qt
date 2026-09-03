@@ -472,8 +472,12 @@ QVariantMap AppleProtocolAdapter::sessionOptions(
     if (!found) {
         return {};
     }
-    return {{QStringLiteral("virtualDisplayCount"),
-             connection.virtualDisplayCount}};
+    return {
+        {QStringLiteral("virtualDisplayCount"),
+         connection.virtualDisplayCount},
+        {QStringLiteral("sharedClipboardEnabled"),
+         connection.sharedClipboardEnabled},
+    };
 }
 
 bool AppleProtocolAdapter::setSessionOptions(
@@ -488,7 +492,15 @@ bool AppleProtocolAdapter::setSessionOptions(
         setError(error, tr("Choose either one or two virtual displays."));
         return false;
     }
-    if (!m_Store.setVirtualDisplayCount(identity.stableId(), displayCount)) {
+    bool found = false;
+    const AppleSavedConnection connection = m_Store.connection(
+            identity.stableId(), &found);
+    const bool sharedClipboardEnabled = options.value(
+            QStringLiteral("sharedClipboardEnabled"),
+            found ? connection.sharedClipboardEnabled : true).toBool();
+    if (!m_Store.setVirtualDisplayCount(identity.stableId(), displayCount) ||
+            !m_Store.setSharedClipboardEnabled(
+                    identity.stableId(), sharedClipboardEnabled)) {
         setError(error, tr("The Screen Sharing options could not be saved."));
         return false;
     }
@@ -535,7 +547,23 @@ StreamSession* AppleProtocolAdapter::createSession(
         setError(error, tr("The launch plan has already been used."));
         return nullptr;
     }
-    return new AppleScreenSharingSession(std::move(applePlan->connection));
+    auto* session = new AppleScreenSharingSession(
+            std::move(applePlan->connection));
+    auto* adapter = const_cast<AppleProtocolAdapter*>(this);
+    connect(session,
+            &AppleScreenSharingSession::clipboardSharingChanged,
+            adapter,
+            [adapter](const QString& connectionId, bool enabled) {
+                if (!adapter->m_Store.setSharedClipboardEnabled(
+                            connectionId, enabled)) {
+                    qWarning() << "Apple clipboard preference could not be saved";
+                    return;
+                }
+                emit adapter->connectionChanged(ConnectionIdentity(
+                        ProtocolKind::AppleScreenSharing,
+                        connectionId).toString());
+            });
+    return session;
 }
 
 void AppleProtocolAdapter::completeTrustProbe(QString connectionId,

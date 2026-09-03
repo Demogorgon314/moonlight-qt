@@ -224,6 +224,24 @@ bool AppleConnectionStore::setVirtualDisplayCount(const QString& id,
     return true;
 }
 
+bool AppleConnectionStore::setSharedClipboardEnabled(
+        const QString& id,
+        bool enabled)
+{
+    const int index = indexOf(id);
+    if (index < 0) {
+        return false;
+    }
+    AppleSavedConnection& connection = m_Connections[index];
+    if (connection.sharedClipboardEnabled == enabled) {
+        return true;
+    }
+    connection.sharedClipboardEnabled = enabled;
+    ++connection.revision;
+    persist();
+    return true;
+}
+
 void AppleConnectionStore::load()
 {
     const std::unique_ptr<QSettings> settings = createSettings(m_SettingsFile);
@@ -250,6 +268,8 @@ void AppleConnectionStore::load()
                 1,
                 settings->value(QStringLiteral("virtualDisplayCount"), 1).toInt(),
                 2);
+        connection.sharedClipboardEnabled = settings->value(
+                QStringLiteral("sharedClipboardEnabled"), true).toBool();
         connection.revision = settings->value(QStringLiteral("revision"), 1).toULongLong();
         if (connection.isValid()) {
             m_Connections.append(connection);
@@ -282,6 +302,8 @@ void AppleConnectionStore::persist() const
         settings->setValue(QStringLiteral("preferredUsername"), connection.preferredUsername);
         settings->setValue(QStringLiteral("virtualDisplayCount"),
                            connection.virtualDisplayCount);
+        settings->setValue(QStringLiteral("sharedClipboardEnabled"),
+                           connection.sharedClipboardEnabled);
         settings->setValue(QStringLiteral("revision"), connection.revision);
     }
     settings->endArray();

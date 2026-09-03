@@ -105,31 +105,93 @@ QSize initialDisplaySize(const std::optional<QSize>& storedViewport);
 
 } // namespace AppleDynamicResolution
 
-struct AppleTextClipboardResult
+struct AppleClipboardTypeAlias
+{
+    QString tagClass;
+    QString preferredTag;
+
+    bool operator==(const AppleClipboardTypeAlias& other) const
+    {
+        return tagClass == other.tagClass &&
+                preferredTag == other.preferredTag;
+    }
+};
+
+struct AppleClipboardFlavor
+{
+    QString type;
+    QList<AppleClipboardTypeAlias> aliases;
+    QByteArray value;
+    quint32 reserved = 0;
+
+    bool operator==(const AppleClipboardFlavor& other) const
+    {
+        return type == other.type && aliases == other.aliases &&
+                value == other.value && reserved == other.reserved;
+    }
+};
+
+struct AppleClipboardItem
+{
+    QList<AppleClipboardFlavor> flavors;
+
+    bool operator==(const AppleClipboardItem& other) const
+    {
+        return flavors == other.flavors;
+    }
+};
+
+struct AppleClipboardArchive
+{
+    QList<AppleClipboardItem> items;
+
+    bool operator==(const AppleClipboardArchive& other) const
+    {
+        return items == other.items;
+    }
+
+    bool isEmpty() const { return items.isEmpty(); }
+    std::optional<QString> preferredText() const;
+    static AppleClipboardArchive text(const QString& text);
+};
+
+struct AppleClipboardResult
 {
     bool consumed = false;
+    bool receivedAutomatically = false;
     QList<QByteArray> outboundMessages;
-    std::optional<QString> receivedText;
+    std::optional<AppleClipboardArchive> receivedArchive;
 };
 
 // Owns the promise/data exchange and encrypted-record reassembly used by the
-// native shared pasteboard protocol. Its interface deliberately exposes only
-// UTF-8 text; file URLs and every non-text flavor remain unreachable.
-class AppleTextClipboardExchange
+// native shared pasteboard protocol. Automatic responses are guarded by an
+// eligibility generation so a clipboard fetched for an inactive window is
+// never installed later.
+class AppleClipboardExchange
 {
 public:
     static constexpr int MaximumCompressedBytes = 7 * 1024 * 1024;
     static constexpr int MaximumArchiveBytes = 64 * 1024 * 1024;
-    static constexpr int FragmentBytes = 60000;
+    static constexpr int FragmentBytes = 32 * 1024;
+    static constexpr qint64 RequestLifetimeMilliseconds = 120 * 1000;
 
-    QList<QByteArray> setEligible(bool eligible);
-    QList<QByteArray> advertiseLocalText(const QString& text,
-                                         QString* error = nullptr);
-    AppleTextClipboardResult receive(const QByteArray& message,
-                                     QString* error = nullptr);
+    QList<QByteArray> setSharingEnabled(bool enabled);
+    void setAutomaticEligible(bool eligible);
+    QList<QByteArray> advertiseLocalArchive(
+            const AppleClipboardArchive& archive,
+            QString* error = nullptr);
+    QList<QByteArray> requestRemoteClipboard(qint64 nowMilliseconds = 0);
+    AppleClipboardResult receive(const QByteArray& message,
+                                 QString* error = nullptr,
+                                 qint64 nowMilliseconds = 0);
     void resetForReconnect();
 
     static QByteArray request(bool promises, quint32 sessionId);
+    static QList<QByteArray> encodeArchive(
+            const AppleClipboardArchive& archive,
+            bool promises = false,
+            quint32 sessionId = 0,
+            QString* error = nullptr);
     static QList<QByteArray> encodeText(const QString& text,
                                         bool promises = false,
                                         quint32 sessionId = 0,
@@ -139,26 +201,37 @@ private:
     enum class RequestState
     {
         Idle,
-        AwaitingPromises,
-        AwaitingData,
+        AwaitingAutomaticPromises,
+        AwaitingAutomaticData,
+        AwaitingManualData,
     };
 
     static bool decodeEnvelope(const QByteArray& message,
                                quint32* sessionId,
                                bool* containsPromises,
-                               std::optional<QString>* text,
+                               AppleClipboardArchive* archive,
                                QString* error);
     static QList<QByteArray> fragments(const QByteArray& message);
+    void beginRequest(RequestState state,
+                      quint32 sessionId,
+                      qint64 nowMilliseconds);
+    void resetRequest();
+    void expireRequest(qint64 nowMilliseconds);
     quint32 nextSessionId();
 
     QByteArray m_Reassembly;
     int m_ExpectedLength = 0;
-    QString m_LocalText;
+    AppleClipboardArchive m_LocalArchive;
     quint32 m_RequestSessionId = 0;
     quint32 m_NextSessionId = 1;
+    quint64 m_EligibilityGeneration = 0;
+    quint64 m_RequestEligibilityGeneration = 0;
+    qint64 m_RequestDeadlineMilliseconds = -1;
     RequestState m_RequestState = RequestState::Idle;
-    bool m_Eligible = false;
-    bool m_HasLocalText = false;
+    bool m_SharingEnabled = false;
+    bool m_SharingStateKnown = false;
+    bool m_AutomaticEligible = false;
+    bool m_HasUnfulfilledPromises = false;
 };
 
 // Keeps the local clipboard snapshot used by the Apple promise exchange. The
@@ -167,17 +240,20 @@ private:
 class AppleLocalClipboardTracker
 {
 public:
-    std::optional<QString> dataChanged(const QMimeData* mime);
-    std::optional<QString> windowFocusGained(const QMimeData* mime);
-    void expectRemoteText(const QString& text);
+    std::optional<AppleClipboardArchive> dataChanged(
+            const std::optional<AppleClipboardArchive>& archive);
+    std::optional<AppleClipboardArchive> windowFocusGained(
+            const std::optional<AppleClipboardArchive>& archive);
+    void expectRemoteArchive(const AppleClipboardArchive& archive);
     void reset();
     static bool containsFiles(const QMimeData* mime);
 
 private:
-    std::optional<QString> observe(const QMimeData* mime);
+    std::optional<AppleClipboardArchive> observe(
+            const std::optional<AppleClipboardArchive>& archive);
 
-    std::optional<QString> m_PendingRemoteText;
-    std::optional<QString> m_LastObservedText;
+    std::optional<AppleClipboardArchive> m_PendingRemoteArchive;
+    std::optional<AppleClipboardArchive> m_LastObservedArchive;
 };
 
 enum class ApplePerformanceOverlayStyle

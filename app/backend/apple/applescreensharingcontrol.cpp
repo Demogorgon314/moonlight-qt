@@ -1,6 +1,7 @@
 #include "applescreensharingsession.h"
 #include "applescreensharingsession_p.h"
 
+#include "appleclipboard.h"
 #include "applefiledrag.h"
 #include "applefiletransferdialog.h"
 #include "applefiletransferprogress.h"
@@ -16,12 +17,9 @@
 
 #include "SDL.h"
 
-#include <QClipboard>
 #include <QCoreApplication>
 #include <QDir>
-#include <QGuiApplication>
 #include <QMetaObject>
-#include <QMimeData>
 #include <QMutexLocker>
 #include <QPointer>
 #include <QSettings>
@@ -261,22 +259,42 @@ void AppleScreenSharingSession::useDefaultRemoteCursor()
     SDL_FreeCursor(previous);
 }
 
-void AppleScreenSharingSession::applyRemoteClipboardText(const QString& text)
+void AppleScreenSharingSession::applyRemoteClipboardArchive(
+        const AppleClipboardArchive& archive,
+        bool receivedAutomatically)
 {
-    if (m_Observing.load()) {
+    if (m_Observing.load() || archive.isEmpty() ||
+            (receivedAutomatically &&
+             !m_ClipboardAutomaticEligible.load())) {
         return;
     }
-    QClipboard* clipboard = QGuiApplication::clipboard();
-    if (clipboard == nullptr ||
-            AppleLocalClipboardTracker::containsFiles(clipboard->mimeData())) {
-        qInfo() << "Apple text clipboard preserved a local file clipboard";
+    m_ApplyingRemoteClipboard = true;
+    m_LocalClipboardTracker.expectRemoteArchive(archive);
+    if (!AppleClipboard::writeSystemArchive(archive)) {
+        m_LocalClipboardTracker.reset();
+        m_ApplyingRemoteClipboard = false;
+        qWarning() << "Apple clipboard could not install the remote archive";
         return;
     }
-    m_LocalClipboardTracker.expectRemoteText(text);
-    clipboard->setText(text);
+    // Consume the native write immediately. QClipboard::dataChanged may be
+    // delivered synchronously or later depending on the platform plugin.
+    (void)m_LocalClipboardTracker.dataChanged(
+            AppleClipboard::readSystemArchive());
+    m_ApplyingRemoteClipboard = false;
+
+    int flavorCount = 0;
+    qsizetype byteCount = 0;
+    for (const AppleClipboardItem& item : archive.items) {
+        flavorCount += item.flavors.size();
+        for (const AppleClipboardFlavor& flavor : item.flavors) {
+            byteCount += flavor.value.size();
+        }
+    }
     qInfo().nospace()
-            << "Apple text clipboard received " << text.toUtf8().size()
-            << " UTF-8 bytes";
+            << "Apple clipboard received " << archive.items.size()
+            << " item(s), " << flavorCount << " flavor(s), "
+            << byteCount << " bytes"
+            << (receivedAutomatically ? " automatically" : " manually");
 }
 
 void AppleScreenSharingSession::finishNativeRemoteFileDrag(
@@ -723,12 +741,18 @@ void AppleScreenSharingSession::applyFileTransferEvents(
 
 void AppleScreenSharingSession::updateControlSummary()
 {
+    const QString clipboard = !m_ClipboardSupported.load()
+            ? QStringLiteral("OFF")
+            : m_SharedClipboardSupported.load() &&
+                      m_ClipboardSharingEnabled.load()
+                    ? QStringLiteral("SHARED")
+                    : QStringLiteral("MANUAL");
     const QString summary = QStringLiteral(
-            "MODE %1   CLIPBOARD %2   FILES %3   CURSOR %4   DISPLAY %5%6   O:MODE M:MUTE P:PAUSE X:CANCEL")
+            "MODE %1   CLIPBOARD %2   FILES %3   CURSOR %4   DISPLAY %5%6   O:MODE C:SHARE G:GET V:SEND M:MUTE P:PAUSE X:CANCEL")
             .arg(m_Observing.load() ? QStringLiteral("OBSERVE")
                                     : QStringLiteral("CONTROL"))
             .arg(!m_Observing.load() && m_ControlReady.load()
-                         ? QStringLiteral("ON") : QStringLiteral("OFF"))
+                         ? clipboard : QStringLiteral("OFF"))
             .arg(!m_Observing.load() && m_FileTransferSupported.load()
                          ? QStringLiteral("ON") : QStringLiteral("OFF"))
             .arg(m_RemoteCursorUpdateCount)
@@ -745,35 +769,137 @@ void AppleScreenSharingSession::updateControlSummary()
                      m_Observing.load() ? tr("Observe") : tr("Control"));
         SDL_SetWindowTitle(m_Runtime->streamWindow(), title.toUtf8().constData());
     }
+#ifdef Q_OS_DARWIN
+    if (m_AppleMacInputBridge != nullptr) {
+        m_AppleMacInputBridge->updateClipboardMenuState(
+                m_ClipboardSupported.load(),
+                m_SharedClipboardSupported.load(),
+                m_ClipboardSharingEnabled.load(),
+                m_ControlReady.load() && !m_Observing.load());
+    }
+#endif
     requestPerformanceOverlayUpdate();
 }
 
 void AppleScreenSharingSession::localClipboardChanged()
 {
+    if (m_ApplyingRemoteClipboard) {
+        return;
+    }
     refreshLocalClipboard(false);
 }
 
 void AppleScreenSharingSession::refreshLocalClipboard(bool windowFocusGained)
 {
-    const QClipboard* clipboard = QGuiApplication::clipboard();
-    const QMimeData* mime = clipboard != nullptr ? clipboard->mimeData() : nullptr;
-    if (!m_ControlReady.load() || m_Observing.load()) {
+    if (!m_ControlReady.load() || m_Observing.load() ||
+            !m_SharedClipboardSupported.load() ||
+            !m_ClipboardSharingEnabled.load() ||
+            !m_ClipboardAutomaticEligible.load()) {
         return;
     }
-    const std::optional<QString> text = windowFocusGained
-            ? m_LocalClipboardTracker.windowFocusGained(mime)
-            : m_LocalClipboardTracker.dataChanged(mime);
-    if (!text.has_value()) {
+    const std::optional<AppleClipboardArchive> systemArchive =
+            AppleClipboard::readSystemArchive();
+    const std::optional<AppleClipboardArchive> archive = windowFocusGained
+            ? m_LocalClipboardTracker.windowFocusGained(systemArchive)
+            : m_LocalClipboardTracker.dataChanged(systemArchive);
+    if (!archive.has_value()) {
         return;
     }
     AppleOutboundControl outbound;
-    outbound.kind = AppleOutboundControl::Kind::LocalClipboardText;
-    outbound.text = *text;
+    outbound.kind = AppleOutboundControl::Kind::LocalClipboardArchive;
+    outbound.clipboardArchive = *archive;
     queueControl(std::move(outbound));
     qInfo().nospace()
-            << "Apple text clipboard advertised " << text->toUtf8().size()
-            << " UTF-8 bytes after "
+            << "Apple clipboard advertised " << archive->items.size()
+            << " item(s) after "
             << (windowFocusGained ? "stream-window focus" : "local change");
+}
+
+void AppleScreenSharingSession::setClipboardWindowFocused(
+        quint32 windowId,
+        bool focused)
+{
+    if (focused) {
+        m_ClipboardFocusedWindows.insert(windowId);
+    }
+    else {
+        m_ClipboardFocusedWindows.remove(windowId);
+    }
+    updateClipboardAutomaticEligibility(focused);
+}
+
+void AppleScreenSharingSession::updateClipboardAutomaticEligibility(
+        bool refreshWhenEligible)
+{
+    const bool eligible = m_SharedClipboardSupported.load() &&
+            m_ClipboardSharingEnabled.load() && !m_Observing.load() &&
+            !m_ClipboardFocusedWindows.isEmpty();
+    const bool changed = m_ClipboardAutomaticEligible.exchange(eligible) !=
+            eligible;
+    if (changed && m_ControlReady.load()) {
+        AppleOutboundControl outbound;
+        outbound.kind =
+                AppleOutboundControl::Kind::SetClipboardAutomaticEligible;
+        outbound.enabled = eligible;
+        queueControl(std::move(outbound));
+    }
+    if (eligible && refreshWhenEligible) {
+        refreshLocalClipboard(true);
+    }
+}
+
+void AppleScreenSharingSession::toggleClipboardSharing()
+{
+    if (!m_ControlReady.load() || m_Observing.load() ||
+            !m_SharedClipboardSupported.load()) {
+        return;
+    }
+    const bool enabled = !m_ClipboardSharingEnabled.load();
+    m_ClipboardSharingEnabled.store(enabled);
+    m_Connection.sharedClipboardEnabled = enabled;
+    emit clipboardSharingChanged(m_Connection.id, enabled);
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::SetClipboardSharing;
+    outbound.enabled = enabled;
+    queueControl(std::move(outbound));
+    updateClipboardAutomaticEligibility(enabled);
+    updateControlSummary();
+    qInfo() << "Apple shared clipboard" << (enabled ? "enabled" : "disabled");
+}
+
+void AppleScreenSharingSession::requestRemoteClipboard()
+{
+    if (!m_ControlReady.load() || m_Observing.load() ||
+            !m_ClipboardSupported.load() ||
+            (m_SharedClipboardSupported.load() &&
+             m_ClipboardSharingEnabled.load())) {
+        return;
+    }
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::RequestRemoteClipboard;
+    queueControl(std::move(outbound));
+    qInfo() << "Apple clipboard manual receive requested";
+}
+
+void AppleScreenSharingSession::sendLocalClipboard()
+{
+    if (!m_ControlReady.load() || m_Observing.load() ||
+            !m_ClipboardSupported.load() ||
+            (m_SharedClipboardSupported.load() &&
+             m_ClipboardSharingEnabled.load())) {
+        return;
+    }
+    const std::optional<AppleClipboardArchive> archive =
+            AppleClipboard::readSystemArchive();
+    if (!archive.has_value()) {
+        return;
+    }
+    AppleOutboundControl outbound;
+    outbound.kind = AppleOutboundControl::Kind::SendClipboardArchive;
+    outbound.clipboardArchive = *archive;
+    queueControl(std::move(outbound));
+    qInfo() << "Apple clipboard manually sent" << archive->items.size()
+            << "item(s)";
 }
 
 void AppleScreenSharingSession::toggleControlMode()
@@ -784,6 +910,7 @@ void AppleScreenSharingSession::toggleControlMode()
     }
     m_Observing.store(observing);
     m_FileTransferService->setControlling(!observing);
+    updateClipboardAutomaticEligibility(!observing);
     m_MouseButtons = 0;
     AppleOutboundControl outbound;
     outbound.kind = AppleOutboundControl::Kind::SetObserving;

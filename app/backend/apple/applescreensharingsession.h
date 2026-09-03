@@ -14,6 +14,7 @@
 #include <QMutex>
 #include <QPointer>
 #include <QSemaphore>
+#include <QSet>
 #include <QSize>
 #include <QThreadPool>
 #include <QVector>
@@ -54,7 +55,11 @@ struct AppleOutboundControl
     {
         Input,
         Message,
-        LocalClipboardText,
+        LocalClipboardArchive,
+        SetClipboardSharing,
+        SetClipboardAutomaticEligible,
+        RequestRemoteClipboard,
+        SendClipboardArchive,
         SetObserving,
     };
 
@@ -68,10 +73,11 @@ struct AppleOutboundControl
     Kind kind = Kind::Message;
     AppleInputEncryptionRequest input;
     QByteArray message;
-    QString text;
+    AppleClipboardArchive clipboardArchive;
     quint64 queuedAtNanoseconds = 0;
     quint32 timestampDeltaMicroseconds = 0;
     bool observing = false;
+    bool enabled = false;
     Coalescing coalescing = Coalescing::None;
 };
 
@@ -95,6 +101,9 @@ public:
     bool nativeEventFilter(const QByteArray& eventType,
                            void* message,
                            NativeEventResult* result) override;
+
+signals:
+    void clipboardSharingChanged(QString connectionId, bool enabled);
 
 protected:
     bool initializeSession(QQuickWindow* qtWindow) override;
@@ -126,7 +135,8 @@ private:
     SDL_Window* cursorWindow() const;
     void refreshRemoteCursor(SDL_Window* window, bool force);
     void useDefaultRemoteCursor();
-    void applyRemoteClipboardText(const QString& text);
+    void applyRemoteClipboardArchive(const AppleClipboardArchive& archive,
+                                     bool receivedAutomatically);
     void applyFileTransferEvents(QList<AppleFileTransferEvent> events);
     bool activateRemoteFileDragIfEligible(
             bool pointerInsideStream,
@@ -135,6 +145,11 @@ private:
     void updateControlSummary();
     void localClipboardChanged();
     void refreshLocalClipboard(bool windowFocusGained);
+    void setClipboardWindowFocused(quint32 windowId, bool focused);
+    void updateClipboardAutomaticEligibility(bool refreshWhenEligible);
+    void toggleClipboardSharing();
+    void requestRemoteClipboard();
+    void sendLocalClipboard();
     void requestPerformanceOverlayUpdate();
     void togglePerformanceOverlay();
     void toggleControlMode();
@@ -295,6 +310,7 @@ private:
     double m_ActiveRemoteCursorScale = 0.0;
     quint64 m_RemoteCursorUpdateCount = 0;
     AppleLocalClipboardTracker m_LocalClipboardTracker;
+    QSet<quint32> m_ClipboardFocusedWindows;
     QStringList m_PendingLocalDropPaths;
     quint32 m_ActiveFileTransferSessionId = 0;
     bool m_ActiveFileTransferPaused = false;
@@ -305,6 +321,7 @@ private:
     bool m_DynamicResolutionEnabled = true;
     bool m_LiveResizing = false;
     bool m_RememberWindowPlacement = false;
+    bool m_ApplyingRemoteClipboard = false;
     double m_ScrollSpeedMultiplier = 1.0;
     std::atomic_bool m_PerformanceOverlayVisible{false};
     std::atomic_bool m_PerformanceOverlayUpdateNeeded{false};
@@ -314,6 +331,10 @@ private:
     std::atomic_bool m_PrimaryWindowMiniaturized{false};
     std::atomic_bool m_SecondaryWindowMiniaturized{false};
     std::atomic_bool m_Observing{false};
+    std::atomic_bool m_ClipboardSupported{false};
+    std::atomic_bool m_SharedClipboardSupported{false};
+    std::atomic_bool m_ClipboardSharingEnabled{true};
+    std::atomic_bool m_ClipboardAutomaticEligible{false};
     std::atomic_bool m_ControlReady{false};
     std::atomic_bool m_NativePrecisionScrollSupported{false};
     std::atomic_bool m_FileTransferSupported{false};

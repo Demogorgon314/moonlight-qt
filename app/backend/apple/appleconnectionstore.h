@@ -25,6 +25,7 @@ struct AppleSavedConnection
     QString credentialReference;
     QString preferredUsername;
     int virtualDisplayCount = 1;
+    bool sharedClipboardEnabled = true;
     quint64 revision = 1;
 
     bool isValid() const;
@@ -52,6 +53,7 @@ public:
                               const QString& preferredUsername);
     bool clearCredentialBinding(const QString& id);
     bool setVirtualDisplayCount(const QString& id, int displayCount);
+    bool setSharedClipboardEnabled(const QString& id, bool enabled);
 
 private:
     void load();

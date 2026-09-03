@@ -635,6 +635,30 @@ void AppleScreenSharingSession::pollSdlEvents()
                 }
                 break;
             }
+            if (event.key.keysym.sym == SDLK_c &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    toggleClipboardSharing();
+                }
+                break;
+            }
+            if (event.key.keysym.sym == SDLK_g &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    requestRemoteClipboard();
+                }
+                break;
+            }
+            if (event.key.keysym.sym == SDLK_v &&
+                    (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
+                            (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
+                if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    sendLocalClipboard();
+                }
+                break;
+            }
             if (event.key.keysym.sym == SDLK_p &&
                     (event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) ==
                             (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT)) {
@@ -717,9 +741,10 @@ void AppleScreenSharingSession::pollSdlEvents()
                 // point to sample the current pasteboard. QClipboard's native
                 // notification can be missed while SDL owns the foreground
                 // window and must remain only the fast path.
-                refreshLocalClipboard(true);
+                setClipboardWindowFocused(event.window.windowID, true);
             }
             else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                setClipboardWindowFocused(event.window.windowID, false);
                 // System shortcuts can move focus before SDL delivers their
                 // key-up events. Match both native iScreenSharing and the
                 // Moonlight input path by releasing the exact remote keys now.

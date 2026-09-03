@@ -747,13 +747,16 @@ CenteredGridView {
             appleSessionOptionsDialog.connectionId = connectionId
             displayCountCombo.currentIndex = Math.max(
                     0, Math.min(1, options.virtualDisplayCount - 1))
+            sharedClipboardCheck.checked = options.sharedClipboardEnabled === undefined
+                    ? true : options.sharedClipboardEnabled
             dynamicResolutionCheck.checked = appleSessionSettings.dynamicResolution
             hardwareDecodeCheck.checked = appleSessionSettings.preferHardwareDecode
             open()
         }
         onAccepted: {
             computerModel.setSessionOptions(connectionId, {
-                "virtualDisplayCount": displayCountCombo.currentIndex + 1
+                "virtualDisplayCount": displayCountCombo.currentIndex + 1,
+                "sharedClipboardEnabled": sharedClipboardCheck.checked
             })
             appleSessionSettings.dynamicResolution = dynamicResolutionCheck.checked
             appleSessionSettings.preferHardwareDecode = hardwareDecodeCheck.checked
@@ -795,6 +798,22 @@ CenteredGridView {
                 text: qsTr("Prefer D3D11 hardware decoding")
                 checked: true
                 Layout.fillWidth: true
+            }
+
+            CheckBox {
+                id: sharedClipboardCheck
+                text: qsTr("Share clipboard automatically")
+                checked: true
+                Layout.fillWidth: true
+            }
+
+            Text {
+                text: qsTr("During a session, Ctrl+Alt+Shift+C toggles sharing; G gets the remote clipboard and V sends the local clipboard while sharing is off.")
+                color: Theme.textDim
+                font.family: Theme.fontSans
+                font.pointSize: Theme.fontBody
+                wrapMode: Text.Wrap
+                Layout.preferredWidth: 460
             }
 
             Text {

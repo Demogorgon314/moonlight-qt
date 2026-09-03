@@ -1,5 +1,6 @@
 #include "backend/apple/appleauthenticator.h"
 #include "backend/apple/appleaudiostream.h"
+#include "backend/apple/appleclipboard.h"
 #include "backend/apple/appleconnectionstore.h"
 #include "backend/apple/applecontrolfeatures.h"
 #include "backend/apple/applefeaturegate.h"
@@ -21,6 +22,8 @@ bool testAppleMacZoomButtonUsesNativeFullscreen();
 bool testAppleMacInputBridgeRoutesRemoteDragBeforePointer();
 bool testAppleMacInputBridgeRoutesLocalFileDrag();
 bool testAppleMacInputBridgeReleasesModifiersOnFocusLoss();
+bool testAppleMacClipboardPreservesMultipleItemsAndFlavors();
+bool testAppleMacClipboardMenuRoutesCommandsAndTracksState();
 #endif
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -33,9 +36,11 @@ bool testAppleMacInputBridgeReleasesModifiersOnFocusLoss();
 #include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QImage>
 #include <QMimeData>
 #include <QScopeGuard>
 #include <QSettings>
+#include <QSet>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUdpSocket>
@@ -286,6 +291,9 @@ void testSavedConnectionIdentityAndSecretBoundary()
         require(store.setVirtualDisplayCount(firstId, 2) &&
                 store.connection(firstId).virtualDisplayCount == 2,
                 "the virtual display count must be stored per saved Mac");
+        require(store.setSharedClipboardEnabled(firstId, false) &&
+                !store.connection(firstId).sharedClipboardEnabled,
+                "the shared clipboard preference must be stored per saved Mac");
 
         updated = endpoint;
         updated.host = QStringLiteral("192.0.2.44");
@@ -313,6 +321,8 @@ void testSavedConnectionIdentityAndSecretBoundary()
                 "delete and re-add must create a new saved identity");
         require(store.setVirtualDisplayCount(readded.id, 2),
                 "the replacement connection display count must persist independently");
+        require(store.setSharedClipboardEnabled(readded.id, false),
+                "the replacement connection clipboard preference must persist independently");
     }
 
     QFile settingsFile(path);
@@ -325,7 +335,8 @@ void testSavedConnectionIdentityAndSecretBoundary()
     AppleConnectionStore reloaded(path);
     require(reloaded.connections().size() == 1 &&
             reloaded.connections().first().id != firstId &&
-            reloaded.connections().first().virtualDisplayCount == 2,
+            reloaded.connections().first().virtualDisplayCount == 2 &&
+            !reloaded.connections().first().sharedClipboardEnabled,
             "saved identity must survive process restart and removed identity must stay absent");
 }
 
@@ -1833,62 +1844,183 @@ void testRemoteCursorCacheMatchesSwiftFallbacks()
             "the newest cached cursor must remain selectable");
 }
 
-void testStageFourTextOnlyClipboardExchange()
+void testStageFourRichClipboardExchange()
 {
-    AppleTextClipboardExchange exchange;
-    const QList<QByteArray> enable = exchange.setEligible(true);
+    AppleClipboardExchange initiallyDisabled;
+    require(initiallyDisabled.setSharingEnabled(false) ==
+                    QList<QByteArray>{
+                            QByteArray::fromHex("1500000200000000")},
+            "a session with sharing disabled must explicitly notify the Mac");
+
+    AppleClipboardExchange exchange;
+    const QList<QByteArray> enable = exchange.setSharingEnabled(true);
     require(enable == QList<QByteArray>{QByteArray::fromHex("1500000100000000")},
             "controlling mode must explicitly enable the shared pasteboard");
+    exchange.setAutomaticEligible(true);
+
+    const AppleClipboardArchive richArchive{{
+        {{
+            {QStringLiteral("public.rtf"),
+             {{QStringLiteral("public.mime-type"),
+               QStringLiteral("text/rtf")}},
+             QByteArrayLiteral("{\\rtf1 Hello}"), 0x11223344},
+            {QStringLiteral("public.utf8-plain-text"), {},
+             QStringLiteral("Hello, 世界 👋").toUtf8(), 0},
+            {QStringLiteral("public.html"), {},
+             QByteArrayLiteral("<b>Hello</b>"), 0},
+        }},
+        {{{QStringLiteral("public.png"), {},
+           QByteArray::fromHex("89504e470d0a1a0a"), 0}}},
+    }};
 
     QString error;
-    const QList<QByteArray> encoded = AppleTextClipboardExchange::encodeText(
-            QStringLiteral("Hello, 世界 👋"), false, 0, &error);
+    const QList<QByteArray> encoded = AppleClipboardExchange::encodeArchive(
+            richArchive, false, 0, &error);
     require(error.isEmpty() && !encoded.isEmpty(),
-            "Unicode clipboard text must encode without loss");
+            "multiple clipboard items and flavors must encode without loss");
     QByteArray complete;
     for (const QByteArray& fragment : encoded) complete.append(fragment);
-    require(complete.size() >= 20 && complete.left(1) == QByteArray::fromHex("1f") &&
+    require(encoded.first().size() == 16 && complete.size() >= 20 &&
+            complete.left(1) == QByteArray::fromHex("1f") &&
             complete.right(4) == QByteArray::fromHex("0000ffff"),
-            "clipboard payloads must use the native zlib sync-flush framing");
+            "clipboard payloads must split their header and use native zlib sync-flush framing");
 
     QByteArray changed = QByteArray::fromHex("1400000000000002");
-    AppleTextClipboardResult result = exchange.receive(changed, &error);
+    AppleClipboardResult result = exchange.receive(changed, &error, 10);
     require(result.consumed && result.outboundMessages.size() == 1 &&
             result.outboundMessages.first() ==
-                    AppleTextClipboardExchange::request(true, 1),
+                    AppleClipboardExchange::request(true, 1),
             "remote clipboard change must begin the native promise exchange");
 
-    const QList<QByteArray> promises = AppleTextClipboardExchange::encodeText(
-            QStringLiteral("Hello, 世界 👋"), true, 1, &error);
+    const QList<QByteArray> promises = AppleClipboardExchange::encodeArchive(
+            richArchive, true, 1, &error);
     for (const QByteArray& fragment : promises) {
-        result = exchange.receive(fragment, &error);
+        result = exchange.receive(fragment, &error, 11);
     }
     require(result.outboundMessages ==
-                    QList<QByteArray>{AppleTextClipboardExchange::request(false, 0)},
+                    QList<QByteArray>{AppleClipboardExchange::request(false, 0)},
             "a matching promise must be resolved with native automatic session zero");
 
     for (const QByteArray& fragment : encoded) {
-        result = exchange.receive(fragment, &error);
+        result = exchange.receive(fragment, &error, 12);
     }
-    require(result.receivedText == std::optional<QString>(
-                    QStringLiteral("Hello, 世界 👋")),
-            "only the exact UTF-8 plain-text flavor must cross the clipboard seam");
+    require(result.receivedArchive ==
+                    std::optional<AppleClipboardArchive>(richArchive) &&
+                    result.receivedAutomatically &&
+                    result.receivedArchive->preferredText() ==
+                    std::optional<QString>(QStringLiteral("Hello, 世界 👋")),
+            "automatic clipboard fetch must preserve every item, flavor, alias, and value");
 
-    const QList<QByteArray> advertised = exchange.advertiseLocalText(
-            QStringLiteral("local text"), &error);
+    const QList<QByteArray> advertised = exchange.advertiseLocalArchive(
+            richArchive, &error);
     require(!advertised.isEmpty(),
-            "eligible local text changes must advertise a pasteboard promise");
+            "eligible local rich clipboard changes must advertise a pasteboard promise");
     result = exchange.receive(
-            AppleTextClipboardExchange::request(false, 0x01020304), &error);
+            AppleClipboardExchange::request(false, 0x01020304), &error, 13);
     require(result.consumed && !result.outboundMessages.isEmpty(),
-            "a host request must resolve the most recently advertised local text");
+            "a host request must resolve the most recently advertised local archive");
 
-    const QList<QByteArray> disable = exchange.setEligible(false);
-    require(disable == QList<QByteArray>{QByteArray::fromHex("1500000200000000")},
-            "observing mode must explicitly disable shared-pasteboard exchange");
-    result = exchange.receive(changed, &error);
+    exchange.setAutomaticEligible(false);
+    result = exchange.receive(changed, &error, 14);
     require(result.consumed && result.outboundMessages.isEmpty(),
-            "remote clipboard changes must not fetch while observing");
+            "an unfocused session must ignore automatic remote clipboard changes");
+
+    const QList<QByteArray> disable = exchange.setSharingEnabled(false);
+    require(disable == QList<QByteArray>{QByteArray::fromHex("1500000200000000")},
+            "the shared-pasteboard switch must explicitly disable automatic exchange");
+    const QList<QByteArray> manualRequest = exchange.requestRemoteClipboard(20);
+    require(manualRequest == QList<QByteArray>{
+                    AppleClipboardExchange::request(false, 2)},
+            "manual receive must remain available while shared clipboard is disabled");
+    const QList<QByteArray> manualResponse =
+            AppleClipboardExchange::encodeArchive(
+                    richArchive, false, 2, &error);
+    for (const QByteArray& fragment : manualResponse) {
+        result = exchange.receive(fragment, &error, 21);
+    }
+    require(result.receivedArchive ==
+                    std::optional<AppleClipboardArchive>(richArchive) &&
+                    !result.receivedAutomatically,
+            "a matching manual response must install the complete archive");
+
+    const QList<QByteArray> expiredResponse =
+            AppleClipboardExchange::encodeArchive(
+                    richArchive, false, 3, &error);
+    exchange.requestRemoteClipboard(30);
+    for (const QByteArray& fragment : expiredResponse) {
+        result = exchange.receive(
+                fragment, &error,
+                30 + AppleClipboardExchange::RequestLifetimeMilliseconds);
+    }
+    require(!result.receivedArchive.has_value(),
+            "an expired manual response must not overwrite the local clipboard");
+
+    AppleClipboardExchange focusLease;
+    focusLease.setSharingEnabled(true);
+    focusLease.setAutomaticEligible(true);
+    result = focusLease.receive(changed, &error, 100);
+    const QList<QByteArray> focusPromise =
+            AppleClipboardExchange::encodeArchive(
+                    richArchive, true, 1, &error);
+    for (const QByteArray& fragment : focusPromise) {
+        result = focusLease.receive(fragment, &error, 101);
+    }
+    require(result.outboundMessages == QList<QByteArray>{
+                    AppleClipboardExchange::request(false, 0)},
+            "an eligible automatic request must advance from promises to data");
+    focusLease.setAutomaticEligible(false);
+    for (const QByteArray& fragment : encoded) {
+        result = focusLease.receive(fragment, &error, 102);
+    }
+    require(!result.receivedArchive.has_value(),
+            "losing focus must revoke an in-flight automatic clipboard lease");
+
+    AppleClipboardExchange invalidAdvertisement;
+    invalidAdvertisement.setSharingEnabled(true);
+    invalidAdvertisement.setAutomaticEligible(true);
+    const AppleClipboardArchive invalidArchive{{{{{QString(), {}, {}, 0}}}}};
+    require(invalidAdvertisement.advertiseLocalArchive(
+                    invalidArchive, &error).isEmpty() && !error.isEmpty(),
+            "invalid local formats must fail before advertising promises");
+    error.clear();
+    result = invalidAdvertisement.receive(
+            AppleClipboardExchange::request(false, 42), &error, 200);
+    require(result.outboundMessages.isEmpty(),
+            "a failed advertisement must not leave a fulfillable promise behind");
+}
+
+void testRichClipboardMimeAdapter()
+{
+    QMimeData mime;
+    mime.setText(QStringLiteral("Plain"));
+    mime.setHtml(QStringLiteral("<b>Rich</b>"));
+    mime.setData(QStringLiteral("text/rtf"),
+                 QByteArrayLiteral("{\\rtf1 Rich}"));
+    QImage image(2, 2, QImage::Format_RGBA8888);
+    image.fill(Qt::red);
+    mime.setImageData(image);
+
+    const std::optional<AppleClipboardArchive> archive =
+            AppleClipboard::archiveFromMimeData(&mime);
+    require(archive.has_value() && archive->items.size() == 1,
+            "the generic clipboard adapter must retain a rich MIME item");
+    QSet<QString> types;
+    for (const AppleClipboardFlavor& flavor : archive->items.first().flavors) {
+        types.insert(flavor.type);
+        require(!flavor.aliases.isEmpty(),
+                "generic clipboard flavors must retain their MIME alias");
+    }
+    require(types.contains(QStringLiteral("public.utf8-plain-text")) &&
+                    types.contains(QStringLiteral("public.html")) &&
+                    types.contains(QStringLiteral("public.rtf")) &&
+                    types.contains(QStringLiteral("public.png")),
+            "plain text, HTML, RTF, and images must all cross the generic MIME seam");
+
+    QMimeData files;
+    files.setText(QStringLiteral("/tmp/private.txt"));
+    files.setUrls({QUrl::fromLocalFile(QStringLiteral("/tmp/private.txt"))});
+    require(!AppleClipboard::archiveFromMimeData(&files).has_value(),
+            "file URLs must stay on the file-transfer path instead of clipboard sync");
 }
 
 void testAppleFileTransferNativeWireContract()
@@ -2989,34 +3121,35 @@ void testAppleFileTransferServiceLimitsConcurrentCopies()
 void testLocalClipboardRefreshesWhenStreamWindowRegainsFocus()
 {
     AppleLocalClipboardTracker tracker;
-    QMimeData initial;
-    initial.setText(QStringLiteral("initial"));
-    require(tracker.dataChanged(&initial) ==
-                    std::optional<QString>(QStringLiteral("initial")),
-            "a local clipboard notification must publish its text");
+    const AppleClipboardArchive initial =
+            AppleClipboardArchive::text(QStringLiteral("initial"));
+    require(tracker.dataChanged(initial) ==
+                    std::optional<AppleClipboardArchive>(initial),
+            "a local clipboard notification must publish its full archive");
 
     // Native clipboard ownership can change while the SDL stream window is
     // inactive without Qt delivering QClipboard::dataChanged. Swift samples
     // NSPasteboard when the session window becomes key, so the Windows seam
     // must recover the latest value at the equivalent focus boundary.
-    QMimeData changedWithoutNotification;
-    changedWithoutNotification.setText(QStringLiteral("copied while unfocused"));
-    require(tracker.windowFocusGained(&changedWithoutNotification) ==
-                    std::optional<QString>(
-                            QStringLiteral("copied while unfocused")),
+    const AppleClipboardArchive changedWithoutNotification =
+            AppleClipboardArchive::text(
+                    QStringLiteral("copied while unfocused"));
+    require(tracker.windowFocusGained(changedWithoutNotification) ==
+                    std::optional<AppleClipboardArchive>(
+                            changedWithoutNotification),
             "refocusing the stream window must recover a missed local clipboard change");
 
-    tracker.expectRemoteText(QStringLiteral("remote"));
-    QMimeData remoteWrite;
-    remoteWrite.setText(QStringLiteral("remote"));
-    require(!tracker.dataChanged(&remoteWrite).has_value(),
+    const AppleClipboardArchive remoteWrite =
+            AppleClipboardArchive::text(QStringLiteral("remote"));
+    tracker.expectRemoteArchive(remoteWrite);
+    require(!tracker.dataChanged(remoteWrite).has_value(),
             "a remote clipboard write must not be advertised back to the Mac");
 
     QMimeData localFile;
     localFile.setText(QStringLiteral("C:/private.txt"));
     localFile.setUrls({QUrl::fromLocalFile(QStringLiteral("C:/private.txt"))});
-    require(!tracker.windowFocusGained(&localFile).has_value(),
-            "refocusing the stream window must not turn a file clipboard into text");
+    require(AppleLocalClipboardTracker::containsFiles(&localFile),
+            "file clipboard markers must remain excluded from rich clipboard sync");
 }
 
 void testApplePerformanceOverlayFollowsSharedSettingsAndPlacement()
@@ -3224,6 +3357,12 @@ int main(int argc, char* argv[])
     std::fprintf(stderr, "testAppleMacInputBridgeReleasesModifiersOnFocusLoss\n");
     require(testAppleMacInputBridgeReleasesModifiersOnFocusLoss(),
             "the macOS input bridge left Shift pressed after losing focus");
+    std::fprintf(stderr, "testAppleMacClipboardPreservesMultipleItemsAndFlavors\n");
+    require(testAppleMacClipboardPreservesMultipleItemsAndFlavors(),
+            "the macOS clipboard adapter flattened items or lost rich flavors");
+    std::fprintf(stderr, "testAppleMacClipboardMenuRoutesCommandsAndTracksState\n");
+    require(testAppleMacClipboardMenuRoutesCommandsAndTracksState(),
+            "the macOS clipboard menu did not route commands or track session state");
 #endif
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
     testAppleStreamWindowPlacementPersistence();
@@ -3249,8 +3388,10 @@ int main(int argc, char* argv[])
     testRemoteCursorScalesForClientDpi();
     std::fprintf(stderr, "testRemoteCursorCacheMatchesSwiftFallbacks\n");
     testRemoteCursorCacheMatchesSwiftFallbacks();
-    std::fprintf(stderr, "testStageFourTextOnlyClipboardExchange\n");
-    testStageFourTextOnlyClipboardExchange();
+    std::fprintf(stderr, "testStageFourRichClipboardExchange\n");
+    testStageFourRichClipboardExchange();
+    std::fprintf(stderr, "testRichClipboardMimeAdapter\n");
+    testRichClipboardMimeAdapter();
     std::fprintf(stderr, "testAppleFileTransferNativeWireContract\n");
     testAppleFileTransferNativeWireContract();
     std::fprintf(stderr, "testAppleFileCopyDirectoryRoundTrip\n");

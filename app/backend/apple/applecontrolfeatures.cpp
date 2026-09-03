@@ -81,7 +81,7 @@ QByteArray inflateSyncFlush(const QByteArray& compressed,
 
 QByteArray deflateSyncFlush(const QByteArray& input, int maximumSize)
 {
-    if (input.size() > AppleTextClipboardExchange::MaximumArchiveBytes) {
+    if (input.size() > AppleClipboardExchange::MaximumArchiveBytes) {
         return {};
     }
     z_stream stream = {};
@@ -466,52 +466,110 @@ AppleControlEvents AppleControlEventParser::parse(const QByteArray& message)
     return events;
 }
 
-QList<QByteArray> AppleTextClipboardExchange::setEligible(bool eligible)
+std::optional<QString> AppleClipboardArchive::preferredText() const
 {
-    if (m_Eligible == eligible) {
+    for (const AppleClipboardItem& item : items) {
+        for (const AppleClipboardFlavor& flavor : item.flavors) {
+            if (flavor.type == QString::fromUtf8(TextFlavor)) {
+                return QString::fromUtf8(
+                        flavor.value.constData(), flavor.value.size());
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+AppleClipboardArchive AppleClipboardArchive::text(const QString& text)
+{
+    AppleClipboardFlavor flavor;
+    flavor.type = QString::fromUtf8(TextFlavor);
+    flavor.value = text.toUtf8();
+    AppleClipboardItem item;
+    item.flavors.append(std::move(flavor));
+    AppleClipboardArchive archive;
+    archive.items.append(std::move(item));
+    return archive;
+}
+
+QList<QByteArray> AppleClipboardExchange::setSharingEnabled(bool enabled)
+{
+    if (m_SharingStateKnown && m_SharingEnabled == enabled) {
         return {};
     }
-    m_Eligible = eligible;
-    if (!eligible) {
-        m_Reassembly.clear();
-        m_ExpectedLength = 0;
-        m_RequestState = RequestState::Idle;
-        m_RequestSessionId = 0;
+    m_SharingStateKnown = true;
+    m_SharingEnabled = enabled;
+    if (!enabled) {
+        m_HasUnfulfilledPromises = false;
+        if (m_RequestState == RequestState::AwaitingAutomaticPromises ||
+                m_RequestState == RequestState::AwaitingAutomaticData) {
+            resetRequest();
+        }
     }
-    return {eligible
+    return {enabled
                     ? QByteArray::fromHex("1500000100000000")
                     : QByteArray::fromHex("1500000200000000")};
 }
 
-QList<QByteArray> AppleTextClipboardExchange::advertiseLocalText(
-        const QString& text,
-        QString* error)
+void AppleClipboardExchange::setAutomaticEligible(bool eligible)
 {
-    m_LocalText = text;
-    m_HasLocalText = true;
-    if (!m_Eligible) {
-        return {};
+    if (m_AutomaticEligible == eligible) {
+        return;
     }
-    return encodeText(text, true, 0, error);
+    m_AutomaticEligible = eligible;
+    ++m_EligibilityGeneration;
+    if (!eligible &&
+            (m_RequestState == RequestState::AwaitingAutomaticPromises ||
+             m_RequestState == RequestState::AwaitingAutomaticData)) {
+        resetRequest();
+    }
+    if (!eligible) {
+        m_HasUnfulfilledPromises = false;
+    }
 }
 
-AppleTextClipboardResult AppleTextClipboardExchange::receive(
-        const QByteArray& message,
+QList<QByteArray> AppleClipboardExchange::advertiseLocalArchive(
+        const AppleClipboardArchive& archive,
         QString* error)
 {
-    AppleTextClipboardResult result;
+    m_LocalArchive = archive;
+    if (!m_SharingEnabled || !m_AutomaticEligible || archive.isEmpty()) {
+        return {};
+    }
+    const QList<QByteArray> messages = encodeArchive(
+            archive, true, 0, error);
+    m_HasUnfulfilledPromises = !messages.isEmpty();
+    return messages;
+}
+
+QList<QByteArray> AppleClipboardExchange::requestRemoteClipboard(
+        qint64 nowMilliseconds)
+{
+    const quint32 sessionId = nextSessionId();
+    beginRequest(RequestState::AwaitingManualData,
+                 sessionId,
+                 nowMilliseconds);
+    return {request(false, sessionId)};
+}
+
+AppleClipboardResult AppleClipboardExchange::receive(
+        const QByteArray& message,
+        QString* error,
+        qint64 nowMilliseconds)
+{
+    AppleClipboardResult result;
     if (message.isEmpty()) {
         return result;
     }
+    expireRequest(nowMilliseconds);
 
     if (!m_Reassembly.isEmpty() || byteAt(message, 0) == 0x1f) {
         result.consumed = true;
-        if (m_Reassembly.size() > MaximumCompressedBytes + 16 - message.size()) {
-            m_Reassembly.clear();
-            m_ExpectedLength = 0;
-            m_RequestState = RequestState::Idle;
+        if (message.size() > MaximumCompressedBytes + 16 ||
+                m_Reassembly.size() >
+                        MaximumCompressedBytes + 16 - message.size()) {
+            resetRequest();
             setError(error, QCoreApplication::translate(
-                    "AppleTextClipboardExchange",
+                    "AppleClipboardExchange",
                     "The remote clipboard payload is too large."));
             return result;
         }
@@ -525,9 +583,9 @@ AppleTextClipboardResult AppleTextClipboardExchange::receive(
             const quint32 compressedSize = AppleWire::readUInt32(
                     m_Reassembly, 12, &ok);
             if (!ok || compressedSize > MaximumCompressedBytes) {
-                m_Reassembly.clear();
+                resetRequest();
                 setError(error, QCoreApplication::translate(
-                        "AppleTextClipboardExchange",
+                        "AppleClipboardExchange",
                         "The remote clipboard payload is too large."));
                 return result;
             }
@@ -537,11 +595,9 @@ AppleTextClipboardResult AppleTextClipboardExchange::receive(
             return result;
         }
         if (m_Reassembly.size() > m_ExpectedLength) {
-            m_Reassembly.clear();
-            m_ExpectedLength = 0;
-            m_RequestState = RequestState::Idle;
+            resetRequest();
             setError(error, QCoreApplication::translate(
-                    "AppleTextClipboardExchange",
+                    "AppleClipboardExchange",
                     "The remote clipboard fragments are malformed."));
             return result;
         }
@@ -553,38 +609,56 @@ AppleTextClipboardResult AppleTextClipboardExchange::receive(
         m_ExpectedLength = 0;
         quint32 sessionId = 0;
         bool promises = false;
-        std::optional<QString> text;
-        if (!decodeEnvelope(complete, &sessionId, &promises, &text, error)) {
-            m_RequestState = RequestState::Idle;
+        AppleClipboardArchive archive;
+        if (!decodeEnvelope(
+                    complete, &sessionId, &promises, &archive, error)) {
+            resetRequest();
             return result;
         }
-        if (m_RequestState == RequestState::AwaitingPromises && promises &&
-                sessionId == m_RequestSessionId) {
-            result.outboundMessages.append(request(false, 0));
-            m_RequestState = RequestState::AwaitingData;
-        }
-        else if (m_RequestState == RequestState::AwaitingData && !promises &&
-                 sessionId == 0) {
-            if (m_Eligible && text.has_value()) {
-                result.receivedText = std::move(text);
+        if (m_RequestState == RequestState::AwaitingAutomaticPromises &&
+                promises && sessionId == m_RequestSessionId) {
+            if (!m_SharingEnabled || !m_AutomaticEligible ||
+                    m_RequestEligibilityGeneration !=
+                            m_EligibilityGeneration) {
+                resetRequest();
+                return result;
             }
-            m_RequestState = RequestState::Idle;
-            m_RequestSessionId = 0;
+            result.outboundMessages.append(request(false, 0));
+            m_RequestState = RequestState::AwaitingAutomaticData;
+        }
+        else if (m_RequestState == RequestState::AwaitingAutomaticData &&
+                 !promises && sessionId == 0) {
+            if (m_SharingEnabled && m_AutomaticEligible &&
+                    m_RequestEligibilityGeneration ==
+                            m_EligibilityGeneration) {
+                result.receivedAutomatically = true;
+                result.receivedArchive = std::move(archive);
+            }
+            resetRequest();
+        }
+        else if (m_RequestState == RequestState::AwaitingManualData &&
+                 !promises && sessionId == m_RequestSessionId) {
+            result.receivedArchive = std::move(archive);
+            resetRequest();
         }
         return result;
     }
 
     if (byteAt(message, 0) == 0x0b && message.size() >= 8) {
         result.consumed = true;
-        if (!m_Eligible || !m_HasLocalText) {
+        if (!m_SharingEnabled || !m_AutomaticEligible ||
+                !m_HasUnfulfilledPromises || m_LocalArchive.isEmpty()) {
             return result;
         }
         const bool promises = byteAt(message, 1) != 0;
         bool ok = false;
         const quint32 sessionId = AppleWire::readUInt32(message, 4, &ok);
         if (ok) {
-            result.outboundMessages = encodeText(
-                    m_LocalText, promises, sessionId, error);
+            result.outboundMessages = encodeArchive(
+                    m_LocalArchive, promises, sessionId, error);
+            if (!promises && !result.outboundMessages.isEmpty()) {
+                m_HasUnfulfilledPromises = false;
+            }
         }
         return result;
     }
@@ -596,31 +670,41 @@ AppleTextClipboardResult AppleTextClipboardExchange::receive(
             return result;
         }
         result.consumed = true;
-        if (!m_Eligible) {
-            return result;
-        }
         if (subtype == 2 && m_RequestState == RequestState::Idle) {
-            m_RequestSessionId = nextSessionId();
-            m_RequestState = RequestState::AwaitingPromises;
-            result.outboundMessages.append(request(true, m_RequestSessionId));
+            m_HasUnfulfilledPromises = false;
+            if (m_SharingEnabled && m_AutomaticEligible) {
+                const quint32 sessionId = nextSessionId();
+                beginRequest(RequestState::AwaitingAutomaticPromises,
+                             sessionId,
+                             nowMilliseconds);
+                m_RequestEligibilityGeneration = m_EligibilityGeneration;
+                result.outboundMessages.append(request(true, sessionId));
+            }
         }
-        else if (subtype == 3 && m_HasLocalText) {
-            result.outboundMessages = encodeText(m_LocalText, false, 0, error);
+        else if (subtype == 3 && m_SharingEnabled &&
+                 m_AutomaticEligible && m_HasUnfulfilledPromises &&
+                 !m_LocalArchive.isEmpty()) {
+            result.outboundMessages = encodeArchive(
+                    m_LocalArchive, false, 0, error);
+            if (!result.outboundMessages.isEmpty()) {
+                m_HasUnfulfilledPromises = false;
+            }
         }
     }
     return result;
 }
 
-void AppleTextClipboardExchange::resetForReconnect()
+void AppleClipboardExchange::resetForReconnect()
 {
-    m_Reassembly.clear();
-    m_ExpectedLength = 0;
-    m_RequestSessionId = 0;
-    m_RequestState = RequestState::Idle;
-    m_Eligible = false;
+    resetRequest();
+    m_SharingEnabled = false;
+    m_SharingStateKnown = false;
+    m_AutomaticEligible = false;
+    m_HasUnfulfilledPromises = false;
+    ++m_EligibilityGeneration;
 }
 
-QByteArray AppleTextClipboardExchange::request(bool promises, quint32 sessionId)
+QByteArray AppleClipboardExchange::request(bool promises, quint32 sessionId)
 {
     QByteArray message(4, '\0');
     message[0] = char(0x0b);
@@ -629,49 +713,134 @@ QByteArray AppleTextClipboardExchange::request(bool promises, quint32 sessionId)
     return message;
 }
 
-QList<QByteArray> AppleTextClipboardExchange::encodeText(
-        const QString& text,
+QList<QByteArray> AppleClipboardExchange::encodeArchive(
+        const AppleClipboardArchive& clipboard,
         bool promises,
         quint32 sessionId,
         QString* error)
 {
-    const QByteArray value = text.toUtf8();
-    QByteArray archive;
-    AppleWire::appendUInt32(archive, 1);
-    AppleWire::appendUInt32(archive, static_cast<quint32>(TextFlavor.size()));
-    archive.append(TextFlavor);
-    AppleWire::appendUInt32(archive, 0);
-    AppleWire::appendUInt32(archive, 0);
-    AppleWire::appendUInt32(archive, promises ? 0 : static_cast<quint32>(value.size()));
-    if (!promises) {
-        archive.append(value);
-    }
-    if (archive.size() > MaximumArchiveBytes) {
+    if (clipboard.items.size() > MaximumClipboardItems) {
         setError(error, QCoreApplication::translate(
-                "AppleTextClipboardExchange", "The local clipboard text is too large."));
+                "AppleClipboardExchange",
+                "The local clipboard contains too many items."));
         return {};
     }
-    const QByteArray compressed = deflateSyncFlush(archive, MaximumCompressedBytes);
+    QByteArray archive;
+    int flavorTotal = 0;
+    int aliasTotal = 0;
+    int metadataBytes = 0;
+    const auto appendBlob = [&archive](const QByteArray& value) {
+        if (value.size() > MaximumArchiveBytes - 4 ||
+                archive.size() >
+                        MaximumArchiveBytes - 4 - value.size()) {
+            return false;
+        }
+        AppleWire::appendUInt32(
+                archive, static_cast<quint32>(value.size()));
+        archive.append(value);
+        return true;
+    };
+    const auto appendMetadata = [&](const QString& value) {
+        const QByteArray encoded = value.toUtf8();
+        if (encoded.size() > MaximumClipboardMetadataLength ||
+                metadataBytes >
+                        MaximumClipboardMetadataBytes - encoded.size()) {
+            return false;
+        }
+        metadataBytes += encoded.size();
+        return appendBlob(encoded);
+    };
+    for (const AppleClipboardItem& item : clipboard.items) {
+        if (item.flavors.size() > MaximumClipboardFlavors - flavorTotal) {
+            setError(error, QCoreApplication::translate(
+                    "AppleClipboardExchange",
+                    "The local clipboard contains too many formats."));
+            return {};
+        }
+        flavorTotal += item.flavors.size();
+        if (archive.size() > MaximumArchiveBytes - 4) {
+            setError(error, QCoreApplication::translate(
+                    "AppleClipboardExchange",
+                    "The local clipboard is too large."));
+            return {};
+        }
+        AppleWire::appendUInt32(
+                archive, static_cast<quint32>(item.flavors.size()));
+        for (const AppleClipboardFlavor& flavor : item.flavors) {
+            if ((flavor.type.isEmpty() && flavor.aliases.isEmpty()) ||
+                    flavor.aliases.size() >
+                            MaximumClipboardAliases - aliasTotal ||
+                    !appendMetadata(flavor.type)) {
+                setError(error, QCoreApplication::translate(
+                        "AppleClipboardExchange",
+                        "The local clipboard format metadata is invalid."));
+                return {};
+            }
+            aliasTotal += flavor.aliases.size();
+            if (archive.size() > MaximumArchiveBytes - 8) {
+                setError(error, QCoreApplication::translate(
+                        "AppleClipboardExchange",
+                        "The local clipboard is too large."));
+                return {};
+            }
+            AppleWire::appendUInt32(archive, flavor.reserved);
+            AppleWire::appendUInt32(
+                    archive, static_cast<quint32>(flavor.aliases.size()));
+            for (const AppleClipboardTypeAlias& alias : flavor.aliases) {
+                if (!appendMetadata(alias.tagClass) ||
+                        !appendMetadata(alias.preferredTag)) {
+                    setError(error, QCoreApplication::translate(
+                            "AppleClipboardExchange",
+                            "The local clipboard format metadata is invalid."));
+                    return {};
+                }
+            }
+            if (!appendBlob(promises ? QByteArray() : flavor.value)) {
+                setError(error, QCoreApplication::translate(
+                        "AppleClipboardExchange",
+                        "The local clipboard is too large."));
+                return {};
+            }
+        }
+    }
+    const QByteArray compressed = deflateSyncFlush(
+            archive, MaximumCompressedBytes);
     if (compressed.isEmpty()) {
         setError(error, QCoreApplication::translate(
-                "AppleTextClipboardExchange", "The local clipboard text could not be compressed."));
+                "AppleClipboardExchange",
+                "The local clipboard could not be compressed."));
         return {};
     }
     QByteArray message(4, '\0');
     message[0] = char(0x1f);
     message[2] = promises ? char(1) : char(0);
     AppleWire::appendUInt32(message, sessionId);
-    AppleWire::appendUInt32(message, static_cast<quint32>(archive.size()));
-    AppleWire::appendUInt32(message, static_cast<quint32>(compressed.size()));
+    AppleWire::appendUInt32(
+            message, static_cast<quint32>(archive.size()));
+    AppleWire::appendUInt32(
+            message, static_cast<quint32>(compressed.size()));
     message.append(compressed);
     return fragments(message);
 }
 
-bool AppleTextClipboardExchange::decodeEnvelope(
+QList<QByteArray> AppleClipboardExchange::encodeText(
+        const QString& text,
+        bool promises,
+        quint32 sessionId,
+        QString* error)
+{
+    return encodeArchive(
+            AppleClipboardArchive::text(text),
+            promises,
+            sessionId,
+            error);
+}
+
+bool AppleClipboardExchange::decodeEnvelope(
         const QByteArray& message,
         quint32* sessionId,
         bool* containsPromises,
-        std::optional<QString>* text,
+        AppleClipboardArchive* clipboard,
         QString* error)
 {
     if (message.size() < 16 || byteAt(message, 0) != 0x1f) {
@@ -692,7 +861,7 @@ bool AppleTextClipboardExchange::decodeEnvelope(
             static_cast<int>(rawArchiveSize), MaximumArchiveBytes);
     if (archive.size() != static_cast<int>(rawArchiveSize)) {
         setError(error, QCoreApplication::translate(
-                "AppleTextClipboardExchange",
+                "AppleClipboardExchange",
                 "The remote clipboard payload could not be decompressed."));
         return false;
     }
@@ -702,7 +871,7 @@ bool AppleTextClipboardExchange::decodeEnvelope(
     int flavorTotal = 0;
     int aliasTotal = 0;
     int metadataBytes = 0;
-    std::optional<QString> decodedText;
+    AppleClipboardArchive decoded;
     while (offset < archive.size()) {
         if (++itemCount > MaximumClipboardItems || offset > archive.size() - 4) {
             return false;
@@ -715,13 +884,22 @@ bool AppleTextClipboardExchange::decodeEnvelope(
             return false;
         }
         flavorTotal += static_cast<int>(flavorCount);
+        AppleClipboardItem item;
         for (quint32 flavor = 0; flavor < flavorCount; ++flavor) {
-            QByteArray type;
-            if (!readMetadata(archive, &offset, &metadataBytes, &type) ||
+            QByteArray encodedType;
+            if (!readMetadata(
+                        archive, &offset, &metadataBytes, &encodedType) ||
                     offset > archive.size() - 8) {
                 return false;
             }
-            offset += 4; // reserved
+            const QString type = QString::fromUtf8(encodedType);
+            if (type.toUtf8() != encodedType) {
+                return false;
+            }
+            const quint32 reserved = AppleWire::readUInt32(
+                    archive, offset, &ok);
+            offset += 4;
+            if (!ok) return false;
             const quint32 aliasCount = AppleWire::readUInt32(archive, offset, &ok);
             offset += 4;
             if (!ok || aliasCount > static_cast<quint32>(
@@ -730,61 +908,110 @@ bool AppleTextClipboardExchange::decodeEnvelope(
                 return false;
             }
             aliasTotal += static_cast<int>(aliasCount);
+            QList<AppleClipboardTypeAlias> aliases;
             for (quint32 alias = 0; alias < aliasCount; ++alias) {
-                if (!readMetadata(archive, &offset, &metadataBytes, nullptr) ||
-                        !readMetadata(archive, &offset, &metadataBytes, nullptr)) {
+                QByteArray encodedTagClass;
+                QByteArray encodedPreferredTag;
+                if (!readMetadata(archive, &offset, &metadataBytes,
+                                  &encodedTagClass) ||
+                        !readMetadata(archive, &offset, &metadataBytes,
+                                      &encodedPreferredTag)) {
                     return false;
                 }
+                const QString tagClass = QString::fromUtf8(encodedTagClass);
+                const QString preferredTag =
+                        QString::fromUtf8(encodedPreferredTag);
+                if (tagClass.toUtf8() != encodedTagClass ||
+                        preferredTag.toUtf8() != encodedPreferredTag) {
+                    return false;
+                }
+                aliases.append({tagClass, preferredTag});
             }
             QByteArray value;
             if (!readBlob(archive, &offset, &value)) {
                 return false;
             }
-            if (!decodedText.has_value() && type == TextFlavor) {
-                const QString candidate = QString::fromUtf8(value.constData(), value.size());
-                if (candidate.toUtf8() != value || value.contains('\0')) {
-                    return false;
-                }
-                decodedText = candidate;
-            }
+            item.flavors.append({type, aliases, value, reserved});
         }
+        decoded.items.append(std::move(item));
     }
     if (sessionId != nullptr) *sessionId = rawSessionId;
     if (containsPromises != nullptr) *containsPromises = byteAt(message, 2) != 0;
-    if (text != nullptr) *text = std::move(decodedText);
+    if (clipboard != nullptr) *clipboard = std::move(decoded);
     return true;
 }
 
-QList<QByteArray> AppleTextClipboardExchange::fragments(const QByteArray& message)
+QList<QByteArray> AppleClipboardExchange::fragments(
+        const QByteArray& message)
 {
+    if (message.isEmpty()) {
+        return {};
+    }
     QList<QByteArray> result;
-    for (int offset = 0; offset < message.size(); offset += FragmentBytes) {
+    const int headerLength = qMin(16, message.size());
+    result.append(message.left(headerLength));
+    for (int offset = headerLength;
+         offset < message.size();
+         offset += FragmentBytes) {
         result.append(message.mid(offset, FragmentBytes));
     }
     return result;
 }
 
-std::optional<QString> AppleLocalClipboardTracker::dataChanged(
-        const QMimeData* mime)
+void AppleClipboardExchange::beginRequest(
+        RequestState state,
+        quint32 sessionId,
+        qint64 nowMilliseconds)
 {
-    return observe(mime);
+    m_Reassembly.clear();
+    m_ExpectedLength = 0;
+    m_RequestState = state;
+    m_RequestSessionId = sessionId;
+    m_RequestDeadlineMilliseconds = nowMilliseconds >= 0
+            ? nowMilliseconds + RequestLifetimeMilliseconds : -1;
 }
 
-std::optional<QString> AppleLocalClipboardTracker::windowFocusGained(
-        const QMimeData* mime)
+void AppleClipboardExchange::resetRequest()
 {
-    return observe(mime);
+    m_Reassembly.clear();
+    m_ExpectedLength = 0;
+    m_RequestState = RequestState::Idle;
+    m_RequestSessionId = 0;
+    m_RequestEligibilityGeneration = 0;
+    m_RequestDeadlineMilliseconds = -1;
 }
 
-void AppleLocalClipboardTracker::expectRemoteText(const QString& text)
+void AppleClipboardExchange::expireRequest(qint64 nowMilliseconds)
 {
-    m_PendingRemoteText = text;
+    if (m_RequestDeadlineMilliseconds >= 0 &&
+            nowMilliseconds >= m_RequestDeadlineMilliseconds) {
+        resetRequest();
+    }
+}
+
+std::optional<AppleClipboardArchive> AppleLocalClipboardTracker::dataChanged(
+        const std::optional<AppleClipboardArchive>& archive)
+{
+    return observe(archive);
+}
+
+std::optional<AppleClipboardArchive>
+AppleLocalClipboardTracker::windowFocusGained(
+        const std::optional<AppleClipboardArchive>& archive)
+{
+    return observe(archive);
+}
+
+void AppleLocalClipboardTracker::expectRemoteArchive(
+        const AppleClipboardArchive& archive)
+{
+    m_PendingRemoteArchive = archive;
 }
 
 void AppleLocalClipboardTracker::reset()
 {
-    m_PendingRemoteText.reset();
-    m_LastObservedText.reset();
+    m_PendingRemoteArchive.reset();
+    m_LastObservedArchive.reset();
 }
 
 bool AppleLocalClipboardTracker::containsFiles(const QMimeData* mime)
@@ -818,31 +1045,25 @@ bool AppleLocalClipboardTracker::containsFiles(const QMimeData* mime)
     return false;
 }
 
-std::optional<QString> AppleLocalClipboardTracker::observe(
-        const QMimeData* mime)
+std::optional<AppleClipboardArchive> AppleLocalClipboardTracker::observe(
+        const std::optional<AppleClipboardArchive>& archive)
 {
-    if (m_PendingRemoteText.has_value()) {
-        const bool isRemoteWrite = mime != nullptr && mime->hasText() &&
-                mime->text() == *m_PendingRemoteText;
-        m_PendingRemoteText.reset();
+    if (m_PendingRemoteArchive.has_value()) {
+        const bool isRemoteWrite = archive == m_PendingRemoteArchive;
+        m_PendingRemoteArchive.reset();
         if (isRemoteWrite) {
-            m_LastObservedText = mime->text();
+            m_LastObservedArchive = archive;
             return std::nullopt;
         }
     }
-    if (mime == nullptr || !mime->hasText()) {
+    if (!archive.has_value() || archive->isEmpty()) {
         return std::nullopt;
     }
-    if (containsFiles(mime)) {
+    if (m_LastObservedArchive == archive) {
         return std::nullopt;
     }
-
-    const QString text = mime->text();
-    if (m_LastObservedText == std::optional<QString>(text)) {
-        return std::nullopt;
-    }
-    m_LastObservedText = text;
-    return text;
+    m_LastObservedArchive = archive;
+    return archive;
 }
 
 ApplePerformanceOverlayPolicy ApplePerformanceOverlayPolicy::fromSettings(
@@ -930,7 +1151,7 @@ QStringList appleMoonlightPerformanceLines(
     return {row};
 }
 
-quint32 AppleTextClipboardExchange::nextSessionId()
+quint32 AppleClipboardExchange::nextSessionId()
 {
     quint32 result = m_NextSessionId++ & 0x7fffffffU;
     if (result == 0) {

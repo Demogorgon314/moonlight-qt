@@ -197,6 +197,7 @@ AppleScreenSharingSession::AppleScreenSharingSession(
       m_RemoteFileDragInputState(
               std::make_unique<AppleRemoteFileDragInputState>())
 {
+    m_ClipboardSharingEnabled.store(m_Connection.sharedClipboardEnabled);
     m_WorkerPool.setMaxThreadCount(1);
     m_WorkerPool.setExpiryTimeout(-1);
 }
@@ -627,6 +628,11 @@ void AppleScreenSharingSession::mediaReady(
         SDL_ShowWindow(m_SecondaryWindow);
         SDL_RaiseWindow(m_SecondaryWindow);
         updateKeyboardGrabState(m_SecondaryWindow);
+        if ((SDL_GetWindowFlags(m_SecondaryWindow) &
+             SDL_WINDOW_INPUT_FOCUS) != 0) {
+            setClipboardWindowFocused(
+                    SDL_GetWindowID(m_SecondaryWindow), true);
+        }
         m_SecondaryPresentationNeeded.store(true);
         wakePresentation();
         return;
@@ -701,6 +707,35 @@ void AppleScreenSharingSession::mediaReady(
     m_AppleMacInputBridge = std::make_unique<AppleMacInputBridge>(
             window,
             [this](const AppleMacKeyEvent& event) {
+                if (event.type != AppleMacKeyEvent::Type::Modifier &&
+                        event.controlDown && event.optionDown &&
+                        event.shiftDown && !event.commandDown) {
+                    char32_t character =
+                            event.charactersIgnoringModifiers.empty()
+                            ? U'\0'
+                            : event.charactersIgnoringModifiers.front();
+                    if (character >= U'A' && character <= U'Z') {
+                        character += U'a' - U'A';
+                    }
+                    // Preserve the shortcuts on input sources where Option
+                    // turns the key into a dead key and AppKit reports no
+                    // charactersIgnoringModifiers value.
+                    if (character == U'\0') {
+                        if (event.keyCode == 8) character = U'c';
+                        if (event.keyCode == 5) character = U'g';
+                        if (event.keyCode == 9) character = U'v';
+                    }
+                    if (character == U'c' || character == U'g' ||
+                            character == U'v') {
+                        if (event.type == AppleMacKeyEvent::Type::Down &&
+                                !event.isRepeat) {
+                            if (character == U'c') toggleClipboardSharing();
+                            if (character == U'g') requestRemoteClipboard();
+                            if (character == U'v') sendLocalClipboard();
+                        }
+                        return;
+                    }
+                }
                 if (m_Observing.load()) {
                     return;
                 }
@@ -834,7 +869,20 @@ void AppleScreenSharingSession::mediaReady(
                 interrupt();
             },
             m_LocalFileDragLifecycle,
-            0);
+            0,
+            [this](AppleMacClipboardCommand command) {
+                switch (command) {
+                case AppleMacClipboardCommand::ToggleSharing:
+                    toggleClipboardSharing();
+                    break;
+                case AppleMacClipboardCommand::Receive:
+                    requestRemoteClipboard();
+                    break;
+                case AppleMacClipboardCommand::Send:
+                    sendLocalClipboard();
+                    break;
+                }
+            });
     if (!m_AppleMacInputBridge->isValid()) {
         addLaunchWarning(tr("Native macOS input could not be attached."));
         m_AppleMacInputBridge.reset();
@@ -844,6 +892,9 @@ void AppleScreenSharingSession::mediaReady(
     }
 #endif
     updateKeyboardGrabState(window);
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0) {
+        setClipboardWindowFocused(SDL_GetWindowID(window), true);
+    }
     qInfo().nospace()
             << "Apple High Performance renderer="
             << m_VideoRenderer->name()
@@ -970,6 +1021,8 @@ void AppleScreenSharingSession::destroyPresentation()
     m_PresentationNeeded.store(true);
     m_PrimaryWindowMiniaturized.store(false);
     m_SecondaryWindowMiniaturized.store(false);
+    m_ClipboardFocusedWindows.clear();
+    m_ClipboardAutomaticEligible.store(false);
     m_FrameUpdatePauseState = AppleFrameUpdatePauseState();
     m_LastRenderLoopAtNanoseconds = 0;
     m_MaxRenderLoopGapMilliseconds = 0.0;

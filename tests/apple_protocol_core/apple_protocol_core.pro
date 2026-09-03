@@ -35,12 +35,14 @@ macx {
         -framework CoreGraphics -framework Metal -framework QuartzCore \
         -framework AppKit
     SOURCES += \
+        ../../app/backend/apple/appleclipboard_mac.mm \
         ../../app/backend/apple/applefiledrag_mac.mm \
         ../../app/backend/apple/applemacinputbridge.mm \
         ../../app/backend/apple/applemetalrenderer.mm \
         ../../app/backend/apple/appleaudiodecoder_macos.mm \
         mac_input_bridge_tests.mm
     HEADERS += \
+        ../../app/backend/apple/appleclipboard.h \
         ../../app/backend/apple/applefiledrag_mac.h \
         ../../app/backend/apple/applemacinputbridge.h \
         ../../app/backend/apple/applemetalrenderer.h
@@ -48,6 +50,7 @@ macx {
 
 SOURCES += \
     main.cpp \
+    ../../app/backend/apple/appleclipboard.cpp \
     ../../app/backend/apple/applefeaturegate.cpp \
     ../../app/backend/apple/appleconnectionstore.cpp \
     ../../app/backend/apple/applecredentialstore.cpp \

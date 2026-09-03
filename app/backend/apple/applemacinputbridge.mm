@@ -66,13 +66,15 @@ struct InputContext
                  AppleMacInputBridge::RemoteDragCallback remoteDrag,
                  AppleMacInputBridge::CloseCallback close,
                  std::shared_ptr<AppleLocalFileDragLifecycle> localFileDrag,
-                 int localFileDragDisplayIndex)
+                 int localFileDragDisplayIndex,
+                 AppleMacInputBridge::ClipboardCommandCallback clipboardCommand)
         : keyCallback(std::move(key)),
           pointerCallback(std::move(pointer)),
           remoteDragCallback(std::move(remoteDrag)),
           closeCallback(std::move(close)),
           localFileDragLifecycle(std::move(localFileDrag)),
-          displayIndex(localFileDragDisplayIndex)
+          displayIndex(localFileDragDisplayIndex),
+          clipboardCommandCallback(std::move(clipboardCommand))
     {
     }
 
@@ -103,6 +105,8 @@ struct InputContext
                 (event.modifierFlags & NSEventModifierFlagOption) != 0;
         nativeEvent.commandDown =
                 (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+        nativeEvent.isRepeat = event.type == NSEventTypeKeyDown &&
+                event.isARepeat;
         nativeEvent.controlEventObserved =
                 activeModifiers.count(59) != 0 ||
                 activeModifiers.count(62) != 0;
@@ -296,6 +300,7 @@ struct InputContext
     AppleMacInputBridge::CloseCallback closeCallback;
     std::shared_ptr<AppleLocalFileDragLifecycle> localFileDragLifecycle;
     int displayIndex = 0;
+    AppleMacInputBridge::ClipboardCommandCallback clipboardCommandCallback;
     std::unordered_map<unsigned short, unsigned short> activeModifiers;
     NSEvent* lastLeftDragEvent = nil;
 
@@ -491,6 +496,31 @@ void bridgeCloseWindow(id view, SEL, id)
     }
 }
 
+void bridgeToggleClipboardSharing(id view, SEL, id)
+{
+    if (InputContext* context = inputContext(view);
+            context != nullptr && context->clipboardCommandCallback) {
+        context->clipboardCommandCallback(
+                AppleMacClipboardCommand::ToggleSharing);
+    }
+}
+
+void bridgeReceiveClipboard(id view, SEL, id)
+{
+    if (InputContext* context = inputContext(view);
+            context != nullptr && context->clipboardCommandCallback) {
+        context->clipboardCommandCallback(AppleMacClipboardCommand::Receive);
+    }
+}
+
+void bridgeSendClipboard(id view, SEL, id)
+{
+    if (InputContext* context = inputContext(view);
+            context != nullptr && context->clipboardCommandCallback) {
+        context->clipboardCommandCallback(AppleMacClipboardCommand::Send);
+    }
+}
+
 bool addOverride(Class subclass, Class original, SEL selector, IMP function)
 {
     Method method = class_getInstanceMethod(original, selector);
@@ -569,6 +599,21 @@ Class inputSubclassForClass(Class original)
                     subclass,
                     sel_registerName("moonlightCloseWindow:"),
                     reinterpret_cast<IMP>(bridgeCloseWindow),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightToggleClipboardSharing:"),
+                    reinterpret_cast<IMP>(bridgeToggleClipboardSharing),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightReceiveClipboard:"),
+                    reinterpret_cast<IMP>(bridgeReceiveClipboard),
+                    "v@:@") ||
+            !class_addMethod(
+                    subclass,
+                    sel_registerName("moonlightSendClipboard:"),
+                    reinterpret_cast<IMP>(bridgeSendClipboard),
                     "v@:@")) {
         if (subclass != Nil) {
             objc_disposeClassPair(subclass);
@@ -661,6 +706,10 @@ struct AppleMacInputBridge::Private
     NSButton* zoomButton = nil;
     id originalZoomTarget = nil;
     SEL originalZoomAction = nullptr;
+    NSMenuItem* clipboardMenuItem = nil;
+    NSMenuItem* clipboardSharingItem = nil;
+    NSMenuItem* receiveClipboardItem = nil;
+    NSMenuItem* sendClipboardItem = nil;
     Class originalClass = Nil;
     bool valid = false;
 };
@@ -672,7 +721,8 @@ AppleMacInputBridge::AppleMacInputBridge(
         RemoteDragCallback remoteDragCallback,
         CloseCallback closeCallback,
         std::shared_ptr<AppleLocalFileDragLifecycle> localFileDragLifecycle,
-        int displayIndex)
+        int displayIndex,
+        ClipboardCommandCallback clipboardCommandCallback)
     : d(std::make_unique<Private>())
 {
     @autoreleasepool {
@@ -694,7 +744,8 @@ AppleMacInputBridge::AppleMacInputBridge(
                 std::move(remoteDragCallback),
                 std::move(closeCallback),
                 std::move(localFileDragLifecycle),
-                displayIndex);
+                displayIndex,
+                std::move(clipboardCommandCallback));
         d->view = [view retain];
         d->originalClass = originalClass;
         d->originalDraggedTypes = [view.registeredDraggedTypes copy];
@@ -742,6 +793,69 @@ AppleMacInputBridge::AppleMacInputBridge(
         }
         [view.window setAcceptsMouseMovedEvents:YES];
         [view.window makeFirstResponder:view];
+
+        NSMenu* mainMenu = NSApp.mainMenu;
+        if (mainMenu != nil) {
+            d->clipboardMenuItem = [[NSMenuItem alloc]
+                    initWithTitle:@"Clipboard"
+                           action:nil
+                    keyEquivalent:@""];
+            d->clipboardMenuItem.identifier =
+                    @"com.moonlight.apple-screen-sharing.clipboard";
+            NSMenu* clipboardMenu = [[NSMenu alloc]
+                    initWithTitle:@"Clipboard"];
+            clipboardMenu.autoenablesItems = NO;
+            d->clipboardMenuItem.submenu = clipboardMenu;
+
+            const NSEventModifierFlags shortcutModifiers =
+                    NSEventModifierFlagControl |
+                    NSEventModifierFlagOption |
+                    NSEventModifierFlagShift;
+            d->clipboardSharingItem = [[NSMenuItem alloc]
+                    initWithTitle:@"Use Shared Clipboard"
+                           action:sel_registerName(
+                                          "moonlightToggleClipboardSharing:")
+                    keyEquivalent:@"c"];
+            d->clipboardSharingItem.target = view;
+            d->clipboardSharingItem.keyEquivalentModifierMask =
+                    shortcutModifiers;
+            [clipboardMenu addItem:d->clipboardSharingItem];
+            [clipboardMenu addItem:[NSMenuItem separatorItem]];
+
+            d->receiveClipboardItem = [[NSMenuItem alloc]
+                    initWithTitle:@"Get Remote Clipboard"
+                           action:sel_registerName(
+                                          "moonlightReceiveClipboard:")
+                    keyEquivalent:@"g"];
+            d->receiveClipboardItem.target = view;
+            d->receiveClipboardItem.keyEquivalentModifierMask =
+                    shortcutModifiers;
+            [clipboardMenu addItem:d->receiveClipboardItem];
+
+            d->sendClipboardItem = [[NSMenuItem alloc]
+                    initWithTitle:@"Send Local Clipboard"
+                           action:sel_registerName("moonlightSendClipboard:")
+                    keyEquivalent:@"v"];
+            d->sendClipboardItem.target = view;
+            d->sendClipboardItem.keyEquivalentModifierMask =
+                    shortcutModifiers;
+            [clipboardMenu addItem:d->sendClipboardItem];
+
+            NSInteger insertionIndex = mainMenu.numberOfItems;
+            NSMenu* windowMenu = NSApp.windowsMenu;
+            NSMenu* helpMenu = NSApp.helpMenu;
+            for (NSInteger index = 0; index < mainMenu.numberOfItems; ++index) {
+                NSMenu* submenu = [mainMenu itemAtIndex:index].submenu;
+                if (submenu == windowMenu || submenu == helpMenu) {
+                    insertionIndex = index;
+                    break;
+                }
+            }
+            [mainMenu insertItem:d->clipboardMenuItem
+                         atIndex:insertionIndex];
+            [clipboardMenu release];
+            updateClipboardMenuState(false, false, false, false);
+        }
         d->valid = true;
     }
 }
@@ -749,6 +863,20 @@ AppleMacInputBridge::AppleMacInputBridge(
 AppleMacInputBridge::~AppleMacInputBridge()
 {
     @autoreleasepool {
+        if (d->clipboardMenuItem != nil) {
+            d->clipboardSharingItem.target = nil;
+            d->receiveClipboardItem.target = nil;
+            d->sendClipboardItem.target = nil;
+            [d->clipboardMenuItem.menu removeItem:d->clipboardMenuItem];
+            [d->clipboardSharingItem release];
+            d->clipboardSharingItem = nil;
+            [d->receiveClipboardItem release];
+            d->receiveClipboardItem = nil;
+            [d->sendClipboardItem release];
+            d->sendClipboardItem = nil;
+            [d->clipboardMenuItem release];
+            d->clipboardMenuItem = nil;
+        }
         if (d->view != nil) {
             [d->view unregisterDraggedTypes];
             if (d->originalDraggedTypes.count > 0) {
@@ -807,5 +935,29 @@ void AppleMacInputBridge::repostRemoteDragEvent()
 {
     @autoreleasepool {
         if (d->context) d->context->repostRemoteDragEvent();
+    }
+}
+
+void AppleMacInputBridge::updateClipboardMenuState(
+        bool clipboardSupported,
+        bool sharedClipboardSupported,
+        bool sharingEnabled,
+        bool controlling)
+{
+    @autoreleasepool {
+        if (d->clipboardMenuItem == nil) {
+            return;
+        }
+        const bool clipboardAvailable = controlling && clipboardSupported;
+        const bool manualMode = clipboardAvailable &&
+                (!sharedClipboardSupported || !sharingEnabled);
+        d->clipboardMenuItem.enabled = clipboardAvailable;
+        d->clipboardSharingItem.enabled =
+                clipboardAvailable && sharedClipboardSupported;
+        d->clipboardSharingItem.state =
+                sharedClipboardSupported && sharingEnabled
+                ? NSControlStateValueOn : NSControlStateValueOff;
+        d->receiveClipboardItem.enabled = manualMode;
+        d->sendClipboardItem.enabled = manualMode;
     }
 }

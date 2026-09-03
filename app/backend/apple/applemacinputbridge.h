@@ -9,6 +9,13 @@
 struct SDL_Window;
 class AppleLocalFileDragLifecycle;
 
+enum class AppleMacClipboardCommand
+{
+    ToggleSharing,
+    Receive,
+    Send,
+};
+
 struct AppleMacKeyEvent
 {
     enum class Type { Down, Up, Modifier };
@@ -21,6 +28,7 @@ struct AppleMacKeyEvent
     bool controlDown = false;
     bool optionDown = false;
     bool commandDown = false;
+    bool isRepeat = false;
     bool controlEventObserved = false;
     bool optionEventObserved = false;
     bool commandEventObserved = false;
@@ -63,6 +71,8 @@ public:
             std::function<bool(const void* nativeEvent,
                                bool pointerInsideView)>;
     using CloseCallback = std::function<void()>;
+    using ClipboardCommandCallback =
+            std::function<void(AppleMacClipboardCommand command)>;
 
     AppleMacInputBridge(SDL_Window* window,
                         KeyCallback keyCallback,
@@ -71,7 +81,8 @@ public:
                         CloseCallback closeCallback,
                         std::shared_ptr<AppleLocalFileDragLifecycle>
                                 localFileDragLifecycle = {},
-                        int displayIndex = 0);
+                        int displayIndex = 0,
+                        ClipboardCommandCallback clipboardCommandCallback = {});
     ~AppleMacInputBridge();
 
     AppleMacInputBridge(const AppleMacInputBridge&) = delete;
@@ -82,6 +93,10 @@ public:
     // Safe to call again when a delayed flagsChanged event arrives.
     void releasePressedModifiers();
     void repostRemoteDragEvent();
+    void updateClipboardMenuState(bool clipboardSupported,
+                                  bool sharedClipboardSupported,
+                                  bool sharingEnabled,
+                                  bool controlling);
 
 private:
     struct Private;

@@ -23,6 +23,7 @@ apple-screen-sharing {
     DEFINES += MOONLIGHT_ENABLE_APPLE_SCREEN_SHARING
     SOURCES += \
         backend/apple/applefeaturegate.cpp \
+        backend/apple/appleclipboard.cpp \
         backend/apple/appleconnectionstore.cpp \
         backend/apple/applecredentialstore.cpp \
         backend/apple/applekeyboardmapper.cpp \
@@ -48,6 +49,7 @@ apple-screen-sharing {
         backend/apple/applescreensharingsession.cpp
     HEADERS += \
         backend/apple/applefeaturegate.h \
+        backend/apple/appleclipboard.h \
         backend/apple/appleconnectionstore.h \
         backend/apple/applecredentialstore.h \
         backend/apple/applekeyboardmapper.h \
@@ -86,6 +88,7 @@ apple-screen-sharing {
     macx {
         LIBS += -framework Security -framework AudioToolbox -framework AVFAudio -framework Carbon -framework UniformTypeIdentifiers
         SOURCES += \
+            backend/apple/appleclipboard_mac.mm \
             backend/apple/applefiledrag_mac.mm \
             backend/apple/applemacinputbridge.mm \
             backend/apple/applemetalrenderer.mm \

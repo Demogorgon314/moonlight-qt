@@ -1,10 +1,13 @@
 #include "backend/apple/applemacinputbridge.h"
 #include "backend/apple/applefiledrag.h"
+#include "backend/apple/appleclipboard.h"
 
 #import <AppKit/AppKit.h>
 
 #include <SDL.h>
 #include <SDL_syswm.h>
+
+#include <QSet>
 
 #include <memory>
 #include <vector>
@@ -349,5 +352,171 @@ bool testAppleMacInputBridgeReleasesModifiersOnFocusLoss()
                 events[2].modifierDown && events[2].keyCode == 56 &&
                 events[3].type == AppleMacKeyEvent::Type::Modifier &&
                 !events[3].modifierDown && events[3].keyCode == 56;
+    }
+}
+
+bool testAppleMacClipboardPreservesMultipleItemsAndFlavors()
+{
+    @autoreleasepool {
+        NSPasteboard* source = [NSPasteboard pasteboardWithUniqueName];
+        [source clearContents];
+        NSPasteboardItem* first = [[[NSPasteboardItem alloc] init] autorelease];
+        [first setString:@"Hello" forType:NSPasteboardTypeString];
+        [first setData:[NSData dataWithBytes:"{\\rtf1 Hello}" length:13]
+                forType:NSPasteboardTypeRTF];
+        [first setString:@"file:///tmp/private.txt"
+                 forType:NSPasteboardTypeFileURL];
+        NSPasteboardItem* second = [[[NSPasteboardItem alloc] init] autorelease];
+        const unsigned char pngBytes[] = {
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        };
+        [second setData:[NSData dataWithBytes:pngBytes length:sizeof(pngBytes)]
+                 forType:NSPasteboardTypePNG];
+        [source writeObjects:@[first, second]];
+
+        const auto captured =
+                AppleClipboard::archiveFromNativePasteboard(source);
+        bool capturedRichData = captured.has_value() &&
+                captured->items.size() == 2 &&
+                captured->items.at(0).flavors.size() >= 2 &&
+                captured->items.at(1).flavors.size() >= 1;
+        if (capturedRichData) {
+            QSet<QString> firstTypes;
+            for (const AppleClipboardFlavor& flavor :
+                 captured->items.at(0).flavors) {
+                firstTypes.insert(flavor.type);
+                capturedRichData = capturedRichData &&
+                        !flavor.aliases.isEmpty();
+            }
+            capturedRichData =
+                    firstTypes.contains(QStringLiteral("public.utf8-plain-text")) &&
+                    firstTypes.contains(QStringLiteral("public.rtf")) &&
+                    !firstTypes.contains(QStringLiteral("public.file-url"));
+        }
+
+        const AppleClipboardArchive remote{{
+            {{{QStringLiteral("public.utf8-plain-text"), {},
+               QByteArrayLiteral("Remote"), 0},
+              {QStringLiteral("public.html"), {},
+               QByteArrayLiteral("<b>Remote</b>"), 0}}},
+            {{{QString(),
+               {{QStringLiteral("public.mime-type"),
+                 QStringLiteral("image/png")}},
+               QByteArray(reinterpret_cast<const char*>(pngBytes),
+                          sizeof(pngBytes)),
+               0}}},
+        }};
+        NSPasteboard* destination = [NSPasteboard pasteboardWithUniqueName];
+        [destination clearContents];
+        const bool installed = AppleClipboard::writeNativePasteboard(
+                remote, destination);
+        const NSArray<NSPasteboardItem*>* installedItems =
+                destination.pasteboardItems;
+        const bool preserved = installed && installedItems.count == 2 &&
+                [installedItems[0] stringForType:NSPasteboardTypeString]
+                        .length == 6 &&
+                [installedItems[0] dataForType:NSPasteboardTypeHTML].length ==
+                        13 &&
+                [installedItems[1] dataForType:NSPasteboardTypePNG].length ==
+                        sizeof(pngBytes);
+
+        [source releaseGlobally];
+        [destination releaseGlobally];
+        return capturedRichData && preserved;
+    }
+}
+
+bool testAppleMacClipboardMenuRoutesCommandsAndTracksState()
+{
+    @autoreleasepool {
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) return false;
+        SDL_Window* window = SDL_CreateWindow(
+                "Apple macOS clipboard menu test",
+                SDL_WINDOWPOS_UNDEFINED,
+                SDL_WINDOWPOS_UNDEFINED,
+                640,
+                360,
+                SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_METAL);
+        if (window == nullptr) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+            return false;
+        }
+
+        NSMenu* originalMenu = [NSApp.mainMenu retain];
+        NSMenu* testMenu = [[NSMenu alloc] initWithTitle:@""];
+        NSApp.mainMenu = testMenu;
+        std::vector<AppleMacClipboardCommand> commands;
+        bool bridgeValid = false;
+        bool automaticState = false;
+        bool manualState = false;
+        bool disabledState = false;
+        bool removedOnDestruction = false;
+        {
+            AppleMacInputBridge bridge(
+                    window,
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    0,
+                    [&commands](AppleMacClipboardCommand command) {
+                        commands.push_back(command);
+                    });
+            bridgeValid = bridge.isValid();
+            NSMenuItem* root = [testMenu
+                    itemWithTitle:@"Clipboard"];
+            NSMenuItem* sharing = [root.submenu
+                    itemWithTitle:@"Use Shared Clipboard"];
+            NSMenuItem* receive = [root.submenu
+                    itemWithTitle:@"Get Remote Clipboard"];
+            NSMenuItem* send = [root.submenu
+                    itemWithTitle:@"Send Local Clipboard"];
+            const NSEventModifierFlags modifiers =
+                    NSEventModifierFlagControl |
+                    NSEventModifierFlagOption |
+                    NSEventModifierFlagShift;
+
+            bridge.updateClipboardMenuState(true, true, true, true);
+            automaticState = root != nil && root.enabled && sharing.enabled &&
+                    sharing.state == NSControlStateValueOn &&
+                    !receive.enabled && !send.enabled &&
+                    sharing.keyEquivalentModifierMask == modifiers &&
+                    receive.keyEquivalentModifierMask == modifiers &&
+                    send.keyEquivalentModifierMask == modifiers;
+            automaticState = automaticState && [NSApp
+                    sendAction:sharing.action
+                            to:sharing.target
+                          from:sharing];
+
+            bridge.updateClipboardMenuState(true, true, false, true);
+            manualState = sharing.state == NSControlStateValueOff &&
+                    receive.enabled && send.enabled;
+            manualState = manualState &&
+                    [NSApp sendAction:receive.action
+                                   to:receive.target
+                                 from:receive] &&
+                    [NSApp sendAction:send.action
+                                   to:send.target
+                                 from:send];
+
+            bridge.updateClipboardMenuState(true, true, false, false);
+            disabledState = !root.enabled && !sharing.enabled &&
+                    !receive.enabled && !send.enabled;
+        }
+        removedOnDestruction =
+                [testMenu itemWithTitle:@"Clipboard"] == nil;
+
+        NSApp.mainMenu = originalMenu;
+        [originalMenu release];
+        [testMenu release];
+        SDL_DestroyWindow(window);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return bridgeValid && automaticState && manualState &&
+                disabledState && removedOnDestruction &&
+                commands == std::vector<AppleMacClipboardCommand>{
+                        AppleMacClipboardCommand::ToggleSharing,
+                        AppleMacClipboardCommand::Receive,
+                        AppleMacClipboardCommand::Send};
     }
 }
