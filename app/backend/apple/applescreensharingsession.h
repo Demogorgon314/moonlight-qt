@@ -130,6 +130,7 @@ private:
     bool activateRemoteFileDragIfEligible(
             bool pointerInsideStream,
             const void* nativeEvent = nullptr);
+    void finishNativeRemoteFileDrag(quint32 sessionId);
     void updateControlSummary();
     void localClipboardChanged();
     void refreshLocalClipboard(bool windowFocusGained);
@@ -158,7 +159,7 @@ private:
                            int clickCount,
                            int displayIndex,
                            AppleOutboundControl::Coalescing coalescing);
-    void queueLocalFileDragPointer(
+    void queueFileDragPointer(
             int windowX,
             int windowY,
             int displayIndex,
@@ -260,6 +261,7 @@ private:
     quint8 m_MouseButtons = 0;
     int m_LastMouseX = 0;
     int m_LastMouseY = 0;
+    int m_LastMouseDisplayIndex = 0;
     quint32 m_PreviousInputTimestamp = 0;
     quint32 m_ScrollEventCount = 0;
     quint64 m_PresentationWindowStartedAt = 0;

@@ -64,6 +64,8 @@ public:
                         QList<QByteArray>* messages,
                         QString* error = nullptr);
     void cancelLocalDrop(QList<QByteArray>* messages = nullptr);
+    bool cancelRemoteDrag(quint32 sessionId,
+                          QList<QByteArray>* messages = nullptr);
     bool acceptRemoteDrag(const AppleRemoteFileDrag& drag,
                           const QString& destinationDirectory,
                           QString* error = nullptr,

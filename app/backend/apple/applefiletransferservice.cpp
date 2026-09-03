@@ -129,6 +129,7 @@ struct AppleFileTransferService::State
     quint32 nextSessionId = 0;
     int activeSenderCount = 0;
     PendingDrop pendingDrop;
+    quint32 remoteDragSessionId = 0;
     QHash<quint32, std::shared_ptr<Outgoing>> outgoing;
     QHash<quint32, std::shared_ptr<Incoming>> incoming;
     QHash<quint32, IncomingOutcome> incomingOutcomes;
@@ -521,6 +522,21 @@ void AppleFileTransferService::cancelLocalDrop(QList<QByteArray>* messages)
     m_State->pendingDrop = {};
 }
 
+bool AppleFileTransferService::cancelRemoteDrag(
+        quint32 sessionId,
+        QList<QByteArray>* messages)
+{
+    std::lock_guard<std::mutex> lock(m_State->mutex);
+    if (sessionId == 0 || m_State->remoteDragSessionId != sessionId) {
+        return false;
+    }
+    m_State->remoteDragSessionId = 0;
+    if (!m_State->closed && messages != nullptr) {
+        messages->append(AppleFileTransferProtocol::cancelDrop(sessionId));
+    }
+    return true;
+}
+
 bool AppleFileTransferService::acceptRemoteDrag(
         const AppleRemoteFileDrag& drag,
         const QString& destinationDirectory,
@@ -811,12 +827,17 @@ bool AppleFileTransferService::receive(
             return true;
         }
         std::lock_guard<std::mutex> lock(m_State->mutex);
+        if (m_State->closed) return true;
         AppleFileTransferEvent event;
         event.kind = AppleFileTransferEvent::Kind::RemoteDrag;
         event.direction = AppleFileTransferEvent::Direction::FromRemote;
         if (drag.has_value()) {
             event.sessionId = drag->sessionId;
             event.remoteDrag = *drag;
+            m_State->remoteDragSessionId = drag->sessionId;
+        }
+        else {
+            m_State->remoteDragSessionId = 0;
         }
         m_State->events.append(std::move(event));
         return true;
@@ -1091,6 +1112,7 @@ void AppleFileTransferService::reset()
     m_State->available = false;
     m_State->controlling = true;
     m_State->pendingDrop = {};
+    m_State->remoteDragSessionId = 0;
     m_State->queued.clear();
     m_State->incomingOutcomes.clear();
     m_State->events.clear();
@@ -1106,6 +1128,7 @@ void AppleFileTransferService::close()
         if (m_State->closed && m_State->workers.empty()) return;
         m_State->closed = true;
         m_State->pendingDrop = {};
+        m_State->remoteDragSessionId = 0;
         m_State->queued.clear();
         for (const auto& transfer : std::as_const(m_State->outgoing)) {
             transfer->cancelled = true;

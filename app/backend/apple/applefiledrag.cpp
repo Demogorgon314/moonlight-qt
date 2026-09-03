@@ -37,18 +37,22 @@ AppleRemoteFileDragInputTransition
 AppleRemoteFileDragInputState::nativeDragBegan(quint8 buttons)
 {
     m_NativeDragOwnsRelease = true;
-    return {static_cast<quint8>(buttons & ~quint8(1)), false};
+    // Keep the remote button held until the native drag finishes. A
+    // pointer frame can still race with the native drag startup; clearing the
+    // bit here would turn that frame into a remote Finder drop and move the
+    // source before its promised contents are requested.
+    return {static_cast<quint8>(buttons | quint8(1)), false};
 }
 
 AppleRemoteFileDragInputTransition
 AppleRemoteFileDragInputState::nativeDragEnded(quint8 buttons)
 {
-    // AppKit owns the mouse-up after a Finder promise drag; emitting it at the
-    // last remote point would complete a second drop on the remote Mac.
+    // The native drag loop owns mouse-up after a promised-file drag. Emitting
+    // it at the last remote point would complete a second drop on the Mac.
     // Windows can also publish SDL's queued button-up after DoDragDrop returns,
     // so ownership remains armed until that stale event is consumed or a new
     // physical press begins. Ending the native drag never emits a wire event.
-    return {static_cast<quint8>(buttons & ~quint8(1)), false};
+    return {static_cast<quint8>(buttons & ~quint8(7)), false};
 }
 
 AppleRemoteFileDragInputTransition

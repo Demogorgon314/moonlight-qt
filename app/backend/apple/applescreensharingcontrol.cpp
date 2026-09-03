@@ -83,7 +83,7 @@ void AppleScreenSharingSession::ensureLocalFileDragLifecycle()
                                     point.y,
                                     point.displayIndex).has_value()) {
                             if (!pressed && m_LocalFileDragPointerActive) {
-                                queueLocalFileDragPointer(
+                                queueFileDragPointer(
                                         m_LastLocalFileDragX,
                                         m_LastLocalFileDragY,
                                         m_LastLocalFileDragDisplayIndex,
@@ -99,7 +99,8 @@ void AppleScreenSharingSession::ensureLocalFileDragLifecycle()
                         m_LocalFileDragPointerActive = pressed;
                         m_LastMouseX = point.x;
                         m_LastMouseY = point.y;
-                        queueLocalFileDragPointer(
+                        m_LastMouseDisplayIndex = point.displayIndex;
+                        queueFileDragPointer(
                                 point.x,
                                 point.y,
                                 point.displayIndex,
@@ -278,6 +279,33 @@ void AppleScreenSharingSession::applyRemoteClipboardText(const QString& text)
             << " UTF-8 bytes";
 }
 
+void AppleScreenSharingSession::finishNativeRemoteFileDrag(
+        quint32 sessionId)
+{
+    QList<QByteArray> cancelMessages;
+    if (m_FileTransferService != nullptr) {
+        m_FileTransferService->cancelRemoteDrag(
+                sessionId, &cancelMessages);
+    }
+    for (QByteArray& message : cancelMessages) {
+        AppleOutboundControl outbound;
+        outbound.kind = AppleOutboundControl::Kind::Message;
+        outbound.message = std::move(message);
+        queueControl(std::move(outbound));
+    }
+    if (m_RemoteFileDragInputState != nullptr) {
+        const AppleRemoteFileDragInputTransition ended =
+                m_RemoteFileDragInputState->nativeDragEnded(m_MouseButtons);
+        m_MouseButtons = ended.buttons;
+    }
+    queueFileDragPointer(
+            m_LastMouseX,
+            m_LastMouseY,
+            m_LastMouseDisplayIndex,
+            false,
+            false);
+}
+
 bool AppleScreenSharingSession::activateRemoteFileDragIfEligible(
         bool pointerInsideStream,
         const void* nativeEvent)
@@ -309,6 +337,7 @@ bool AppleScreenSharingSession::activateRemoteFileDragIfEligible(
         m_MouseButtons = began.buttons;
         const std::shared_ptr<AppleFileTransferService> service =
                 m_FileTransferService;
+        const quint32 remoteDragSessionId = drag->sessionId;
         const QPointer<AppleScreenSharingSession> session(this);
         QString startError;
         const bool started = m_MacRemoteFileDragSource->begin(
@@ -327,18 +356,16 @@ bool AppleScreenSharingSession::activateRemoteFileDragIfEligible(
                                     completedPath,
                                     error);
                 },
-                [session](AppleMacRemoteFileDragResult result,
-                          const QString& error) {
+                [session, remoteDragSessionId](
+                        AppleMacRemoteFileDragResult result,
+                        const QString& error) {
                     if (session == nullptr) return;
                     QMetaObject::invokeMethod(
                             session,
-                            [session, result, error]() {
+                            [session, remoteDragSessionId, result, error]() {
                                 if (session == nullptr) return;
-                                const AppleRemoteFileDragInputTransition ended =
-                                        session->m_RemoteFileDragInputState
-                                                ->nativeDragEnded(
-                                                        session->m_MouseButtons);
-                                session->m_MouseButtons = ended.buttons;
+                                session->finishNativeRemoteFileDrag(
+                                        remoteDragSessionId);
                                 if (result ==
                                         AppleMacRemoteFileDragResult::Dropped) {
                                     qInfo() << "Apple promised files were dropped through Finder";
@@ -473,10 +500,9 @@ bool AppleScreenSharingSession::activateRemoteFileDragIfEligible(
                     },
                     &startError);
             if (started) {
-                const AppleRemoteFileDragInputTransition ended =
-                        session->m_RemoteFileDragInputState->nativeDragEnded(
-                                session->m_MouseButtons);
-                session->m_MouseButtons = ended.buttons;
+                if (session != nullptr) {
+                    session->finishNativeRemoteFileDrag(drag->sessionId);
+                }
                 return;
             }
             const AppleRemoteFileDragInputTransition failed =

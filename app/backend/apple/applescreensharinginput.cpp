@@ -68,6 +68,7 @@ void AppleScreenSharingSession::handleMouseMotion(
 {
     m_LastMouseX = x;
     m_LastMouseY = y;
+    m_LastMouseDisplayIndex = displayIndex;
     queuePointer(x, y, 0, 0, displayIndex);
     // Motion events are inside the stream window. A pending remote drag must
     // remain inert so ordinary Finder rearrangement never starts a download.
@@ -120,6 +121,7 @@ void AppleScreenSharingSession::handleMouseButton(
             if (!transition.forwardToRemote) {
                 m_LastMouseX = x;
                 m_LastMouseY = y;
+                m_LastMouseDisplayIndex = displayIndex;
                 return;
             }
         }
@@ -129,6 +131,7 @@ void AppleScreenSharingSession::handleMouseButton(
     }
     m_LastMouseX = x;
     m_LastMouseY = y;
+    m_LastMouseDisplayIndex = displayIndex;
     queuePointer(x, y, clickCount, 0, displayIndex);
 }
 
@@ -209,7 +212,7 @@ void AppleScreenSharingSession::queuePointer(
                     : AppleOutboundControl::Coalescing::None);
 }
 
-void AppleScreenSharingSession::queueLocalFileDragPointer(
+void AppleScreenSharingSession::queueFileDragPointer(
         int windowX,
         int windowY,
         int displayIndex,
@@ -707,11 +710,17 @@ void AppleScreenSharingSession::pollSdlEvents()
                 // key-up events. Match both native iScreenSharing and the
                 // Moonlight input path by releasing the exact remote keys now.
                 releaseAllKeys();
+#if defined(Q_OS_DARWIN) || defined(Q_OS_WIN)
+                // Native file drags may move focus before their asynchronous
+                // type-32 notification arrives. Their completion path owns the
+                // remote pointer release after cancellation is queued.
+#else
                 if (m_MouseButtons != 0) {
                     m_MouseButtons = 0;
                     queuePointer(m_LastMouseX, m_LastMouseY, 0, 0,
                                  displayIndex);
                 }
+#endif
             }
             switch (event.window.event) {
             case SDL_WINDOWEVENT_EXPOSED:
@@ -795,4 +804,3 @@ void AppleScreenSharingSession::updateKeyboardGrabState(SDL_Window* window)
             << " for " << (isPrimary ? "primary" : "secondary")
             << " window";
 }
-

@@ -2342,16 +2342,17 @@ void testAppleRemoteFileDragWaitsUntilPointerLeavesStream()
             "a later remote drag with the same session ID could not activate");
 }
 
-void testAppleRemoteFileDragEndDoesNotDropAgainOnTheMac()
+void testAppleRemoteFileDragEndDoesNotDropAgain()
 {
     AppleRemoteFileDragInputState input;
-    AppleRemoteFileDragInputTransition transition = input.nativeDragBegan(1);
-    require(transition.buttons == 0 && !transition.forwardToRemote,
-            "starting a local promised-file drag forwarded a remote release");
+    AppleRemoteFileDragInputTransition transition = input.nativeDragBegan(7);
+    require(transition.buttons == 7 && !transition.forwardToRemote,
+            "starting a local promised-file drag released the remote file "
+            "before the native drag finished");
 
     transition = input.nativeDragEnded(transition.buttons);
     require(transition.buttons == 0 && !transition.forwardToRemote,
-            "ending a local promised-file drag completed a duplicate Mac drop");
+            "ending a local promised-file drag completed a duplicate remote drop");
 
     transition = input.localLeftButtonChanged(false, transition.buttons);
     require(transition.buttons == 0 && !transition.forwardToRemote,
@@ -2368,6 +2369,32 @@ void testAppleRemoteFileDragEndDoesNotDropAgainOnTheMac()
     transition = input.nativeDragStartFailed(transition.buttons);
     require(transition.buttons == 1 && !transition.forwardToRemote,
             "a native drag startup failure lost the held remote button state");
+}
+
+void testAppleFileTransferCancelsOnlyTheActiveRemoteDragOnce()
+{
+    AppleFileTransferService service;
+    service.setAvailable(true);
+    QString error;
+    const QByteArray remoteDrag = AppleFileTransferProtocol::beginDrop(
+            {QUrl(QStringLiteral("file:///Users/test/remote-file.txt"))},
+            0x1234,
+            &error);
+    require(!remoteDrag.isEmpty() && service.receive(remoteDrag, &error),
+            qPrintable(error));
+
+    QList<QByteArray> messages;
+    require(!service.cancelRemoteDrag(0x4321, &messages) &&
+                    messages.isEmpty(),
+            "a stale native drag cancelled the current remote session");
+    require(service.cancelRemoteDrag(0x1234, &messages) &&
+                    messages == QList<QByteArray>{
+                            AppleFileTransferProtocol::cancelDrop(0x1234)},
+            "the active remote drag did not send its native cancellation");
+    require(!service.cancelRemoteDrag(0x1234, &messages) &&
+                    messages.size() == 1,
+            "the same remote drag was cancelled more than once");
+    service.close();
 }
 
 #ifdef Q_OS_WIN
@@ -3034,8 +3061,10 @@ int main(int argc, char* argv[])
     testAppleFileTransferStopsImmediatelyAfterRemoteRejection();
     std::fprintf(stderr, "testAppleRemoteFileDragWaitsUntilPointerLeavesStream\n");
     testAppleRemoteFileDragWaitsUntilPointerLeavesStream();
-    std::fprintf(stderr, "testAppleRemoteFileDragEndDoesNotDropAgainOnTheMac\n");
-    testAppleRemoteFileDragEndDoesNotDropAgainOnTheMac();
+    std::fprintf(stderr, "testAppleRemoteFileDragEndDoesNotDropAgain\n");
+    testAppleRemoteFileDragEndDoesNotDropAgain();
+    std::fprintf(stderr, "testAppleFileTransferCancelsOnlyTheActiveRemoteDragOnce\n");
+    testAppleFileTransferCancelsOnlyTheActiveRemoteDragOnce();
 #ifdef Q_OS_WIN
     std::fprintf(stderr, "testAppleWindowsPromisedFileExposesDescriptorAndContents\n");
     testAppleWindowsPromisedFileExposesDescriptorAndContents();
