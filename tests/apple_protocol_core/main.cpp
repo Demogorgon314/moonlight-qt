@@ -101,6 +101,7 @@ class TranscriptTransport final : public AppleByteTransport
 public:
     QByteArray incoming;
     QList<QByteArray> writes;
+    QList<int> protocolDelays;
     int offset = 0;
     bool connected = false;
 
@@ -136,7 +137,10 @@ public:
         return true;
     }
 
-    void protocolDelay(int, std::atomic_bool*) override {}
+    void protocolDelay(int milliseconds, std::atomic_bool*) override
+    {
+        protocolDelays.append(milliseconds);
+    }
     void close() override { connected = false; }
 };
 
@@ -500,6 +504,18 @@ void testAuthenticatedRecordRecoveryAndOrdering()
             "record layer must reject messages that exceed the wire length field");
 }
 
+void testHighPerformanceEncodingCapabilitiesMatchNativeOrder()
+{
+    require(AppleWire::setEncodings() == QByteArray::fromHex(
+                    "0200000e"
+                    "000003f2000003f3000003ea"
+                    "0000000600000010ffffff11"
+                    "000004500000044cffffff21"
+                    "0000044d0000045100000453"
+                    "0000045500000456"),
+            "high-performance encodings must match the native capability order");
+}
+
 void testControlNegotiationAndEncryptedWrite()
 {
     const QByteArray masterKey = QByteArray::fromHex("00112233445566778899aabbccddeeff");
@@ -527,27 +543,37 @@ void testControlNegotiationAndEncryptedWrite()
     std::atomic_bool cancelled{false};
     require(control.negotiate(transport, masterKey, &cancelled, &error),
             "control channel negotiation must accept a valid rekey update");
-    require(transport.writes.size() == 4 &&
-            transport.writes.at(0) == AppleWire::viewerInfo() + AppleWire::setEncryption() &&
-            transport.writes.at(1) == AppleWire::setEncodings() &&
+    require(transport.protocolDelays.isEmpty(),
+            "control encryption negotiation must be driven by the rekey instead of fixed delays");
+    require(transport.writes.size() == 5 &&
+            transport.writes.at(0) == AppleWire::viewerInfo() &&
+            transport.writes.at(1) == AppleWire::setEncryption() &&
             transport.writes.at(2) == AppleWire::postEncryptionToggle(),
-            "control setup writes must preserve protocol ordering");
+            "control setup writes must preserve the native rekey ordering");
 
     AppleEncryptedRecordLayer receiver(recordKey, recordIv);
     const QByteArray displayRecord = transport.writes.at(3);
     require(receiver.decrypt(displayRecord.mid(2)) == AppleWire::displayConfiguration(),
             "display configuration must be the first encrypted control message");
+    require(receiver.decrypt(transport.writes.at(4).mid(2)) ==
+                    AppleWire::setEncodings(),
+            "encoding capabilities must be sent only after encryption is enabled");
     const QByteArray observingMessage = QByteArray::fromHex("0a000000");
     require(control.sendEncrypted(transport, observingMessage, &cancelled, &error),
             "post-negotiation encrypted control write must succeed");
-    require(transport.writes.size() == 5 &&
-            receiver.decrypt(transport.writes.at(4).mid(2)) == observingMessage,
+    require(transport.writes.size() == 6 &&
+            receiver.decrypt(transport.writes.at(5).mid(2)) == observingMessage,
             "encrypted control writes must remain ordered on the negotiated record stream");
 }
 
 void testHighPerformanceMediaOfferAndAnswer()
 {
     QString error;
+    require(AppleMediaNegotiator::framebufferStartupMessages() ==
+                    QList<QByteArray>{
+                            AppleMediaWire::framebufferUpdateRequest(),
+                            AppleMediaWire::autoFramebufferUpdate()},
+            "media startup must not repeat the encrypted encoding capabilities");
     const QUuid callId(QStringLiteral("00112233-4455-6677-8899-aabbccddeeff"));
     const QByteArray offer = AppleMediaWire::createOffer(
             7,
@@ -2990,6 +3016,8 @@ int main(int argc, char* argv[])
     testFormalAuthenticationTranscript();
     std::fprintf(stderr, "testAuthenticatedRecordRecoveryAndOrdering\n");
     testAuthenticatedRecordRecoveryAndOrdering();
+    std::fprintf(stderr, "testHighPerformanceEncodingCapabilitiesMatchNativeOrder\n");
+    testHighPerformanceEncodingCapabilitiesMatchNativeOrder();
     std::fprintf(stderr, "testControlNegotiationAndEncryptedWrite\n");
     testControlNegotiationAndEncryptedWrite();
     std::fprintf(stderr, "testHighPerformanceMediaOfferAndAnswer\n");

@@ -225,8 +225,9 @@ QByteArray setEncryption()
 
 QByteArray setEncodings()
 {
-    const std::array<qint32, 11> encodings = {
-        1010, 1011, 1002, 1104, 1100, -223, 1101, 1105, 1107, 1109, 1110,
+    const std::array<qint32, 14> encodings = {
+        1010, 1011, 1002, 6, 16, -239, 1104,
+        1100, -223, 1101, 1105, 1107, 1109, 1110,
     };
     QByteArray message;
     message.append(char(0x02));

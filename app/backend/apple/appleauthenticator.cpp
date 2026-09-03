@@ -516,16 +516,8 @@ bool AppleControlChannel::negotiate(AppleByteTransport& transport,
                                     QString* error)
 {
     if (masterKey.size() != 16 || displayConfiguration.isEmpty() ||
-            !transport.writeAll(AppleWire::viewerInfo() + AppleWire::setEncryption(),
-                                cancelledFlag, error)) {
-        return false;
-    }
-    // The native host changes control framing asynchronously after SetEncryption.
-    // Keep the captured pacing, but delegate it to the transport so tests use a
-    // deterministic no-wait implementation.
-    transport.protocolDelay(100, cancelledFlag);
-    if (cancelled(cancelledFlag) ||
-            !transport.writeAll(AppleWire::setEncodings(), cancelledFlag, error)) {
+            !transport.writeAll(AppleWire::viewerInfo(), cancelledFlag, error) ||
+            !transport.writeAll(AppleWire::setEncryption(), cancelledFlag, error)) {
         return false;
     }
     QByteArray encryptedKey;
@@ -533,19 +525,27 @@ bool AppleControlChannel::negotiate(AppleByteTransport& transport,
     if (!readRekey(transport, &encryptedKey, &encryptedIv, cancelledFlag, error)) {
         return false;
     }
+    // Acknowledge the server's rekey before installing the local record layer.
+    // The rekey event, rather than timing, defines the plaintext/encrypted
+    // boundary of the control channel.
+    if (!transport.writeAll(
+                AppleWire::postEncryptionToggle(), cancelledFlag, error)) {
+        return false;
+    }
     const QByteArray key = decryptAesEcb(encryptedKey, masterKey, error);
     const QByteArray iv = decryptAesEcb(encryptedIv, masterKey, error);
     m_Records = AppleEncryptedRecordLayer(key, iv);
-    if (!m_Records.isValid() ||
-            !transport.writeAll(AppleWire::postEncryptionToggle(), cancelledFlag, error)) {
+    if (!m_Records.isValid()) {
         return false;
     }
-    transport.protocolDelay(200, cancelledFlag);
-    return !cancelled(cancelledFlag) && sendEncrypted(
-            transport,
-            displayConfiguration,
-            cancelledFlag,
-            error);
+    return sendEncrypted(transport,
+                         displayConfiguration,
+                         cancelledFlag,
+                         error) &&
+            sendEncrypted(transport,
+                          AppleWire::setEncodings(),
+                          cancelledFlag,
+                          error);
 }
 
 bool AppleControlChannel::sendEncrypted(AppleByteTransport& transport,

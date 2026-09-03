@@ -324,6 +324,14 @@ bool AppleMediaTransport::isOpen() const
            !m_RemoteAddress.isNull();
 }
 
+QList<QByteArray> AppleMediaNegotiator::framebufferStartupMessages()
+{
+    return {
+        AppleMediaWire::framebufferUpdateRequest(),
+        AppleMediaWire::autoFramebufferUpdate(),
+    };
+}
+
 bool AppleMediaNegotiator::negotiate(
         AppleTcpTransport& tcp,
         AppleControlChannel& control,
@@ -369,12 +377,7 @@ bool AppleMediaNegotiator::negotiate(
         return false;
     }
 
-    const QList<QByteArray> startup = {
-        AppleWire::setEncodings(),
-        AppleMediaWire::framebufferUpdateRequest(),
-        AppleMediaWire::autoFramebufferUpdate(),
-    };
-    for (const QByteArray& message : startup) {
+    for (const QByteArray& message : framebufferStartupMessages()) {
         if (!control.sendEncrypted(tcp, message, cancelled, error)) {
             tcp.setWaitCallback({});
             return false;

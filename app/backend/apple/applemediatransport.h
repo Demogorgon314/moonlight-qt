@@ -110,6 +110,8 @@ struct AppleMediaNegotiationResult
 class AppleMediaNegotiator
 {
 public:
+    static QList<QByteArray> framebufferStartupMessages();
+
     bool negotiate(AppleTcpTransport& tcp,
                    AppleControlChannel& control,
                    AppleMediaTransport& media,
