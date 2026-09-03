@@ -78,6 +78,9 @@ public:
     AppleMacInputBridge& operator=(const AppleMacInputBridge&) = delete;
 
     bool isValid() const;
+    // Releases every modifier still held by AppKit and forgets their state.
+    // Safe to call again when a delayed flagsChanged event arrives.
+    void releasePressedModifiers();
     void repostRemoteDragEvent();
 
 private:

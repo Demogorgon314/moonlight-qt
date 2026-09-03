@@ -7,6 +7,7 @@
 #include <SDL_syswm.h>
 
 #include <memory>
+#include <vector>
 
 @interface MoonlightTestDraggingInfo : NSObject
 
@@ -264,5 +265,89 @@ bool testAppleMacInputBridgeRoutesLocalFileDrag()
                         QStringLiteral("pointer:100,240:down"),
                         QStringLiteral("pointer:140,260:move"),
                         QStringLiteral("pointer:140,260:up")};
+    }
+}
+
+bool testAppleMacInputBridgeReleasesModifiersOnFocusLoss()
+{
+    @autoreleasepool {
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) return false;
+        SDL_Window* window = SDL_CreateWindow(
+                "Apple macOS modifier release test",
+                SDL_WINDOWPOS_UNDEFINED,
+                SDL_WINDOWPOS_UNDEFINED,
+                640,
+                360,
+                SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_METAL);
+        if (window == nullptr) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+            return false;
+        }
+        SDL_SysWMinfo windowInfo = {};
+        SDL_VERSION(&windowInfo.version);
+        if (!SDL_GetWindowWMInfo(window, &windowInfo) ||
+                windowInfo.subsystem != SDL_SYSWM_COCOA ||
+                windowInfo.info.cocoa.window == nil) {
+            SDL_DestroyWindow(window);
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+            return false;
+        }
+
+        std::vector<AppleMacKeyEvent> events;
+        bool bridgeValid = false;
+        {
+            AppleMacInputBridge bridge(
+                    window,
+                    [&events](const AppleMacKeyEvent& event) {
+                        events.push_back(event);
+                    },
+                    {},
+                    {},
+                    {});
+            bridgeValid = bridge.isValid();
+            NSWindow* nativeWindow = windowInfo.info.cocoa.window;
+            NSView* view = nativeWindow.contentView;
+            NSEvent* shiftDown = [NSEvent
+                    keyEventWithType:NSEventTypeFlagsChanged
+                             location:NSZeroPoint
+                        modifierFlags:NSEventModifierFlagShift
+                            timestamp:0
+                         windowNumber:nativeWindow.windowNumber
+                              context:nil
+                           characters:@""
+          charactersIgnoringModifiers:@""
+                            isARepeat:NO
+                              keyCode:56];
+            [view flagsChanged:shiftDown];
+            NSEvent* shiftUp = [NSEvent
+                    keyEventWithType:NSEventTypeFlagsChanged
+                             location:NSZeroPoint
+                        modifierFlags:0
+                            timestamp:0
+                         windowNumber:nativeWindow.windowNumber
+                              context:nil
+                           characters:@""
+          charactersIgnoringModifiers:@""
+                            isARepeat:NO
+                              keyCode:56];
+            [view flagsChanged:shiftUp];
+
+            [view flagsChanged:shiftDown];
+            [view resignFirstResponder];
+            bridge.releasePressedModifiers();
+            [view flagsChanged:shiftUp];
+        }
+
+        SDL_DestroyWindow(window);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return bridgeValid && events.size() == 4 &&
+                events[0].type == AppleMacKeyEvent::Type::Modifier &&
+                events[0].modifierDown && events[0].keyCode == 56 &&
+                events[1].type == AppleMacKeyEvent::Type::Modifier &&
+                !events[1].modifierDown && events[1].keyCode == 56 &&
+                events[2].type == AppleMacKeyEvent::Type::Modifier &&
+                events[2].modifierDown && events[2].keyCode == 56 &&
+                events[3].type == AppleMacKeyEvent::Type::Modifier &&
+                !events[3].modifierDown && events[3].keyCode == 56;
     }
 }

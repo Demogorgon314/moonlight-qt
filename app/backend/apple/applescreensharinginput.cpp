@@ -4,6 +4,9 @@
 #include "applefiledrag.h"
 #include "applekeyboardmapper.h"
 #include "applewindowskeyboardhook_p.h"
+#ifdef Q_OS_DARWIN
+#include "applemacinputbridge.h"
+#endif
 #include "settings/streamingpreferences.h"
 #include "streaming/localstreamruntime.h"
 
@@ -361,6 +364,11 @@ void AppleScreenSharingSession::queueRemoteKey(
 
 void AppleScreenSharingSession::releaseAllKeys()
 {
+#ifdef Q_OS_DARWIN
+    if (m_AppleMacInputBridge != nullptr) {
+        m_AppleMacInputBridge->releasePressedModifiers();
+    }
+#endif
     if (m_KeyboardMapper == nullptr) {
         return;
     }

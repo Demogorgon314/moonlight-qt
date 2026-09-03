@@ -13,7 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <limits>
-#include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 namespace {
@@ -104,23 +104,20 @@ struct InputContext
         nativeEvent.commandDown =
                 (event.modifierFlags & NSEventModifierFlagCommand) != 0;
         nativeEvent.controlEventObserved =
-                activeModifierKeyCodes.count(59) != 0 ||
-                activeModifierKeyCodes.count(62) != 0;
+                activeModifiers.count(59) != 0 ||
+                activeModifiers.count(62) != 0;
         nativeEvent.optionEventObserved =
-                activeModifierKeyCodes.count(58) != 0 ||
-                activeModifierKeyCodes.count(61) != 0;
+                activeModifiers.count(58) != 0 ||
+                activeModifiers.count(61) != 0;
         nativeEvent.commandEventObserved =
-                activeModifierKeyCodes.count(55) != 0 ||
-                activeModifierKeyCodes.count(54) != 0;
-        nativeEvent.characters = unicodeScalars(event.characters);
-        nativeEvent.charactersIgnoringModifiers =
-                unicodeScalars(event.charactersIgnoringModifiers);
-
+                activeModifiers.count(55) != 0 ||
+                activeModifiers.count(54) != 0;
         if (event.type == NSEventTypeFlagsChanged) {
-            const auto active = activeModifierKeyCodes.find(event.keyCode);
-            if (active != activeModifierKeyCodes.end()) {
+            const auto active = activeModifiers.find(event.keyCode);
+            if (active != activeModifiers.end()) {
                 nativeEvent.modifierDown = false;
-                activeModifierKeyCodes.erase(active);
+                nativeEvent.keyboardType = active->second;
+                activeModifiers.erase(active);
             }
             else {
                 const NSEventModifierFlags flag =
@@ -129,16 +126,37 @@ struct InputContext
                     return;
                 }
                 nativeEvent.modifierDown = true;
-                activeModifierKeyCodes.insert(event.keyCode);
+                activeModifiers.emplace(
+                        event.keyCode, nativeEvent.keyboardType);
             }
             nativeEvent.type = AppleMacKeyEvent::Type::Modifier;
         }
         else {
+            nativeEvent.characters = unicodeScalars(event.characters);
+            nativeEvent.charactersIgnoringModifiers =
+                    unicodeScalars(event.charactersIgnoringModifiers);
             nativeEvent.type = event.type == NSEventTypeKeyDown
                     ? AppleMacKeyEvent::Type::Down
                     : AppleMacKeyEvent::Type::Up;
         }
         keyCallback(nativeEvent);
+    }
+
+    void releasePressedModifiers()
+    {
+        const auto modifiers = std::move(activeModifiers);
+        activeModifiers.clear();
+        if (!keyCallback) {
+            return;
+        }
+        for (const auto& [keyCode, keyboardType] : modifiers) {
+            AppleMacKeyEvent event;
+            event.type = AppleMacKeyEvent::Type::Modifier;
+            event.keyCode = keyCode;
+            event.keyboardType = keyboardType;
+            event.modifierDown = false;
+            keyCallback(event);
+        }
     }
 
     void sendPointer(NSView* view,
@@ -278,7 +296,7 @@ struct InputContext
     AppleMacInputBridge::CloseCallback closeCallback;
     std::shared_ptr<AppleLocalFileDragLifecycle> localFileDragLifecycle;
     int displayIndex = 0;
-    std::unordered_set<unsigned short> activeModifierKeyCodes;
+    std::unordered_map<unsigned short, unsigned short> activeModifiers;
     NSEvent* lastLeftDragEvent = nil;
 
 private:
@@ -342,6 +360,19 @@ void bridgeFlagsChanged(id view, SEL, NSEvent* event)
     if (InputContext* context = inputContext(view)) {
         context->sendKey(event);
     }
+}
+
+BOOL bridgeResignFirstResponder(id view, SEL selector)
+{
+    if (InputContext* context = inputContext(view)) {
+        context->releasePressedModifiers();
+    }
+    struct objc_super superInfo = {
+        view,
+        class_getSuperclass(object_getClass(view)),
+    };
+    return reinterpret_cast<BOOL (*)(struct objc_super*, SEL)>(
+            objc_msgSendSuper)(&superInfo, selector);
 }
 
 BOOL bridgePerformKeyEquivalent(id view, SEL, NSEvent* event)
@@ -486,6 +517,8 @@ Class inputSubclassForClass(Class original)
                          reinterpret_cast<IMP>(bridgeKeyUp)) ||
             !addOverride(subclass, original, @selector(flagsChanged:),
                          reinterpret_cast<IMP>(bridgeFlagsChanged)) ||
+            !addOverride(subclass, original, @selector(resignFirstResponder),
+                         reinterpret_cast<IMP>(bridgeResignFirstResponder)) ||
             !addOverride(subclass, original, @selector(performKeyEquivalent:),
                          reinterpret_cast<IMP>(bridgePerformKeyEquivalent)) ||
             !addOverride(subclass, original, @selector(acceptsFirstResponder),
@@ -761,6 +794,13 @@ AppleMacInputBridge::~AppleMacInputBridge()
 bool AppleMacInputBridge::isValid() const
 {
     return d->valid;
+}
+
+void AppleMacInputBridge::releasePressedModifiers()
+{
+    if (d->context != nullptr) {
+        d->context->releasePressedModifiers();
+    }
 }
 
 void AppleMacInputBridge::repostRemoteDragEvent()

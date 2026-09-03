@@ -20,6 +20,7 @@
 bool testAppleMacZoomButtonUsesNativeFullscreen();
 bool testAppleMacInputBridgeRoutesRemoteDragBeforePointer();
 bool testAppleMacInputBridgeRoutesLocalFileDrag();
+bool testAppleMacInputBridgeReleasesModifiersOnFocusLoss();
 #endif
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -3220,6 +3221,9 @@ int main(int argc, char* argv[])
     std::fprintf(stderr, "testAppleMacInputBridgeRoutesLocalFileDrag\n");
     require(testAppleMacInputBridgeRoutesLocalFileDrag(),
             "the macOS input bridge did not route an inbound file drag");
+    std::fprintf(stderr, "testAppleMacInputBridgeReleasesModifiersOnFocusLoss\n");
+    require(testAppleMacInputBridgeReleasesModifiersOnFocusLoss(),
+            "the macOS input bridge left Shift pressed after losing focus");
 #endif
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
     testAppleStreamWindowPlacementPersistence();
