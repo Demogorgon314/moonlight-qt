@@ -47,6 +47,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_nvstream._tcp</string>
+		<string>_rfb._tcp</string>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>VERSION</string>
