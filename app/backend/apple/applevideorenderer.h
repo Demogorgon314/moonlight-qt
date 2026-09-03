@@ -7,6 +7,7 @@
 #include <QList>
 #include <QString>
 
+#include <functional>
 #include <memory>
 
 struct SDL_Window;
@@ -38,6 +39,15 @@ public:
     virtual RenderResult render(const AppleCanvas& canvas,
                                 const QList<int>& tileHeights,
                                 QString* error = nullptr) = 0;
+    // Native adapters may pace the session's presentation thread from the
+    // display clock. Other adapters remain frame-arrival driven.
+    virtual bool startDisplayLink(const std::function<void()>& callback)
+    {
+        (void)callback;
+        return false;
+    }
+    virtual void setDisplayLinkPaused(bool paused) { (void)paused; }
+    virtual void stopDisplayLink() { }
     virtual void clear() = 0;
 };
 

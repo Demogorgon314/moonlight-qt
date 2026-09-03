@@ -32,6 +32,9 @@ public:
     RenderResult render(const AppleCanvas& canvas,
                         const QList<int>& tileHeights,
                         QString* error = nullptr) override;
+    bool startDisplayLink(const std::function<void()>& callback) override;
+    void setDisplayLinkPaused(bool paused) override;
+    void stopDisplayLink() override;
     void clear() override;
 
 private:

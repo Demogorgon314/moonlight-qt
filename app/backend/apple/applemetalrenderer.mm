@@ -19,6 +19,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/CADisplayLink.h>
 #import <dispatch/dispatch.h>
 
 extern "C" {
@@ -217,6 +218,39 @@ id<MTLRenderPipelineState> makePipeline(
 
 } // namespace
 
+@interface AppleMetalDisplayLinkTarget : NSObject
+{
+    std::function<void()> _callback;
+}
+
+- (instancetype)initWithCallback:(const std::function<void()>&)callback;
+- (void)displayLinkDidFire:(CADisplayLink*)displayLink
+        API_AVAILABLE(macos(14.0));
+
+@end
+
+@implementation AppleMetalDisplayLinkTarget
+
+- (instancetype)initWithCallback:(const std::function<void()>&)callback
+{
+    self = [super init];
+    if (self != nil) {
+        _callback = callback;
+    }
+    return self;
+}
+
+- (void)displayLinkDidFire:(CADisplayLink*)displayLink
+        API_AVAILABLE(macos(14.0))
+{
+    (void)displayLink;
+    if (_callback) {
+        _callback();
+    }
+}
+
+@end
+
 class AppleMetalRenderer::Implementation
 {
 public:
@@ -228,6 +262,7 @@ public:
 
     ~Implementation()
     {
+        stopDisplayLink();
         // Session shutdown first stops the presentation thread. Waiting for the
         // single admitted command buffer here makes all retained AVFrames and
         // CVPixelBuffers safe to release before the Metal view disappears.
@@ -266,6 +301,112 @@ public:
         tiles.clear();
     }
 
+    bool startDisplayLink(const std::function<void()>& callback)
+    { @autoreleasepool {
+        if (displayLink != nil || legacyDisplayLink != nullptr || !callback) {
+            return displayLink != nil || legacyDisplayLink != nullptr;
+        }
+        if (@available(macOS 14.0, *)) {
+            if (metalView == nullptr) {
+                return false;
+            }
+            NSView* view = reinterpret_cast<NSView*>(metalView);
+            NSWindow* nativeWindow = view.window;
+            if (nativeWindow == nil) {
+                return false;
+            }
+            displayLinkTarget = [[AppleMetalDisplayLinkTarget alloc]
+                    initWithCallback:callback];
+            displayLink = [[nativeWindow
+                    displayLinkWithTarget:displayLinkTarget
+                                  selector:@selector(displayLinkDidFire:)] retain];
+            if (displayLink == nil) {
+                [displayLinkTarget release];
+                displayLinkTarget = nil;
+                return false;
+            }
+            [displayLink addToRunLoop:[NSRunLoop mainRunLoop]
+                              forMode:NSRunLoopCommonModes];
+            return true;
+        }
+
+        displayLinkCallback = callback;
+        NSView* view = reinterpret_cast<NSView*>(metalView);
+        NSScreen* screen = view.window.screen;
+        CVReturn result;
+        if (screen != nil) {
+            const CGDirectDisplayID displayId =
+                    [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+            result = CVDisplayLinkCreateWithCGDisplay(
+                    displayId, &legacyDisplayLink);
+        }
+        else {
+            result = CVDisplayLinkCreateWithActiveCGDisplays(
+                    &legacyDisplayLink);
+        }
+        if (result != kCVReturnSuccess || legacyDisplayLink == nullptr ||
+                CVDisplayLinkSetOutputCallback(
+                        legacyDisplayLink, legacyDisplayLinkDidFire,
+                        this) != kCVReturnSuccess ||
+                CVDisplayLinkStart(legacyDisplayLink) != kCVReturnSuccess) {
+            if (legacyDisplayLink != nullptr) {
+                CVDisplayLinkRelease(legacyDisplayLink);
+                legacyDisplayLink = nullptr;
+            }
+            displayLinkCallback = {};
+            return false;
+        }
+        return true;
+    }}
+
+    void setDisplayLinkPaused(bool paused)
+    {
+        if (@available(macOS 14.0, *)) {
+            [displayLink setPaused:paused];
+        }
+        if (legacyDisplayLink != nullptr) {
+            if (paused && CVDisplayLinkIsRunning(legacyDisplayLink)) {
+                CVDisplayLinkStop(legacyDisplayLink);
+            }
+            else if (!paused && !CVDisplayLinkIsRunning(legacyDisplayLink)) {
+                CVDisplayLinkStart(legacyDisplayLink);
+            }
+        }
+    }
+
+    void stopDisplayLink()
+    {
+        if (@available(macOS 14.0, *)) {
+            [displayLink invalidate];
+            [displayLink release];
+            displayLink = nil;
+        }
+        if (legacyDisplayLink != nullptr) {
+            CVDisplayLinkStop(legacyDisplayLink);
+            CVDisplayLinkRelease(legacyDisplayLink);
+            legacyDisplayLink = nullptr;
+        }
+        [displayLinkTarget release];
+        displayLinkTarget = nil;
+        displayLinkCallback = {};
+    }
+
+    static CVReturn legacyDisplayLinkDidFire(
+            CVDisplayLinkRef,
+            const CVTimeStamp*,
+            const CVTimeStamp*,
+            CVOptionFlags,
+            CVOptionFlags*,
+            void* context)
+    {
+        Implementation* implementation =
+                static_cast<Implementation*>(context);
+        if (implementation->displayLinkCallback) {
+            implementation->displayLinkCallback();
+        }
+        return kCVReturnSuccess;
+    }
+
     SDL_Window* window = nullptr;
     SDL_MetalView metalView = nullptr;
     CAMetalLayer* layer = nil;
@@ -280,6 +421,10 @@ public:
     int overlayWidth = 0;
     int overlayHeight = 0;
     dispatch_semaphore_t inFlightGate = nullptr;
+    id displayLink = nil;
+    AppleMetalDisplayLinkTarget* displayLinkTarget = nil;
+    CVDisplayLinkRef legacyDisplayLink = nullptr;
+    std::function<void()> displayLinkCallback;
 };
 
 AppleMetalRenderer::AppleMetalRenderer()
@@ -684,6 +829,27 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
     [commandBuffer commit];
     return RenderResult::Presented;
 }}
+
+bool AppleMetalRenderer::startDisplayLink(
+        const std::function<void()>& callback)
+{
+    return m_Implementation != nullptr &&
+            m_Implementation->startDisplayLink(callback);
+}
+
+void AppleMetalRenderer::setDisplayLinkPaused(bool paused)
+{
+    if (m_Implementation != nullptr) {
+        m_Implementation->setDisplayLinkPaused(paused);
+    }
+}
+
+void AppleMetalRenderer::stopDisplayLink()
+{
+    if (m_Implementation != nullptr) {
+        m_Implementation->stopDisplayLink();
+    }
+}
 
 void AppleMetalRenderer::clear()
 {

@@ -915,9 +915,12 @@ QByteArray framebufferUpdateRequest()
     return QByteArray::fromHex("030000000000ffffffff");
 }
 
-QByteArray autoFramebufferUpdate()
+QByteArray autoFramebufferUpdate(quint32 intervalMilliseconds)
 {
-    return QByteArray::fromHex("090000010000000000000000ffffffff");
+    QByteArray message = QByteArray::fromHex(
+            "090000010000000000000000ffffffff");
+    writeUInt32(message, 4, intervalMilliseconds);
+    return message;
 }
 
 QByteArray controlMode(bool observing)
@@ -1131,6 +1134,26 @@ QByteArray receiverReport(quint32 sender)
     return packet;
 }
 
+QByteArray receiverReport(quint32 sender,
+                          const AppleRtpReceptionReport& report)
+{
+    QByteArray packet = QByteArray::fromHex("81c90007");
+    AppleWire::appendUInt32(packet, sender);
+    AppleWire::appendUInt32(packet, report.source);
+    packet.append(static_cast<char>(report.fractionLost));
+    const qint32 clampedLoss = std::clamp<qint32>(
+            report.cumulativePacketsLost, -0x800000, 0x7fffff);
+    const quint32 lossBits = static_cast<quint32>(clampedLoss) & 0x00ffffff;
+    packet.append(static_cast<char>(lossBits >> 16));
+    packet.append(static_cast<char>(lossBits >> 8));
+    packet.append(static_cast<char>(lossBits));
+    AppleWire::appendUInt32(packet, report.extendedHighestSequence);
+    AppleWire::appendUInt32(packet, report.interarrivalJitter);
+    AppleWire::appendUInt32(packet, report.lastSenderReport);
+    AppleWire::appendUInt32(packet, report.delaySinceLastSenderReport);
+    return packet;
+}
+
 QByteArray genericNack(quint32 sender,
                        quint32 mediaSource,
                        const QList<quint16>& lostSequences)
@@ -1167,6 +1190,21 @@ QByteArray genericNack(quint32 sender,
     return packet;
 }
 
+QByteArray frameLossFeedback(
+        quint32 sender,
+        const AppleVideoFrameLossFeedback& feedback)
+{
+    QByteArray packet = QByteArray::fromHex("8fce0005");
+    AppleWire::appendUInt32(packet, sender);
+    AppleWire::appendUInt32(packet, feedback.mediaSource);
+    AppleWire::appendUInt32(packet, 6);
+    AppleWire::appendUInt32(packet, feedback.rtpTimestamp);
+    AppleWire::appendUInt16(packet, feedback.packedLoss());
+    packet.append(static_cast<char>(feedback.expectedPacketCount));
+    packet.append(static_cast<char>(feedback.lostPacketCount));
+    return packet;
+}
+
 QByteArray fullIntraRequest(quint32 sender,
                             quint32 mediaSource,
                             quint8 sequence)
@@ -1200,26 +1238,289 @@ QByteArray rateControl(quint32 sender,
                        quint32 feedbackDelayMilliseconds,
                        quint16 echoTimestamp)
 {
+    AppleVideoRateControlInfo info;
+    info.rtpTimestamp = rtpTimestamp;
+    info.estimatedBandwidthKilobitsPerSecond =
+            estimatedBandwidthKilobitsPerSecond;
+    info.receivedPacketCount = receivedPacketCount;
+    info.feedbackDelayMilliseconds = feedbackDelayMilliseconds;
+    info.echoTimestamp = echoTimestamp;
+    return rateControl(sender, info);
+}
+
+QByteArray rateControl(quint32 sender,
+                       const AppleVideoRateControlInfo& info)
+{
     QByteArray packet = QByteArray::fromHex("80cc0007");
     AppleWire::appendUInt32(packet, sender);
     packet.append("RCTL", 4);
 
     packet.append(QByteArray::fromHex("85000004"));
-    AppleWire::appendUInt16(packet, static_cast<quint16>(rtpTimestamp >> 8));
+    AppleWire::appendUInt16(packet, static_cast<quint16>(
+            info.rtpTimestamp >> 8));
     AppleWire::appendUInt16(packet, 0);
     AppleWire::appendUInt16(packet, 0);
     AppleWire::appendUInt16(packet, static_cast<quint16>(
-            qMin(feedbackDelayMilliseconds, static_cast<quint32>(0xffff))));
-    AppleWire::appendUInt16(packet, echoTimestamp);
-    AppleWire::appendUInt16(packet, 0);
-    AppleWire::appendUInt16(packet, static_cast<quint16>(receivedPacketCount & 0x0fff));
+            qMin(info.feedbackDelayMilliseconds,
+                 static_cast<quint32>(0xffff))));
+    AppleWire::appendUInt16(packet, info.echoTimestamp);
+    quint16 packedDelay = 0;
+    if (std::isfinite(info.oneWayReceiveDelaySeconds) &&
+            info.oneWayReceiveDelaySeconds > 0.0) {
+        packedDelay = static_cast<quint16>(std::clamp<double>(
+                std::floor(info.oneWayReceiveDelaySeconds * 8192.0),
+                0.0, 65535.0));
+    }
+    AppleWire::appendUInt16(packet, packedDelay);
     AppleWire::appendUInt16(packet, static_cast<quint16>(
-            qMin(estimatedBandwidthKilobitsPerSecond,
+            (qMin(info.burstyLoss, static_cast<quint16>(15)) << 12) |
+            (info.receivedPacketCount & 0x0fff)));
+    AppleWire::appendUInt16(packet, static_cast<quint16>(
+            qMin(info.estimatedBandwidthKilobitsPerSecond,
                  static_cast<quint32>(0xffff))));
     return packet;
 }
 
 } // namespace AppleMediaWire
+
+void AppleVideoRateControlEstimator::observe(
+        quint32 rtpTimestamp,
+        qint64 arrivalNanoseconds,
+        int packetSize,
+        AppleVideoBandwidthProbeActivity activity)
+{
+    m_DidReceiveVideo = true;
+    ++m_TotalPacketsReceived;
+    updateTimestampStatistics(rtpTimestamp, arrivalNanoseconds);
+    if (activity == AppleVideoBandwidthProbeActivity::Active) {
+        updateBandwidthEstimate(rtpTimestamp, arrivalNanoseconds, packetSize);
+    }
+    else {
+        finalizeBandwidthProbe();
+    }
+}
+
+std::optional<AppleVideoRateControlInfo>
+AppleVideoRateControlEstimator::feedback(qint64 nowNanoseconds) const
+{
+    if (!m_DidReceiveVideo) {
+        return std::nullopt;
+    }
+    AppleVideoRateControlInfo info;
+    info.rtpTimestamp = m_LastAcceptedTimestamp;
+    if (m_EstimatedBandwidth.has_value()) {
+        quint32 kilobits = static_cast<quint32>(qMax(
+                0.0, *m_EstimatedBandwidth / 1000.0));
+        kilobits &= ~quint32{7};
+        info.estimatedBandwidthKilobitsPerSecond =
+                m_EstimateState == EstimateState::Stable
+                        ? kilobits + 1 : kilobits;
+    }
+    info.receivedPacketCount = m_LastAcceptedPacketCount;
+    if (m_LastAcceptedArrivalNanoseconds < 0) {
+        info.feedbackDelayMilliseconds = std::numeric_limits<quint32>::max();
+    }
+    else {
+        const qint64 ageNanoseconds = qMax<qint64>(
+                0, nowNanoseconds - m_LastAcceptedArrivalNanoseconds);
+        info.feedbackDelayMilliseconds = static_cast<quint32>(qMin<quint64>(
+                static_cast<quint64>(ageNanoseconds) / 1000000ULL,
+                std::numeric_limits<quint32>::max()));
+    }
+    if (nowNanoseconds > 0) {
+        const quint64 nanoseconds = static_cast<quint64>(nowNanoseconds);
+        const quint64 scaled = (nanoseconds / 1000000000ULL) * 1024ULL +
+                (nanoseconds % 1000000000ULL) * 1024ULL / 1000000000ULL;
+        info.echoTimestamp = static_cast<quint16>(
+                scaled & 0xffff);
+    }
+    info.oneWayReceiveDelaySeconds = m_OneWayReceiveDelay;
+    return info;
+}
+
+void AppleVideoRateControlEstimator::updateTimestampStatistics(
+        quint32 rtpTimestamp,
+        qint64 arrivalNanoseconds)
+{
+    if (!m_PreviousTimestamp.has_value()) {
+        m_PreviousTimestamp = rtpTimestamp;
+        return;
+    }
+    if (rtpTimestamp == *m_PreviousTimestamp) {
+        return;
+    }
+    const quint32 delta = rtpTimestamp - *m_PreviousTimestamp;
+    if (delta >= 0x7fffffffU) {
+        return;
+    }
+    m_PreviousTimestamp = rtpTimestamp;
+    m_LastAcceptedTimestamp = rtpTimestamp;
+    m_LastAcceptedPacketCount = m_TotalPacketsReceived;
+    m_LastAcceptedArrivalNanoseconds = arrivalNanoseconds;
+    updateOneWayReceiveDelay(rtpTimestamp, arrivalNanoseconds);
+}
+
+void AppleVideoRateControlEstimator::updateBandwidthEstimate(
+        quint32 rtpTimestamp,
+        qint64 arrivalNanoseconds,
+        int packetSize)
+{
+    if (!m_ProbeGroup.has_value()) {
+        m_ProbeGroup = ProbeGroup{
+            rtpTimestamp, arrivalNanoseconds, arrivalNanoseconds, 0, 0,
+        };
+        return;
+    }
+    if (m_ProbeGroup->timestamp != rtpTimestamp) {
+        finalize(*m_ProbeGroup);
+        m_ProbeGroup = ProbeGroup{
+            rtpTimestamp, arrivalNanoseconds, arrivalNanoseconds, 0, 0,
+        };
+        return;
+    }
+    m_ProbeGroup->bytesAfterReference +=
+            static_cast<quint64>(qMax(0, packetSize));
+    ++m_ProbeGroup->packetsAfterReference;
+    m_ProbeGroup->lastArrivalNanoseconds = qMax(
+            m_ProbeGroup->lastArrivalNanoseconds, arrivalNanoseconds);
+}
+
+void AppleVideoRateControlEstimator::finalizeBandwidthProbe()
+{
+    if (!m_ProbeGroup.has_value()) {
+        return;
+    }
+    finalize(*m_ProbeGroup);
+    m_ProbeGroup.reset();
+}
+
+void AppleVideoRateControlEstimator::finalize(const ProbeGroup& group)
+{
+    if (group.bytesAfterReference <= 250 ||
+            group.packetsAfterReference < 1) {
+        return;
+    }
+    const qint64 durationNanoseconds = group.lastArrivalNanoseconds -
+            group.referenceArrivalNanoseconds;
+    if (durationNanoseconds <= 0) {
+        return;
+    }
+    const double durationSeconds = durationNanoseconds / 1000000000.0;
+    const double candidate = qMin(
+            60000000.0,
+            group.bytesAfterReference * 8.0 / durationSeconds);
+    if (durationNanoseconds < 8000000) {
+        ++m_ConsecutiveShortProbeCount;
+        if (m_ConsecutiveShortProbeCount < 3) {
+            m_EstimateState = EstimateState::InsufficientProbeWindow;
+            return;
+        }
+    }
+    else {
+        m_ConsecutiveShortProbeCount = 0;
+    }
+    applyCandidate(candidate);
+}
+
+void AppleVideoRateControlEstimator::applyCandidate(
+        double candidateBitsPerSecond)
+{
+    if (!m_EstimatedBandwidth.has_value()) {
+        m_EstimatedBandwidth = qMax(candidateBitsPerSecond, 100000.0);
+        m_EstimateState = EstimateState::Initial;
+        return;
+    }
+    const double difference = candidateBitsPerSecond - *m_EstimatedBandwidth;
+    const bool isDown = candidateBitsPerSecond <=
+                    0.5 * *m_EstimatedBandwidth ||
+            -difference > 200000.0;
+    const bool isUp = candidateBitsPerSecond >=
+                    1.5 * *m_EstimatedBandwidth ||
+            difference > 200000.0;
+    if (!isDown && !isUp) {
+        m_EstimatedBandwidth = 0.1 * candidateBitsPerSecond +
+                0.9 * *m_EstimatedBandwidth;
+        clearPendingEstimate(EstimateState::Stable);
+        return;
+    }
+    const int direction = isUp ? 1 : -1;
+    if (direction != m_PendingDirection) {
+        m_PendingDirection = direction;
+        m_PendingBandwidth = candidateBitsPerSecond;
+        m_PendingCount = 1;
+    }
+    else {
+        m_PendingBandwidth += candidateBitsPerSecond;
+        ++m_PendingCount;
+    }
+    m_EstimateState = direction > 0
+            ? EstimateState::PendingUp : EstimateState::PendingDown;
+    if (m_PendingCount < 3) {
+        return;
+    }
+    m_EstimatedBandwidth = m_PendingBandwidth / m_PendingCount;
+    clearPendingEstimate(EstimateState::Committed);
+}
+
+void AppleVideoRateControlEstimator::clearPendingEstimate(EstimateState state)
+{
+    m_PendingDirection = 0;
+    m_PendingBandwidth = 0.0;
+    m_PendingCount = 0;
+    m_EstimateState = state;
+}
+
+void AppleVideoRateControlEstimator::updateOneWayReceiveDelay(
+        quint32 timestamp,
+        qint64 arrivalNanoseconds)
+{
+    if (m_DelayPreviousTimestamp.has_value() &&
+            timestamp < *m_DelayPreviousTimestamp &&
+            *m_DelayPreviousTimestamp - timestamp > 0x7fffffffU) {
+        m_DelayWrapOffset += quint64{1} << 32;
+    }
+    m_DelayPreviousTimestamp = timestamp;
+    const quint64 unwrappedTimestamp = m_DelayWrapOffset + timestamp;
+    if (!m_FirstUnwrappedTimestamp.has_value()) {
+        m_FirstUnwrappedTimestamp = unwrappedTimestamp;
+        m_FirstDelayArrivalNanoseconds = arrivalNanoseconds;
+        return;
+    }
+    const double sendRelative =
+            (unwrappedTimestamp - *m_FirstUnwrappedTimestamp) / 24000.0;
+    const double receiveRelative =
+            (arrivalNanoseconds - m_FirstDelayArrivalNanoseconds) /
+            1000000000.0;
+    const double lag = receiveRelative - sendRelative;
+    m_ShortDelay = 0.1 * lag + 0.9 * m_ShortDelay;
+    m_LongDelay = 0.0001 * lag + 0.9999 * m_LongDelay;
+    const double delay = m_ShortDelay - m_LongDelay;
+    if (delay < 0.0) {
+        m_LongDelay = m_ShortDelay;
+        m_OneWayReceiveDelay = 0.0;
+    }
+    else {
+        m_OneWayReceiveDelay = delay;
+    }
+}
+
+std::optional<quint32> AppleFrameUpdatePauseState::setMiniaturized(
+        bool miniaturized,
+        int endpointWindowCount)
+{
+    if (miniaturized) {
+        if (endpointWindowCount != 1 || m_IsPaused) {
+            return std::nullopt;
+        }
+        m_IsPaused = true;
+        return std::numeric_limits<quint32>::max();
+    }
+    if (!m_IsPaused) {
+        return std::nullopt;
+    }
+    m_IsPaused = false;
+    return 0;
+}
 
 AppleSrtpDecryptor::AppleSrtpDecryptor(const QByteArray& keyBlob, QString* error)
 {
@@ -1647,8 +1948,10 @@ AppleHevcAccessUnit::SubframeBoundary AppleHevcAssembler::subframeBoundary(
 }
 
 void AppleHevcAssembler::observeSequence(const AppleRtpPacket& packet,
-                                         qint64 nowMilliseconds)
+                                         qint64 nowMilliseconds,
+                                         qint64 arrivalNanoseconds)
 {
+    updateReceptionState(packet, arrivalNanoseconds);
     const quint32 source = packet.synchronizationSource;
     const quint16 sequence = packet.sequenceNumber;
     if (!m_MaximumSequence.contains(source)) {
@@ -1678,14 +1981,105 @@ void AppleHevcAssembler::observeSequence(const AppleRtpPacket& packet,
     m_MaximumSequence[source] = sequence;
 }
 
+void AppleHevcAssembler::updateReceptionState(
+        const AppleRtpPacket& packet,
+        qint64 arrivalNanoseconds)
+{
+    const quint32 source = packet.synchronizationSource;
+    const qint64 arrivalTimestamp = static_cast<qint64>(std::llround(
+            arrivalNanoseconds * (24000.0 / 1000000000.0)));
+    const qint64 transit = arrivalTimestamp - packet.timestamp;
+    auto stateIterator = m_ReceptionStates.find(source);
+    if (stateIterator == m_ReceptionStates.end()) {
+        ReceptionState state;
+        state.baseExtendedSequence = packet.sequenceNumber;
+        state.maximumExtendedSequence = packet.sequenceNumber;
+        state.previousTransit = transit;
+        m_ReceptionStates.insert(source, state);
+        return;
+    }
+    ReceptionState& state = stateIterator.value();
+    const quint32 sequence = extendedSequence(
+            packet.sequenceNumber, state.maximumExtendedSequence);
+    state.maximumExtendedSequence = qMax(
+            state.maximumExtendedSequence, sequence);
+    ++state.receivedPackets;
+    if (state.previousTransit.has_value()) {
+        const double variation = std::abs(
+                static_cast<double>(transit - *state.previousTransit));
+        state.jitter += (variation - state.jitter) / 16.0;
+    }
+    state.previousTransit = transit;
+}
+
+void AppleHevcAssembler::observeRateControl(
+        const AppleRtpPacket& packet,
+        qint64 arrivalNanoseconds)
+{
+    AppleVideoBandwidthProbeActivity activity =
+            AppleVideoBandwidthProbeActivity::Boundary;
+    if (m_LastProbeEndNanoseconds >= 0 &&
+            arrivalNanoseconds - m_LastProbeEndNanoseconds < 2000000000LL) {
+        activity = AppleVideoBandwidthProbeActivity::Suppressed;
+    }
+    else {
+        const bool hasPrivateProbeSignature = packet.payload.size() >= 4 &&
+                byteAt(packet.payload, 0) == 0x92 &&
+                byteAt(packet.payload, 1) == 0xe6 &&
+                byteAt(packet.payload, 2) == 0xc0 &&
+                byteAt(packet.payload, 3) == 0xa3;
+        const bool startsProbe = packet.payload.size() >= 4 &&
+                (hasPrivateProbeSignature ||
+                 hevcType(packet.payload) == HevcFragmentationType);
+        const bool active = startsProbe ||
+                (m_ActiveProbeTimestamp.has_value() &&
+                 *m_ActiveProbeTimestamp == packet.timestamp);
+        if (startsProbe) {
+            m_ActiveProbeTimestamp = packet.timestamp;
+        }
+        else if (!active) {
+            m_ActiveProbeTimestamp.reset();
+        }
+        activity = active ? AppleVideoBandwidthProbeActivity::Active
+                          : AppleVideoBandwidthProbeActivity::Boundary;
+        if (packet.marker || !active) {
+            m_LastProbeEndNanoseconds = arrivalNanoseconds;
+        }
+    }
+    m_RateControlEstimator.observe(
+            packet.timestamp, arrivalNanoseconds, packet.payload.size(),
+            activity);
+}
+
+quint32 AppleHevcAssembler::extendedSequence(quint16 sequence,
+                                              quint32 maximum)
+{
+    const quint32 cycle = maximum & 0xffff0000U;
+    const quint16 maximumLow = static_cast<quint16>(maximum);
+    const int difference = static_cast<int>(sequence) - maximumLow;
+    if (difference < -0x8000) {
+        return cycle + 0x10000U + sequence;
+    }
+    if (difference > 0x8000 && cycle >= 0x10000U) {
+        return cycle - 0x10000U + sequence;
+    }
+    return cycle + sequence;
+}
+
 bool AppleHevcAssembler::process(const AppleRtpPacket& packet,
                                  qint64 nowMilliseconds,
-                                 AppleHevcAccessUnit* accessUnit)
+                                 AppleHevcAccessUnit* accessUnit,
+                                 qint64 arrivalNanoseconds)
 {
     if (accessUnit == nullptr || packet.payload.isEmpty()) {
         return false;
     }
-    observeSequence(packet, nowMilliseconds);
+    if (arrivalNanoseconds < 0) {
+        arrivalNanoseconds = nowMilliseconds * 1000000;
+    }
+    observeRateControl(packet, arrivalNanoseconds);
+    correctCachedFrameLoss(packet);
+    observeSequence(packet, nowMilliseconds, arrivalNanoseconds);
     ++m_SourcePacketCounts[packet.synchronizationSource];
     const quint64 key = static_cast<quint64>(packet.synchronizationSource) << 32 |
                         packet.timestamp;
@@ -1750,6 +2144,8 @@ bool AppleHevcAssembler::process(const AppleRtpPacket& packet,
         return false;
     }
     m_Groups.remove(key);
+    cacheFrameLossIfNeeded(packet.synchronizationSource,
+                           packet.timestamp, group);
     harvest(units);
     m_CompletedSources.insert(packet.synchronizationSource);
     accessUnit->synchronizationSource = packet.synchronizationSource;
@@ -1816,12 +2212,18 @@ int AppleHevcAssembler::totalPacketCount() const
 
 QList<quint32> AppleHevcAssembler::primarySources(
         int tileCount,
-        const QHash<quint32, int>& baseline) const
+        const QHash<quint32, int>& baseline,
+        const QSet<quint32>& excluded) const
 {
     if (tileCount <= 0) {
         return {};
     }
     QList<quint32> sources = m_SourcePacketCounts.keys();
+    sources.erase(std::remove_if(
+            sources.begin(), sources.end(),
+            [&excluded](quint32 source) {
+                return excluded.contains(source);
+            }), sources.end());
     std::sort(sources.begin(), sources.end());
     QList<QList<quint32>> groups;
     for (quint32 source : sources) {
@@ -1855,6 +2257,29 @@ QList<quint32> AppleHevcAssembler::primarySources(
     return best;
 }
 
+QList<quint32> AppleHevcAssembler::replacementSources(
+        int tileCount,
+        const QList<quint32>& currentSources,
+        const QSet<quint32>& abandonedSources,
+        int minimumPacketsPerSource) const
+{
+    QSet<quint32> excluded = abandonedSources;
+    for (quint32 source : currentSources) {
+        excluded.insert(source);
+    }
+    const QList<quint32> candidates = primarySources(
+            tileCount, {}, excluded);
+    if (candidates.size() != tileCount ||
+            !std::all_of(candidates.cbegin(), candidates.cend(),
+                         [this, minimumPacketsPerSource](quint32 source) {
+                return m_SourcePacketCounts.value(source) >=
+                        minimumPacketsPerSource;
+            })) {
+        return {};
+    }
+    return candidates;
+}
+
 QHash<quint32, QList<quint16>> AppleHevcAssembler::takeNacks(
         qint64 nowMilliseconds)
 {
@@ -1882,4 +2307,116 @@ QHash<quint32, QList<quint16>> AppleHevcAssembler::takeNacks(
         }
     }
     return result;
+}
+
+std::optional<AppleRtpReceptionReport>
+AppleHevcAssembler::receptionReport(quint32 source)
+{
+    auto iterator = m_ReceptionStates.find(source);
+    if (iterator == m_ReceptionStates.end()) {
+        return std::nullopt;
+    }
+    ReceptionState& state = iterator.value();
+    const quint32 expected = state.maximumExtendedSequence -
+            state.baseExtendedSequence + 1;
+    const qint64 cumulativeLost = static_cast<qint64>(expected) -
+            state.receivedPackets;
+    const quint32 expectedInterval = expected -
+            state.previousExpectedPackets;
+    const quint32 receivedInterval = state.receivedPackets -
+            state.previousReceivedPackets;
+    const qint64 lostInterval = static_cast<qint64>(expectedInterval) -
+            receivedInterval;
+    quint8 fractionLost = 0;
+    if (expectedInterval != 0 && lostInterval > 0) {
+        fractionLost = static_cast<quint8>(qMin<qint64>(
+                255, (lostInterval << 8) / expectedInterval));
+    }
+    state.previousExpectedPackets = expected;
+    state.previousReceivedPackets = state.receivedPackets;
+
+    AppleRtpReceptionReport report;
+    report.source = source;
+    report.fractionLost = fractionLost;
+    report.cumulativePacketsLost = static_cast<qint32>(std::clamp<qint64>(
+            cumulativeLost, std::numeric_limits<qint32>::min(),
+            std::numeric_limits<qint32>::max()));
+    report.extendedHighestSequence = state.maximumExtendedSequence;
+    report.interarrivalJitter = static_cast<quint32>(qMax(
+            0.0, std::round(state.jitter)));
+    return report;
+}
+
+std::optional<AppleVideoRateControlInfo>
+AppleHevcAssembler::rateControlFeedback(qint64 nowNanoseconds) const
+{
+    return m_RateControlEstimator.feedback(nowNanoseconds);
+}
+
+void AppleHevcAssembler::cacheFrameLossIfNeeded(
+        quint32 source,
+        quint32 timestamp,
+        const PendingAccessUnit& group)
+{
+    if (!group.frameSequenceNumber.has_value() ||
+            !group.totalPacketsPerFrame.has_value() ||
+            *group.totalPacketsPerFrame <= group.packets.size()) {
+        return;
+    }
+    CachedFrameLoss loss;
+    loss.rtpTimestamp = timestamp;
+    loss.frameSequenceNumber = *group.frameSequenceNumber;
+    loss.expectedPacketCount = *group.totalPacketsPerFrame;
+    for (const PendingPacket& packet : group.packets) {
+        loss.receivedSequences.insert(packet.sequence);
+    }
+    m_CachedFrameLosses.insert(source, std::move(loss));
+}
+
+void AppleHevcAssembler::correctCachedFrameLoss(
+        const AppleRtpPacket& packet)
+{
+    auto iterator = m_CachedFrameLosses.find(packet.synchronizationSource);
+    const auto frameInfo = packet.framePacketInfo();
+    if (iterator == m_CachedFrameLosses.end() || !frameInfo.has_value() ||
+            iterator->rtpTimestamp != packet.timestamp ||
+            iterator->frameSequenceNumber != frameInfo->frameSequenceNumber ||
+            iterator->expectedPacketCount != frameInfo->totalPacketsPerFrame) {
+        return;
+    }
+    iterator->receivedSequences.insert(packet.sequenceNumber);
+    if (iterator->receivedSequences.size() >= iterator->expectedPacketCount) {
+        m_CachedFrameLosses.erase(iterator);
+    }
+}
+
+QList<AppleVideoFrameLossFeedback>
+AppleHevcAssembler::frameLossFeedbackDue(qint64 nowMilliseconds) const
+{
+    QList<quint32> sources = m_CachedFrameLosses.keys();
+    std::sort(sources.begin(), sources.end());
+    QList<AppleVideoFrameLossFeedback> result;
+    for (quint32 source : sources) {
+        const CachedFrameLoss& loss = m_CachedFrameLosses.value(source);
+        const int lost = qMax(0, static_cast<int>(loss.expectedPacketCount) -
+                                    loss.receivedSequences.size());
+        if (lost == 0 || (loss.lastSentAt >= 0 &&
+                         nowMilliseconds - loss.lastSentAt < 100)) {
+            continue;
+        }
+        result.append({source, loss.rtpTimestamp, loss.expectedPacketCount,
+                       static_cast<quint16>(lost)});
+    }
+    return result;
+}
+
+void AppleHevcAssembler::markFrameLossFeedbackSent(
+        const AppleVideoFrameLossFeedback& feedback,
+        qint64 nowMilliseconds)
+{
+    auto iterator = m_CachedFrameLosses.find(feedback.mediaSource);
+    if (iterator != m_CachedFrameLosses.end() &&
+            iterator->rtpTimestamp == feedback.rtpTimestamp) {
+        iterator->lastSentAt = nowMilliseconds;
+    }
 }

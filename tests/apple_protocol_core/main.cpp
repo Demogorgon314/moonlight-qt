@@ -778,6 +778,84 @@ void testSrtpAndRecoveryFeedbackVectors()
                 QByteArray::fromHex(
                     "80cc0007112233445243544c850000043456000000001234567800000abcea61"),
             "periodic RCTL feedback must match Apple's fixed-LAN wire format");
+
+    const AppleRtpReceptionReport report{
+        0x55667788, 0x55, 1, 0x00010002, 0x1234, 0, 0,
+    };
+    require(AppleMediaWire::receiverReport(0x11223344, report) ==
+                    QByteArray::fromHex(
+                            "81c9000711223344556677885500000100010002000012340000000000000000"),
+            "receiver reports must include native loss, sequence, and jitter statistics");
+
+    const AppleVideoFrameLossFeedback frameLoss{
+        0x55667788, 0x12345678, 3, 1,
+    };
+    require(AppleMediaWire::frameLossFeedback(0x11223344, frameLoss) ==
+                    QByteArray::fromHex(
+                            "8fce00051122334455667788000000061234567800c10301"),
+            "Apple frame-loss feedback must preserve per-frame packet loss metadata");
+}
+
+void testAdaptiveRateControlFeedback()
+{
+    AppleVideoRateControlEstimator estimator;
+    for (int packet = 0; packet < 6; ++packet) {
+        estimator.observe(24'000, packet * 2'000'000LL, 1'200,
+                          AppleVideoBandwidthProbeActivity::Active);
+    }
+    estimator.observe(24'400, 20'000'000LL, 1'200,
+                      AppleVideoBandwidthProbeActivity::Boundary);
+
+    const auto feedback = estimator.feedback(30'000'000LL);
+    require(feedback.has_value() &&
+                    feedback->rtpTimestamp == 24'400 &&
+                    feedback->receivedPacketCount == 7 &&
+                    feedback->estimatedBandwidthKilobitsPerSecond == 4'800 &&
+                    feedback->feedbackDelayMilliseconds == 10,
+            "RCTL must report the measured probe capacity and current playout age");
+    require(estimator.feedback(10'000'000LL)
+                    ->feedbackDelayMilliseconds == 0,
+            "RCTL feedback age must clamp a clock adjustment to zero");
+    require(AppleMediaWire::rateControl(0x11223344, *feedback) ==
+                    QByteArray::fromHex(
+                            "80cc0007112233445243544c85000004005f00000000000a001e0000000712c0"),
+            "adaptive RCTL serialization must retain native timestamp, delay, echo, and capacity fields");
+
+    AppleVideoRateControlEstimator changing;
+    const auto feedGroup = [&changing](int frame,
+                                       qint64 spacingNanoseconds,
+                                       int packetCount = 6) {
+        const quint32 timestamp = 90'000 + 1'500 * frame;
+        const qint64 arrival = 1'000'000'000'000LL +
+                frame * 20'000'000LL;
+        for (int packet = 0; packet < packetCount; ++packet) {
+            changing.observe(
+                    timestamp, arrival + packet * spacingNanoseconds,
+                    1'200, AppleVideoBandwidthProbeActivity::Active);
+        }
+    };
+    feedGroup(0, 300'000, 33);
+    feedGroup(1, 300'000, 33);
+    feedGroup(2, 2'000'000);
+    require(changing.feedback(1'001'000'000'000LL)
+                    ->estimatedBandwidthKilobitsPerSecond == 32'001,
+            "stable native probe samples must publish their measured capacity marker");
+    feedGroup(3, 2'000'000);
+    feedGroup(4, 2'000'000);
+    feedGroup(5, 2'000'000);
+    require(changing.feedback(1'001'000'000'000LL)
+                    ->estimatedBandwidthKilobitsPerSecond == 4'800,
+            "a sudden bandwidth change must require three consistent probe windows before commit");
+
+    AppleVideoRateControlEstimator wrapping;
+    wrapping.observe(0xffff'ff9bU, 1'000'000'000LL, 1'200,
+                     AppleVideoBandwidthProbeActivity::Boundary);
+    wrapping.observe(100, 1'010'000'000LL, 1'200,
+                     AppleVideoBandwidthProbeActivity::Boundary);
+    const auto wrapped = wrapping.feedback(1'020'000'000LL);
+    require(wrapped.has_value() && wrapped->rtpTimestamp == 100 &&
+                    wrapped->receivedPacketCount == 2,
+            "RCTL playout statistics must advance across RTP timestamp wraparound");
 }
 
 void testHevcAssemblyAndLossTracking()
@@ -835,6 +913,89 @@ void testHevcAssemblyAndLossTracking()
     const auto nacks = assembler.takeNacks(50);
     require(nacks.value(101).contains(14),
             "sequence gaps must produce bounded NACK recovery feedback");
+
+    AppleHevcAssembler reception;
+    reception.process(packet(200, 24'000, 100, true,
+                             QByteArray::fromHex("0201000145")),
+                      1'000, &unit, 1'000'000'000LL);
+    reception.process(packet(200, 24'400, 102, true,
+                             QByteArray::fromHex("0201000146")),
+                      1'020, &unit, 1'020'000'000LL);
+    const auto report = reception.receptionReport(200);
+    require(report.has_value() && report->fractionLost == 85 &&
+                    report->cumulativePacketsLost == 1 &&
+                    report->extendedHighestSequence == 102,
+            "RTP reception tracking must expose interval and cumulative loss for full RR blocks");
+    require(reception.receptionReport(200)->fractionLost == 0,
+            "receiver-report interval loss must reset after each report");
+
+    auto framePacket = packet(300, 48'000, 10, false,
+                              QByteArray::fromHex("0201000145"));
+    framePacket.header = QByteArray::fromHex(
+            "9060000a0000bb80300000008101000100030007");
+    reception.process(framePacket, 2'000, &unit, 2'000'000'000LL);
+    framePacket.sequenceNumber = 11;
+    framePacket.marker = true;
+    framePacket.payload = QByteArray::fromHex("0201000146");
+    reception.process(framePacket, 2'001, &unit, 2'001'000'000LL);
+    const auto frameLoss = reception.frameLossFeedbackDue(2'001);
+    require(frameLoss.size() == 1 &&
+                    frameLoss.first().mediaSource == 300 &&
+                    frameLoss.first().expectedPacketCount == 3 &&
+                    frameLoss.first().lostPacketCount == 1,
+            "completed frames with missing MCI packets must emit Apple frame-loss feedback");
+    reception.markFrameLossFeedbackSent(frameLoss.first(), 2'001);
+    require(reception.frameLossFeedbackDue(2'099).isEmpty() &&
+                    reception.frameLossFeedbackDue(2'101).size() == 1,
+            "frame-loss feedback must retry at the native 100 ms cadence until repaired");
+    framePacket.sequenceNumber = 12;
+    framePacket.marker = false;
+    reception.process(framePacket, 2'102, &unit, 2'102'000'000LL);
+    require(reception.frameLossFeedbackDue(2'202).isEmpty(),
+            "a late packet completing the frame must cancel repeated frame-loss feedback");
+
+    AppleHevcAssembler replacement;
+    for (quint32 source : {100U, 101U, 200U, 201U}) {
+        const int count = source < 200 ? 8 : 5;
+        for (int index = 0; index < count; ++index) {
+            replacement.process(packet(source, 60'000 + index,
+                                       static_cast<quint16>(index), true,
+                                       QByteArray::fromHex("0201000145")),
+                                index, &unit);
+        }
+    }
+    require(replacement.replacementSources(
+                    2, {100, 101}, {}, 5) ==
+                    QList<quint32>({200, 201}),
+            "stalled decoding must be able to select a fresh SSRC group while excluding abandoned sources");
+    require(replacement.replacementSources(
+                    2, {100, 101}, {}, 6).isEmpty() &&
+            replacement.replacementSources(
+                    2, {100, 101}, {200, 201}, 5).isEmpty(),
+            "SSRC replacement must reject unproven and previously abandoned source groups");
+}
+
+void testMinimizedFrameUpdatePolicy()
+{
+    require(AppleMediaWire::autoFramebufferUpdate(0xffffffffU) ==
+                    QByteArray::fromHex(
+                            "09000001ffffffff00000000ffffffff") &&
+            AppleMediaWire::autoFramebufferUpdate(0) ==
+                    QByteArray::fromHex(
+                            "090000010000000000000000ffffffff"),
+            "automatic frame updates must support native pause and resume intervals");
+
+    AppleFrameUpdatePauseState state;
+    require(state.setMiniaturized(true, 1) ==
+                    std::optional<quint32>(0xffffffffU) &&
+            !state.setMiniaturized(true, 1).has_value() &&
+            state.setMiniaturized(false, 1) == std::optional<quint32>(0) &&
+            !state.setMiniaturized(true, 2).has_value(),
+            "single-window minimization must pause once, resume once, and leave multi-window sessions active");
+    require(state.setMiniaturized(true, 1).has_value() &&
+                    state.setMiniaturized(false, 2) ==
+                            std::optional<quint32>(0),
+            "restoring frame updates must not depend on the current window count");
 }
 
 void testHevcGlobalDecodingOrderAdmission()
@@ -2974,6 +3135,13 @@ void testNativePresentationFactoryUsesLowLatencyAdapter()
     require(!renderer->name().isEmpty() &&
             renderer->usesLowLatencyPresentation(),
             "the selected native adapter must expose latency-1 synchronized presentation");
+#ifdef Q_OS_DARWIN
+    require(renderer->startDisplayLink([]() { }),
+            "the macOS Metal adapter must create a display-linked presentation clock");
+    renderer->setDisplayLinkPaused(true);
+    renderer->setDisplayLinkPaused(false);
+    renderer->stopDisplayLink();
+#endif
     error.clear();
     require(renderer->render(AppleCanvas{}, {}, &error) ==
                     AppleVideoRenderer::RenderResult::Failed &&
@@ -3026,8 +3194,12 @@ int main(int argc, char* argv[])
     testStageFourDisplayConfigurationAndDynamicResolution();
     std::fprintf(stderr, "testSrtpAndRecoveryFeedbackVectors\n");
     testSrtpAndRecoveryFeedbackVectors();
+    std::fprintf(stderr, "testAdaptiveRateControlFeedback\n");
+    testAdaptiveRateControlFeedback();
     std::fprintf(stderr, "testHevcAssemblyAndLossTracking\n");
     testHevcAssemblyAndLossTracking();
+    std::fprintf(stderr, "testMinimizedFrameUpdatePolicy\n");
+    testMinimizedFrameUpdatePolicy();
     std::fprintf(stderr, "testHevcGlobalDecodingOrderAdmission\n");
     testHevcGlobalDecodingOrderAdmission();
     std::fprintf(stderr, "testEncryptedInputWireBoundary\n");

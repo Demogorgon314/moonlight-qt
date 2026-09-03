@@ -13,6 +13,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QPointer>
+#include <QSemaphore>
 #include <QSize>
 #include <QThreadPool>
 #include <QVector>
@@ -150,6 +151,8 @@ private:
                            SDL_Window* eventWindow);
     void renderLatestFrames();
     void renderSecondaryFrames();
+    void wakePresentation(bool displayLinkTick = false);
+    void setWindowMiniaturized(int displayIndex, bool miniaturized);
     void updatePerformanceOverlayTexture();
     void queuePointer(int windowX, int windowY, int clickCount = 0,
                       quint8 extraButtons = 0, int displayIndex = 0);
@@ -232,6 +235,7 @@ private:
     QTimer* m_EventTimer = nullptr;
     QTimer* m_DynamicResolutionTimer = nullptr;
     std::unique_ptr<ApplePresentationThread> m_PresentationThread;
+    QSemaphore m_PresentationWake;
     SDL_Renderer* m_Renderer = nullptr;
     std::unique_ptr<AppleVideoRenderer> m_VideoRenderer;
     SDL_Window* m_SecondaryWindow = nullptr;
@@ -306,6 +310,9 @@ private:
     std::atomic_bool m_PerformanceOverlayUpdateNeeded{false};
     std::atomic_bool m_PresentationNeeded{true};
     std::atomic_bool m_SecondaryPresentationNeeded{true};
+    std::atomic_bool m_DisplayLinkActive{false};
+    std::atomic_bool m_PrimaryWindowMiniaturized{false};
+    std::atomic_bool m_SecondaryWindowMiniaturized{false};
     std::atomic_bool m_Observing{false};
     std::atomic_bool m_ControlReady{false};
     std::atomic_bool m_NativePrecisionScrollSupported{false};
@@ -318,6 +325,7 @@ private:
     std::atomic<quint64> m_MaxPendingControlDepth{0};
     bool m_MediaReady = false;
     bool m_SecondaryMediaReady = false;
+    AppleFrameUpdatePauseState m_FrameUpdatePauseState;
     bool m_NativeEventFilterInstalled = false;
     int m_CaptureSystemKeysMode = 0;
     bool m_PrimaryKeyboardGrabActive = false;

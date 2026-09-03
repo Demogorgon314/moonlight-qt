@@ -126,7 +126,9 @@ void AppleScreenSharingSession::queueDecodedFrames(QList<AppleDecodedTile> frame
         }
         else {
             ++m_PendingFrameBatches;
+            m_PresentationNeeded.store(true);
         }
+        wakePresentation();
     }
 }
 
@@ -377,6 +379,9 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
 
 void AppleScreenSharingSession::renderLatestFrames()
 {
+    if (m_PrimaryWindowMiniaturized.load()) {
+        return;
+    }
     if (m_VideoRenderer == nullptr) {
         return;
     }
@@ -579,7 +584,8 @@ void AppleScreenSharingSession::renderLatestFrames()
 
 void AppleScreenSharingSession::renderSecondaryFrames()
 {
-    if (m_SecondaryVideoRenderer == nullptr) {
+    if (m_SecondaryVideoRenderer == nullptr ||
+            m_SecondaryWindowMiniaturized.load()) {
         return;
     }
     QHash<int, AppleDecodedTile> frames;
@@ -636,4 +642,3 @@ void AppleScreenSharingSession::renderSecondaryFrames()
                 << renderError;
     }
 }
-

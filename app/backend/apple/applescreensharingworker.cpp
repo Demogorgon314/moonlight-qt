@@ -37,7 +37,8 @@ constexpr qint64 ReceiverReportIntervalMs = 1000;
 constexpr qint64 RateControlIntervalMs = 50;
 constexpr qint64 KeyFrameRetryIntervalMs = 1500;
 constexpr qint64 DecoderStallMs = 5000;
-constexpr quint32 FixedLanBandwidthKilobitsPerSecond = 60001;
+constexpr qint64 SourceAdoptionStallMs = 2000;
+constexpr int MinimumSourceAdoptionPackets = 5;
 
 } // namespace
 
@@ -115,27 +116,16 @@ private:
         if (!m_Decryptor.decrypt(datagram, &packet, nullptr)) {
             return true;
         }
-        ++m_ReceivedPacketCount;
         m_PerformanceBytes += static_cast<quint64>(datagram.size());
-        if (!m_HasPreviousTimestamp) {
-            m_PreviousTimestamp = packet.timestamp;
-            m_HasPreviousTimestamp = true;
-        }
-        else if (packet.timestamp != m_PreviousTimestamp) {
-            const quint32 delta = packet.timestamp - m_PreviousTimestamp;
-            if (delta < 0x7fffffffU) {
-                m_PreviousTimestamp = packet.timestamp;
-                m_LastAcceptedTimestamp = packet.timestamp;
-                m_LastAcceptedTimestampAt = now;
-            }
-        }
         if (m_FirstPacketAt < 0) {
             m_FirstPacketAt = now;
         }
         m_LastPacketAt = now;
 
         AppleHevcAccessUnit accessUnit;
-        const bool completed = m_Assembler.process(packet, now, &accessUnit);
+        const bool completed = m_Assembler.process(
+                packet, now, &accessUnit,
+                static_cast<qint64>(steadyNanoseconds()));
         if (m_Sources.isEmpty() && m_Assembler.parameterSets().isComplete()) {
             const QList<quint32> candidates = m_Assembler.primarySources(
                     m_Negotiation.canvas.tileCount);
@@ -281,6 +271,9 @@ private:
         if (m_Sources.isEmpty()) {
             return true;
         }
+        if (!adoptFreshSourcesIfNeeded(media, now, error)) {
+            return false;
+        }
         const auto nacks = m_Assembler.takeNacks(now);
         for (auto iterator = nacks.cbegin(); iterator != nacks.cend(); ++iterator) {
             const QByteArray packet = AppleMediaWire::receiverReport(
@@ -294,34 +287,45 @@ private:
             m_PerformanceNacks +=
                     static_cast<quint64>(iterator.value().size());
         }
-        if (now - m_LastReceiverReportAt >= ReceiverReportIntervalMs) {
+        const QList<AppleVideoFrameLossFeedback> frameLosses =
+                m_Assembler.frameLossFeedbackDue(now);
+        for (const AppleVideoFrameLossFeedback& frameLoss : frameLosses) {
             if (!sendFeedback(media,
-                              AppleMediaWire::receiverReport(
-                                      m_Negotiation.synchronizationSource),
-                              error)) {
-                return false;
-            }
-            m_LastReceiverReportAt = now;
-        }
-        if (m_HasPreviousTimestamp &&
-                now - m_LastRateControlAt >= RateControlIntervalMs) {
-            const quint32 delay = m_LastAcceptedTimestampAt >= 0
-                    ? static_cast<quint32>(qMin(
-                              now - m_LastAcceptedTimestampAt,
-                              static_cast<qint64>(0xffff)))
-                    : 0xffff;
-            const quint16 echo = static_cast<quint16>(
-                    (static_cast<quint64>(now) * 1024 / 1000) & 0xffff);
-            if (!sendFeedback(media,
-                              AppleMediaWire::rateControl(
+                              AppleMediaWire::frameLossFeedback(
                                       m_Negotiation.synchronizationSource,
-                                      m_LastAcceptedTimestamp,
-                                      FixedLanBandwidthKilobitsPerSecond,
-                                      m_ReceivedPacketCount, delay, echo),
+                                      frameLoss),
                               error)) {
                 return false;
             }
-            m_LastRateControlAt = now;
+            m_Assembler.markFrameLossFeedbackSent(frameLoss, now);
+        }
+        if (now - m_LastReceiverReportAt >= ReceiverReportIntervalMs) {
+            const auto report = m_Assembler.receptionReport(
+                    m_Sources.first());
+            if (report.has_value()) {
+                if (!sendFeedback(media,
+                                  AppleMediaWire::receiverReport(
+                                          m_Negotiation.synchronizationSource,
+                                          *report),
+                                  error)) {
+                    return false;
+                }
+                m_LastReceiverReportAt = now;
+            }
+        }
+        if (now - m_LastRateControlAt >= RateControlIntervalMs) {
+            const auto rateControl = m_Assembler.rateControlFeedback(
+                    static_cast<qint64>(steadyNanoseconds()));
+            if (rateControl.has_value()) {
+                if (!sendFeedback(media,
+                                  AppleMediaWire::rateControl(
+                                          m_Negotiation.synchronizationSource,
+                                          *rateControl),
+                                  error)) {
+                    return false;
+                }
+                m_LastRateControlAt = now;
+            }
         }
         const bool awaiting = m_LastDecodedAt < 0 &&
                 now - m_LastKeyFrameAt >= KeyFrameRetryIntervalMs;
@@ -340,6 +344,45 @@ private:
             m_LastKeyFrameAt = now;
         }
         reportPerformance(now);
+        return true;
+    }
+
+    bool adoptFreshSourcesIfNeeded(AppleMediaTransport& media,
+                                   qint64 now,
+                                   QString* error)
+    {
+        if (m_LastDecodedAt < 0 ||
+                now - m_LastDecodedAt < SourceAdoptionStallMs) {
+            return true;
+        }
+        const QList<quint32> candidates = m_Assembler.replacementSources(
+                m_Negotiation.canvas.tileCount, m_Sources,
+                m_AbandonedSources, MinimumSourceAdoptionPackets);
+        if (candidates.isEmpty()) {
+            return true;
+        }
+
+        for (quint32 source : std::as_const(m_Sources)) {
+            m_AbandonedSources.insert(source);
+        }
+        m_Sources = candidates;
+        m_SourceToTile.clear();
+        for (int index = 0; index < m_Sources.size(); ++index) {
+            m_SourceToTile.insert(m_Sources.at(index), index);
+        }
+        m_FrameBatcher.reset();
+        m_DecodingOrder.reset();
+        m_Assembler.discardIncomplete();
+        m_Decoder->flush();
+        if (!requestKeyFrames(media, error)) {
+            return false;
+        }
+        m_AwaitingRandomAccessPicture = true;
+        m_EnteredRefreshState = false;
+        m_LastDecodedAt = now;
+        m_LastKeyFrameAt = now;
+        qInfo() << "Apple display 2 adopted fresh video sources"
+                << m_Sources;
         return true;
     }
 
@@ -426,6 +469,7 @@ private:
     AppleHevcDecodingOrderQueue m_DecodingOrder;
     AppleDecodedFrameBatcher m_FrameBatcher;
     QList<quint32> m_Sources;
+    QSet<quint32> m_AbandonedSources;
     QHash<quint32, int> m_SourceToTile;
     std::unique_ptr<AppleHevcDecoder> m_Decoder;
     QElapsedTimer m_Clock;
@@ -434,11 +478,7 @@ private:
     qint64 m_LastDecodedAt = -1;
     qint64 m_LastReceiverReportAt = 0;
     qint64 m_LastRateControlAt = 0;
-    qint64 m_LastAcceptedTimestampAt = -1;
     qint64 m_LastKeyFrameAt = -KeyFrameRetryIntervalMs;
-    quint32 m_ReceivedPacketCount = 0;
-    quint32 m_PreviousTimestamp = 0;
-    quint32 m_LastAcceptedTimestamp = 0;
     quint8 m_KeyFrameSequence = 0;
     qint64 m_PerformanceWindowStartedAt = 0;
     quint64 m_PerformanceBytes = 0;
@@ -449,7 +489,6 @@ private:
     quint64 m_PerformanceFirs = 0;
     QSet<quint32> m_PerformanceDecodedSourceTimestamps;
     bool m_PreferHardware = false;
-    bool m_HasPreviousTimestamp = false;
     bool m_AwaitingRandomAccessPicture = true;
     bool m_EnteredRefreshState = false;
     bool m_NotifiedReady = false;
@@ -720,6 +759,7 @@ private:
         AppleHevcDecodingOrderQueue decodingOrder;
         AppleDecodedFrameBatcher frameBatcher;
         QList<quint32> sources;
+        QSet<quint32> abandonedSources;
         QHash<quint32, int> sourceToTile;
         std::unique_ptr<AppleHevcDecoder> decoder;
         QElapsedTimer clock;
@@ -730,12 +770,7 @@ private:
         qint64 lastDecodedAt = -1;
         qint64 lastReceiverReportAt = 0;
         qint64 lastRateControlAt = 0;
-        qint64 lastAcceptedTimestampAt = -1;
         qint64 lastKeyFrameAt = -KeyFrameRetryIntervalMs;
-        quint32 receivedPacketCount = 0;
-        quint32 previousTimestamp = 0;
-        quint32 lastAcceptedTimestamp = 0;
-        bool hasPreviousTimestamp = false;
         quint8 keyFrameSequence = 0;
         bool notifiedMediaReady = false;
         AppleVideoDecoderBackend decoderBackend =
@@ -789,6 +824,7 @@ private:
             decodingOrder.reset();
             frameBatcher.reset();
             sources.clear();
+            abandonedSources.clear();
             sourceToTile.clear();
             if (decoder) {
                 decoder->flush();
@@ -797,8 +833,6 @@ private:
             videoWaitStartedAt = clock.elapsed();
             lastPacketAt = -1;
             lastDecodedAt = -1;
-            lastAcceptedTimestampAt = -1;
-            hasPreviousTimestamp = false;
             awaitingRandomAccessPicture = true;
             hasEnteredDecodeRefreshState = false;
             lastKeyFrameAt = -KeyFrameRetryIntervalMs;
@@ -1061,27 +1095,16 @@ private:
                 primaryReceived = true;
                 AppleRtpPacket packet;
                 if (decryptor.decrypt(datagram, &packet, nullptr)) {
-                    ++receivedPacketCount;
                     ++performancePackets;
                     performanceBytes += static_cast<quint64>(datagram.size());
-                    if (!hasPreviousTimestamp) {
-                        previousTimestamp = packet.timestamp;
-                        hasPreviousTimestamp = true;
-                    }
-                    else if (packet.timestamp != previousTimestamp) {
-                        const quint32 delta = packet.timestamp - previousTimestamp;
-                        if (delta < 0x7fffffffU) {
-                            previousTimestamp = packet.timestamp;
-                            lastAcceptedTimestamp = packet.timestamp;
-                            lastAcceptedTimestampAt = now;
-                        }
-                    }
                     if (firstPacketAt < 0) {
                         firstPacketAt = now;
                     }
                     lastPacketAt = now;
                     AppleHevcAccessUnit accessUnit;
-                    const bool completed = assembler.process(packet, now, &accessUnit);
+                    const bool completed = assembler.process(
+                            packet, now, &accessUnit,
+                            static_cast<qint64>(steadyNanoseconds()));
                     if (completed) {
                         ++performanceAccessUnits;
                     }
@@ -1309,6 +1332,41 @@ private:
             }
 
             if (!sources.isEmpty()) {
+                if (lastDecodedAt >= 0 &&
+                        now - lastDecodedAt >= SourceAdoptionStallMs) {
+                    const QList<quint32> candidates =
+                            assembler.replacementSources(
+                                    activeCanvas.tileCount, sources,
+                                    abandonedSources,
+                                    MinimumSourceAdoptionPackets);
+                    if (!candidates.isEmpty()) {
+                        for (quint32 source : std::as_const(sources)) {
+                            abandonedSources.insert(source);
+                        }
+                        sources = candidates;
+                        sourceToTile.clear();
+                        for (int index = 0; index < sources.size(); ++index) {
+                            sourceToTile.insert(sources.at(index), index);
+                        }
+                        frameBatcher.reset();
+                        decodingOrder.reset();
+                        assembler.discardIncomplete();
+                        decoder->flush();
+                        awaitingRandomAccessPicture = true;
+                        hasEnteredDecodeRefreshState = false;
+                        lastDecodedAt = now;
+                        if (!requestKeyFrames(
+                                    media, feedback,
+                                    negotiation.offers.videoSynchronizationSource,
+                                    sources, &keyFrameSequence, error)) {
+                            return false;
+                        }
+                        performanceFirs += static_cast<quint64>(sources.size());
+                        lastKeyFrameAt = now;
+                        qInfo() << "Apple adopted fresh video sources"
+                                << sources;
+                    }
+                }
                 const auto nacks = assembler.takeNacks(now);
                 for (auto iterator = nacks.cbegin(); iterator != nacks.cend(); ++iterator) {
                     const quint32 sender = negotiation.offers.videoSynchronizationSource;
@@ -1321,36 +1379,49 @@ private:
                     performanceNacks +=
                             static_cast<quint64>(iterator.value().size());
                 }
-                if (now - lastReceiverReportAt >= ReceiverReportIntervalMs) {
-                    if (!sendFeedback(media, feedback,
-                                      AppleMediaWire::receiverReport(
-                                              negotiation.offers.videoSynchronizationSource),
-                                      error)) {
+                const QList<AppleVideoFrameLossFeedback> frameLosses =
+                        assembler.frameLossFeedbackDue(now);
+                for (const AppleVideoFrameLossFeedback& frameLoss :
+                     frameLosses) {
+                    if (!sendFeedback(
+                                media, feedback,
+                                AppleMediaWire::frameLossFeedback(
+                                        negotiation.offers.videoSynchronizationSource,
+                                        frameLoss),
+                                error)) {
                         return false;
                     }
-                    lastReceiverReportAt = now;
+                    assembler.markFrameLossFeedbackSent(frameLoss, now);
                 }
-                if (hasPreviousTimestamp &&
-                        now - lastRateControlAt >= RateControlIntervalMs) {
-                    const quint32 feedbackDelay = lastAcceptedTimestampAt >= 0
-                            ? static_cast<quint32>(qMin(
-                                      now - lastAcceptedTimestampAt,
-                                      static_cast<qint64>(0xffff)))
-                            : 0xffff;
-                    const quint16 echoTimestamp = static_cast<quint16>(
-                            (static_cast<quint64>(now) * 1024 / 1000) & 0xffff);
-                    if (!sendFeedback(media, feedback,
-                                      AppleMediaWire::rateControl(
-                                              negotiation.offers.videoSynchronizationSource,
-                                              lastAcceptedTimestamp,
-                                              FixedLanBandwidthKilobitsPerSecond,
-                                              receivedPacketCount,
-                                              feedbackDelay,
-                                              echoTimestamp),
-                                      error)) {
-                        return false;
+                if (now - lastReceiverReportAt >= ReceiverReportIntervalMs) {
+                    const auto report = assembler.receptionReport(
+                            sources.first());
+                    if (report.has_value()) {
+                        if (!sendFeedback(
+                                    media, feedback,
+                                    AppleMediaWire::receiverReport(
+                                            negotiation.offers.videoSynchronizationSource,
+                                            *report),
+                                    error)) {
+                            return false;
+                        }
+                        lastReceiverReportAt = now;
                     }
-                    lastRateControlAt = now;
+                }
+                if (now - lastRateControlAt >= RateControlIntervalMs) {
+                    const auto rateControl = assembler.rateControlFeedback(
+                            static_cast<qint64>(steadyNanoseconds()));
+                    if (rateControl.has_value()) {
+                        if (!sendFeedback(
+                                    media, feedback,
+                                    AppleMediaWire::rateControl(
+                                            negotiation.offers.videoSynchronizationSource,
+                                            *rateControl),
+                                    error)) {
+                            return false;
+                        }
+                        lastRateControlAt = now;
+                    }
                 }
                 const bool awaitingFirstFrame = lastDecodedAt < 0 &&
                         now - lastKeyFrameAt >= KeyFrameRetryIntervalMs;

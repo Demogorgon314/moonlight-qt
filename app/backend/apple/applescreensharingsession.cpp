@@ -160,15 +160,25 @@ public:
 protected:
     void run() override
     {
-        // Keep presentation independent from Qt's main event loop. Native
-        // window moves, resizes, and unrelated UI work can temporarily suspend
-        // main-thread timers, while Swift's display-link path continues in a
-        // common run-loop mode. The one-millisecond poll also bounds a native
-        // non-blocking presentation retry without adding a frame of buffering.
         while (!isInterruptionRequested()) {
+            const bool signalled = m_Session->m_PresentationWake.tryAcquire(
+                    1, 100);
+            if (!signalled && m_Session->m_DisplayLinkActive.load()) {
+                continue;
+            }
+            if (isInterruptionRequested()) {
+                break;
+            }
             m_Session->renderLatestFrames();
             m_Session->renderSecondaryFrames();
-            QThread::usleep(1000);
+            if (!m_Session->m_DisplayLinkActive.load() &&
+                    (m_Session->m_PresentationNeeded.load() ||
+                     m_Session->m_SecondaryPresentationNeeded.load())) {
+                // Non-Metal renderers retry a temporarily busy swap chain
+                // without restoring the old unconditional 1 ms poll.
+                QThread::msleep(1);
+                m_Session->wakePresentation();
+            }
         }
     }
 
@@ -204,6 +214,51 @@ AppleScreenSharingSession::~AppleScreenSharingSession()
         m_NativeEventFilterInstalled = false;
     }
     destroyPresentation();
+}
+
+void AppleScreenSharingSession::wakePresentation(bool displayLinkTick)
+{
+    if (!displayLinkTick && m_DisplayLinkActive.load()) {
+        return;
+    }
+    if (m_PresentationWake.available() == 0) {
+        m_PresentationWake.release();
+    }
+}
+
+void AppleScreenSharingSession::setWindowMiniaturized(
+        int displayIndex,
+        bool miniaturized)
+{
+    std::atomic_bool& state = displayIndex == 1
+            ? m_SecondaryWindowMiniaturized
+            : m_PrimaryWindowMiniaturized;
+    state.store(miniaturized);
+    AppleVideoRenderer* renderer = displayIndex == 1
+            ? m_SecondaryVideoRenderer.get() : m_VideoRenderer.get();
+    if (renderer != nullptr) {
+        renderer->setDisplayLinkPaused(miniaturized);
+    }
+
+    const auto interval = m_FrameUpdatePauseState.setMiniaturized(
+            miniaturized, m_DisplayCount);
+    if (interval.has_value()) {
+        AppleOutboundControl control;
+        control.message = AppleMediaWire::autoFramebufferUpdate(*interval);
+        queueControl(std::move(control));
+        qInfo() << "Apple remote frame updates"
+                << (*interval == 0 ? "resumed" : "paused")
+                << "for minimized window";
+    }
+    if (!miniaturized) {
+        if (displayIndex == 1) {
+            m_SecondaryPresentationNeeded.store(true);
+        }
+        else {
+            m_PresentationNeeded.store(true);
+        }
+        wakePresentation();
+    }
 }
 
 bool AppleScreenSharingSession::initializeSession(QQuickWindow* qtWindow)
@@ -556,6 +611,12 @@ void AppleScreenSharingSession::mediaReady(
 #endif
         m_SecondaryMediaReady = true;
         m_EverMediaReady.store(true);
+        if (m_PresentationThread != nullptr &&
+                m_SecondaryVideoRenderer->startDisplayLink([this]() {
+                    wakePresentation(true);
+                })) {
+            m_DisplayLinkActive.store(true);
+        }
         qInfo().nospace()
                 << "Apple High Performance display 2 renderer="
                 << m_SecondaryVideoRenderer->name() << ", "
@@ -567,6 +628,7 @@ void AppleScreenSharingSession::mediaReady(
         SDL_RaiseWindow(m_SecondaryWindow);
         updateKeyboardGrabState(m_SecondaryWindow);
         m_SecondaryPresentationNeeded.store(true);
+        wakePresentation();
         return;
     }
     if (m_MediaReady || m_Cancelled.load() || !canvas.isUsable()) {
@@ -804,9 +866,16 @@ void AppleScreenSharingSession::mediaReady(
     updatePerformanceOverlayTexture();
     m_PresentationThread = std::make_unique<ApplePresentationThread>(this);
     m_PresentationThread->start(QThread::HighPriority);
+    const bool usesDisplayLink = m_VideoRenderer->startDisplayLink([this]() {
+        wakePresentation(true);
+    });
+    m_DisplayLinkActive.store(usesDisplayLink);
+    wakePresentation();
     qInfo().nospace()
             << "Apple High Performance presentation scheduler="
-               "dedicated-high-priority, media-poll-max="
+            << (usesDisplayLink ? "macOS-display-link"
+                                : "event-driven-high-priority")
+            << ", media-poll-max="
             << RealtimeMediaPollTimeoutMs << "ms";
 
     m_EventTimer = new QTimer(this);
@@ -871,11 +940,20 @@ void AppleScreenSharingSession::destroyPresentation()
         m_DynamicResolutionTimer = nullptr;
     }
     m_LiveResizing = false;
+    if (m_VideoRenderer != nullptr) {
+        m_VideoRenderer->stopDisplayLink();
+    }
+    if (m_SecondaryVideoRenderer != nullptr) {
+        m_SecondaryVideoRenderer->stopDisplayLink();
+    }
+    m_DisplayLinkActive.store(false);
     if (m_PresentationThread != nullptr) {
         m_PresentationThread->requestInterruption();
+        m_PresentationWake.release();
         m_PresentationThread->wait();
         m_PresentationThread.reset();
     }
+    m_PresentationWake.tryAcquire(m_PresentationWake.available());
     m_Textures.clear();
     m_TextureSizes.clear();
     m_TextureFormats.clear();
@@ -890,6 +968,9 @@ void AppleScreenSharingSession::destroyPresentation()
     m_AwaitingDecodeSubmissions.clear();
     m_PerformanceOverlayUpdateNeeded.store(false);
     m_PresentationNeeded.store(true);
+    m_PrimaryWindowMiniaturized.store(false);
+    m_SecondaryWindowMiniaturized.store(false);
+    m_FrameUpdatePauseState = AppleFrameUpdatePauseState();
     m_LastRenderLoopAtNanoseconds = 0;
     m_MaxRenderLoopGapMilliseconds = 0.0;
     m_MaxOverlayUpdateMilliseconds = 0.0;

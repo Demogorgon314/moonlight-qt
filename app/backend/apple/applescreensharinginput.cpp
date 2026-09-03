@@ -680,6 +680,12 @@ void AppleScreenSharingSession::pollSdlEvents()
                 }
                 break;
             }
+            if (event.window.event == SDL_WINDOWEVENT_MINIMIZED) {
+                setWindowMiniaturized(displayIndex, true);
+            }
+            else if (event.window.event == SDL_WINDOWEVENT_RESTORED) {
+                setWindowMiniaturized(displayIndex, false);
+            }
             if (event.window.event == SDL_WINDOWEVENT_MOVED ||
                     event.window.event == SDL_WINDOWEVENT_RESTORED ||
                     event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {

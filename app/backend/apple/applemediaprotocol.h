@@ -117,6 +117,126 @@ struct AppleScrollWheelEvent
     quint32 flags = 0;
 };
 
+struct AppleRtpReceptionReport
+{
+    quint32 source = 0;
+    quint8 fractionLost = 0;
+    qint32 cumulativePacketsLost = 0;
+    quint32 extendedHighestSequence = 0;
+    quint32 interarrivalJitter = 0;
+    quint32 lastSenderReport = 0;
+    quint32 delaySinceLastSenderReport = 0;
+};
+
+struct AppleVideoFrameLossFeedback
+{
+    quint32 mediaSource = 0;
+    quint32 rtpTimestamp = 0;
+    quint16 expectedPacketCount = 0;
+    quint16 lostPacketCount = 0;
+
+    quint16 packedLoss() const
+    {
+        return static_cast<quint16>(((expectedPacketCount & 0x3f) << 6) |
+                                    (lostPacketCount & 0x3f));
+    }
+};
+
+enum class AppleVideoBandwidthProbeActivity
+{
+    Active,
+    Boundary,
+    Suppressed,
+};
+
+struct AppleVideoRateControlInfo
+{
+    quint32 rtpTimestamp = 0;
+    quint32 estimatedBandwidthKilobitsPerSecond = 0;
+    quint16 burstyLoss = 0;
+    quint32 receivedPacketCount = 0;
+    quint32 feedbackDelayMilliseconds = 0;
+    quint16 echoTimestamp = 0;
+    double oneWayReceiveDelaySeconds = 0.0;
+};
+
+class AppleVideoRateControlEstimator
+{
+public:
+    // Arrival times share one monotonic nanosecond clock. Probe packets update
+    // capacity while every packet advances the native RCTL playout fields.
+    void observe(quint32 rtpTimestamp,
+                 qint64 arrivalNanoseconds,
+                 int packetSize,
+                 AppleVideoBandwidthProbeActivity activity);
+    std::optional<AppleVideoRateControlInfo> feedback(
+            qint64 nowNanoseconds) const;
+
+private:
+    enum class EstimateState
+    {
+        Initial,
+        Stable,
+        InsufficientProbeWindow,
+        PendingUp,
+        PendingDown,
+        Committed,
+    };
+
+    struct ProbeGroup
+    {
+        quint32 timestamp = 0;
+        qint64 referenceArrivalNanoseconds = 0;
+        qint64 lastArrivalNanoseconds = 0;
+        quint64 bytesAfterReference = 0;
+        int packetsAfterReference = 0;
+    };
+
+    void updateTimestampStatistics(quint32 rtpTimestamp,
+                                   qint64 arrivalNanoseconds);
+    void updateBandwidthEstimate(quint32 rtpTimestamp,
+                                 qint64 arrivalNanoseconds,
+                                 int packetSize);
+    void finalizeBandwidthProbe();
+    void finalize(const ProbeGroup& group);
+    void applyCandidate(double candidateBitsPerSecond);
+    void clearPendingEstimate(EstimateState state);
+    void updateOneWayReceiveDelay(quint32 timestamp,
+                                  qint64 arrivalNanoseconds);
+
+    std::optional<ProbeGroup> m_ProbeGroup;
+    std::optional<double> m_EstimatedBandwidth;
+    EstimateState m_EstimateState = EstimateState::Stable;
+    int m_PendingDirection = 0;
+    double m_PendingBandwidth = 0.0;
+    int m_PendingCount = 0;
+    int m_ConsecutiveShortProbeCount = 0;
+    bool m_DidReceiveVideo = false;
+    quint32 m_TotalPacketsReceived = 0;
+    std::optional<quint32> m_PreviousTimestamp;
+    quint32 m_LastAcceptedTimestamp = 0;
+    quint32 m_LastAcceptedPacketCount = 0;
+    qint64 m_LastAcceptedArrivalNanoseconds = -1;
+    std::optional<quint32> m_DelayPreviousTimestamp;
+    quint64 m_DelayWrapOffset = 0;
+    std::optional<quint64> m_FirstUnwrappedTimestamp;
+    qint64 m_FirstDelayArrivalNanoseconds = -1;
+    double m_ShortDelay = 0.0;
+    double m_LongDelay = 0.0;
+    double m_OneWayReceiveDelay = 0.0;
+};
+
+class AppleFrameUpdatePauseState
+{
+public:
+    std::optional<quint32> setMiniaturized(bool miniaturized,
+                                           int endpointWindowCount);
+    bool isPaused() const { return m_IsPaused; }
+
+private:
+    bool m_IsPaused = false;
+};
+
 namespace AppleMediaWire {
 
 AppleMediaOffers createOffers(bool audioEnabled,
@@ -140,7 +260,7 @@ QByteArray configuration(const AppleMediaOffers& offers,
                          QString* error = nullptr);
 
 QByteArray framebufferUpdateRequest();
-QByteArray autoFramebufferUpdate();
+QByteArray autoFramebufferUpdate(quint32 intervalMilliseconds = 0);
 QByteArray controlMode(bool observing);
 QByteArray selectCombinedDisplays();
 QByteArray selectDisplay(quint32 displayId);
@@ -172,9 +292,14 @@ AppleInputEncryptionRequest keyEvent(bool isDown,
                                      quint16 keyCode);
 
 QByteArray receiverReport(quint32 sender);
+QByteArray receiverReport(quint32 sender,
+                          const AppleRtpReceptionReport& report);
 QByteArray genericNack(quint32 sender,
                        quint32 mediaSource,
                        const QList<quint16>& lostSequences);
+QByteArray frameLossFeedback(
+        quint32 sender,
+        const AppleVideoFrameLossFeedback& feedback);
 QByteArray fullIntraRequest(quint32 sender,
                             quint32 mediaSource,
                             quint8 sequence);
@@ -187,6 +312,8 @@ QByteArray rateControl(quint32 sender,
                        quint32 receivedPacketCount,
                        quint32 feedbackDelayMilliseconds,
                        quint16 echoTimestamp);
+QByteArray rateControl(quint32 sender,
+                       const AppleVideoRateControlInfo& info);
 
 } // namespace AppleMediaWire
 
@@ -317,7 +444,8 @@ class AppleHevcAssembler
 public:
     bool process(const AppleRtpPacket& packet,
                  qint64 nowMilliseconds,
-                 AppleHevcAccessUnit* accessUnit);
+                 AppleHevcAccessUnit* accessUnit,
+                 qint64 arrivalNanoseconds = -1);
     void expire(qint64 nowMilliseconds);
     void discardIncomplete();
 
@@ -326,8 +454,24 @@ public:
     QHash<quint32, int> packetCounts() const { return m_SourcePacketCounts; }
     QSet<quint32> completedSources() const { return m_CompletedSources; }
     QList<quint32> primarySources(int tileCount,
-                                  const QHash<quint32, int>& baseline = {}) const;
+                                  const QHash<quint32, int>& baseline = {},
+                                  const QSet<quint32>& excluded = {}) const;
+    // Returns a complete, sufficiently active source group without allowing a
+    // stalled decoder to bounce back to a source group it already abandoned.
+    QList<quint32> replacementSources(
+            int tileCount,
+            const QList<quint32>& currentSources,
+            const QSet<quint32>& abandonedSources,
+            int minimumPacketsPerSource) const;
     QHash<quint32, QList<quint16>> takeNacks(qint64 nowMilliseconds);
+    std::optional<AppleRtpReceptionReport> receptionReport(quint32 source);
+    std::optional<AppleVideoRateControlInfo> rateControlFeedback(
+            qint64 nowNanoseconds) const;
+    QList<AppleVideoFrameLossFeedback> frameLossFeedbackDue(
+            qint64 nowMilliseconds) const;
+    void markFrameLossFeedbackSent(
+            const AppleVideoFrameLossFeedback& feedback,
+            qint64 nowMilliseconds);
 
 private:
     struct PendingPacket
@@ -352,19 +496,55 @@ private:
         qint64 lastNackAt = -1;
     };
 
+    struct ReceptionState
+    {
+        quint32 baseExtendedSequence = 0;
+        quint32 maximumExtendedSequence = 0;
+        quint32 receivedPackets = 1;
+        quint32 previousExpectedPackets = 0;
+        quint32 previousReceivedPackets = 0;
+        std::optional<qint64> previousTransit;
+        double jitter = 0.0;
+    };
+
+    struct CachedFrameLoss
+    {
+        quint32 rtpTimestamp = 0;
+        quint16 frameSequenceNumber = 0;
+        quint16 expectedPacketCount = 0;
+        QSet<quint16> receivedSequences;
+        qint64 lastSentAt = -1;
+    };
+
     static QList<PendingPacket> sequenceOrdered(const QList<PendingPacket>& packets);
     static QList<QByteArray> reassemble(const QList<PendingPacket>& packets);
     static std::optional<quint16> firstDecodingOrderNumber(const QByteArray& payload);
     static AppleHevcAccessUnit::SubframeBoundary subframeBoundary(
             const QList<QByteArray>& units);
     void harvest(const QList<QByteArray>& units);
-    void observeSequence(const AppleRtpPacket& packet, qint64 nowMilliseconds);
+    void observeSequence(const AppleRtpPacket& packet,
+                         qint64 nowMilliseconds,
+                         qint64 arrivalNanoseconds);
+    void updateReceptionState(const AppleRtpPacket& packet,
+                              qint64 arrivalNanoseconds);
+    void observeRateControl(const AppleRtpPacket& packet,
+                            qint64 arrivalNanoseconds);
+    void cacheFrameLossIfNeeded(quint32 source,
+                                quint32 timestamp,
+                                const PendingAccessUnit& group);
+    void correctCachedFrameLoss(const AppleRtpPacket& packet);
+    static quint32 extendedSequence(quint16 sequence, quint32 maximum);
 
     QHash<quint64, PendingAccessUnit> m_Groups;
     QHash<quint32, int> m_SourcePacketCounts;
     QSet<quint32> m_CompletedSources;
     QHash<quint32, quint16> m_MaximumSequence;
     QHash<quint32, QHash<quint16, MissingPacket>> m_MissingPackets;
+    QHash<quint32, ReceptionState> m_ReceptionStates;
+    QHash<quint32, CachedFrameLoss> m_CachedFrameLosses;
+    AppleVideoRateControlEstimator m_RateControlEstimator;
+    std::optional<quint32> m_ActiveProbeTimestamp;
+    qint64 m_LastProbeEndNanoseconds = -1;
     AppleHevcParameterSets m_ParameterSets;
     std::optional<quint32> m_PlayoutTimestamp;
 };
