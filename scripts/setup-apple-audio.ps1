@@ -30,7 +30,7 @@ function Find-CMake {
         }
     }
 
-    throw 'CMake from Visual Studio 2022 was not found. Set CMAKE_EXE to cmake.exe.'
+    throw 'CMake was not found. Set CMAKE_EXE to cmake.exe.'
 }
 
 $WorkRoot = Join-Path ([IO.Path]::GetTempPath()) ("moonlight-fdk-aac-$([Guid]::NewGuid().ToString('N'))")
@@ -59,7 +59,7 @@ try {
     }
 
     $cmake = Find-CMake
-    & $cmake -S $SourceRoot -B $BuildRoot -G 'Visual Studio 17 2022' -A x64 `
+    & $cmake -S $SourceRoot -B $BuildRoot -A x64 `
         -DBUILD_SHARED_LIBS=ON `
         -DBUILD_PROGRAMS=OFF `
         -DFDK_AAC_INSTALL_PKGCONFIG_MODULE=OFF `
