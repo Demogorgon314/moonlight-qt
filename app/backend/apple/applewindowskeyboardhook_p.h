@@ -91,7 +91,8 @@ private:
     static WindowTarget targetForWindow(SDL_Window* window, bool capture)
     {
         WindowTarget target;
-        target.nativeHandle =\n                AppleScreenSharingSessionPrivate::nativeHandleForWindow(window);
+        target.nativeHandle =
+                AppleScreenSharingSessionPrivate::nativeHandleForWindow(window);
         target.windowId = window != nullptr ? SDL_GetWindowID(window) : 0;
         target.capture = capture && target.nativeHandle != nullptr &&
                 target.windowId != 0;
