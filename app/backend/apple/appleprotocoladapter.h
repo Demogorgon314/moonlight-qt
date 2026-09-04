@@ -10,6 +10,7 @@
 
 namespace QMdnsEngine {
 class Browser;
+class Message;
 class Resolver;
 class Server;
 class Service;
@@ -21,6 +22,7 @@ struct AppleDiscoveredConnection
     QString displayName;
     AppleConnectionEndpoint endpoint;
     QList<QHostAddress> addresses;
+    AppleRemoteDeviceInfo deviceInfo;
 };
 
 class AppleProtocolAdapter final : public ProtocolAdapter
@@ -87,6 +89,10 @@ public:
 private:
     void handleServiceAddedOrUpdated(const QMdnsEngine::Service& service);
     void handleServiceRemoved(const QMdnsEngine::Service& service);
+    void requestDeviceInfo(const QString& serviceKey);
+    void handleDeviceInfoMessage(const QMdnsEngine::Message& message);
+    void applyDeviceInfo(const QString& serviceKey,
+                         const AppleRemoteDeviceInfo& deviceInfo);
     void resolveService(const QString& serviceKey);
     ConnectionIdentity identityForDiscovery(const QString& serviceKey) const;
     AppleDiscoveredConnection discovered(const ConnectionIdentity& identity,
@@ -98,6 +104,7 @@ private:
     AppleConnectionStore m_Store;
     QHash<QString, AppleDiscoveredConnection> m_Discovered;
     QHash<QString, QMdnsEngine::Resolver*> m_Resolvers;
+    QHash<QByteArray, QString> m_DeviceInfoQueries;
     QHash<QString, QString> m_PendingTrust;
     QHash<QString, quint64> m_AuthenticationGenerations;
     QSharedPointer<QMdnsEngine::Server> m_Server;

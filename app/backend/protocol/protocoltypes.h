@@ -69,6 +69,7 @@ struct CatalogConnectionView
     ConnectionIdentity identity;
     QString displayName;
     QString protocolName;
+    QString iconSource;
     QString details;
     bool online = false;
     bool paired = false;

@@ -108,6 +108,8 @@ public:
 signals:
     void clipboardSharingChanged(QString connectionId, bool enabled);
     void keyboardInputSourceSharingChanged(QString connectionId, bool enabled);
+    void deviceInfoChanged(QString connectionId,
+                           AppleRemoteDeviceInfo deviceInfo);
 
 protected:
     bool initializeSession(QQuickWindow* qtWindow) override;

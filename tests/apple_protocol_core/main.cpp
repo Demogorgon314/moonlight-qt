@@ -3,6 +3,7 @@
 #include "backend/apple/appleclipboard.h"
 #include "backend/apple/appleconnectionstore.h"
 #include "backend/apple/applecontrolfeatures.h"
+#include "backend/apple/appledeviceinfo.h"
 #include "backend/apple/applefeaturegate.h"
 #include "backend/apple/applefilecopy.h"
 #include "backend/apple/applefiledrag.h"
@@ -311,6 +312,12 @@ void testSavedConnectionIdentityAndSecretBoundary()
         require(store.setKeyboardInputSourceSharingEnabled(firstId, true) &&
                 store.connection(firstId).keyboardInputSourceSharingEnabled,
                 "keyboard input-source sharing must be stored per saved Mac");
+        AppleRemoteDeviceInfo deviceInfo;
+        deviceInfo.modelIdentifier = QStringLiteral("Macmini9,1");
+        deviceInfo.deviceColor = QStringLiteral("1");
+        require(store.setDeviceInfo(firstId, deviceInfo) &&
+                store.connection(firstId).deviceInfo == deviceInfo,
+                "remote device information must be stored per saved Mac");
 
         updated = endpoint;
         updated.host = QStringLiteral("192.0.2.44");
@@ -342,6 +349,8 @@ void testSavedConnectionIdentityAndSecretBoundary()
                 "the replacement connection clipboard preference must persist independently");
         require(store.setKeyboardInputSourceSharingEnabled(readded.id, true),
                 "the replacement connection input-source preference must persist independently");
+        require(store.setDeviceInfo(readded.id, deviceInfo),
+                "the replacement connection device information must persist independently");
     }
 
     QFile settingsFile(path);
@@ -356,8 +365,83 @@ void testSavedConnectionIdentityAndSecretBoundary()
             reloaded.connections().first().id != firstId &&
             reloaded.connections().first().virtualDisplayCount == 2 &&
             !reloaded.connections().first().sharedClipboardEnabled &&
-            reloaded.connections().first().keyboardInputSourceSharingEnabled,
+            reloaded.connections().first().keyboardInputSourceSharingEnabled &&
+            reloaded.connections().first().deviceInfo.modelIdentifier ==
+                    QStringLiteral("Macmini9,1") &&
+            reloaded.connections().first().deviceInfo.deviceColor ==
+                    QStringLiteral("1"),
             "saved identity must survive process restart and removed identity must stay absent");
+}
+
+void testAppleRemoteDeviceInformationAndIcon()
+{
+    const AppleRemoteDeviceInfo txtInfo = AppleDeviceInfo::fromTxtAttributes({
+        {QByteArrayLiteral("MODEL"), QByteArrayLiteral(" Macmini9,1 ")},
+        {QByteArrayLiteral("icolor"), QByteArrayLiteral(" 1 ")},
+        {QByteArrayLiteral("ecolor"), QByteArrayLiteral("2")},
+        {QByteArrayLiteral("unknown"), QByteArrayLiteral("ignored")},
+    });
+    require(txtInfo.modelIdentifier == QStringLiteral("Macmini9,1") &&
+                    txtInfo.deviceColor == QStringLiteral("1") &&
+                    txtInfo.enclosureColor == QStringLiteral("2") &&
+                    txtInfo.enclosureColorIndex() == std::optional<qint32>(1),
+            "Bonjour device information must parse model and enclosure color fields");
+    require(AppleDeviceInfo::queryName(
+                    QStringLiteral("Office Mac"), QStringLiteral("local")) ==
+                    QByteArrayLiteral("Office Mac._device-info._tcp.local."),
+            "device information queries must use the Swift Bonjour service name");
+    require(!AppleDeviceInfo::fromTxtAttributes({
+                    {QByteArrayLiteral("icolor"), QByteArrayLiteral("1")},
+                }).isValid() &&
+                    !AppleDeviceInfo::fromTxtAttributes({
+                        {QByteArrayLiteral("model"), QByteArray("\xff", 1)},
+                    }).isValid(),
+            "missing and invalid UTF-8 device models must be rejected");
+
+    QByteArray model = QByteArrayLiteral("Macmini9,1");
+    model.append('\0');
+    QByteArray deviceColor = QByteArrayLiteral("1");
+    deviceColor.append('\0');
+    QByteArray enclosureColor = QByteArrayLiteral("2");
+    enclosureColor.append('\0');
+    QByteArray payload(16, '\0');
+    writeUInt16(payload, 0, 2);
+    writeUInt32(payload, 2, 0x01020304);
+    payload[6] = char(0x11);
+    payload[7] = char(0x22);
+    payload[8] = char(0x33);
+    payload[9] = char(0x44);
+    writeUInt16(payload, 10, static_cast<quint16>(model.size()));
+    writeUInt16(payload, 12, static_cast<quint16>(deviceColor.size()));
+    writeUInt16(payload, 14, static_cast<quint16>(enclosureColor.size()));
+    payload.append(model);
+    payload.append(deviceColor);
+    payload.append(enclosureColor);
+    AppleWire::appendUInt32(payload, 0x55667788);
+
+    QByteArray message = QByteArray::fromHex("00000001");
+    message.append(lengthPrefixedRectangle(1110, payload));
+    const AppleControlEvents events = AppleControlEventParser::parse(message);
+    require(events.deviceInfoUpdates.size() == 1 &&
+                    events.deviceInfoUpdates.first() == txtInfo,
+            "the session device-information rectangle must match Bonjour metadata");
+
+    QByteArray malformedPayload = payload;
+    malformedPayload.chop(5);
+    message = QByteArray::fromHex("00000001");
+    message.append(lengthPrefixedRectangle(1110, malformedPayload));
+    require(AppleControlEventParser::parse(message).deviceInfoUpdates.isEmpty(),
+            "truncated session device information must be ignored");
+
+#ifdef Q_OS_DARWIN
+    const QString icon = AppleDeviceInfo::iconSource(txtInfo);
+    require(icon.startsWith(QStringLiteral("data:image/png;base64,")),
+            "a declared Mac model must resolve to its native macOS hardware icon");
+#endif
+    AppleRemoteDeviceInfo unknown;
+    unknown.modelIdentifier = QStringLiteral("UnknownMac999,999");
+    require(AppleDeviceInfo::iconSource(unknown).isEmpty(),
+            "unknown hardware models must retain the existing host fallback icon");
 }
 
 void testMalformedWireInputs()
@@ -3458,6 +3542,8 @@ int main(int argc, char* argv[])
     testFeatureEnabledBuildDiscoversByDefault();
     std::fprintf(stderr, "testSavedConnectionIdentityAndSecretBoundary\n");
     testSavedConnectionIdentityAndSecretBoundary();
+    std::fprintf(stderr, "testAppleRemoteDeviceInformationAndIcon\n");
+    testAppleRemoteDeviceInformationAndIcon();
     std::fprintf(stderr, "testMalformedWireInputs\n");
     testMalformedWireInputs();
     std::fprintf(stderr, "testTrustPrecedesCredentialRead\n");

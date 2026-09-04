@@ -26,6 +26,8 @@ apple-screen-sharing {
         backend/apple/appleclipboard.cpp \
         backend/apple/appleconnectionstore.cpp \
         backend/apple/applecredentialstore.cpp \
+        backend/apple/appledeviceicon.cpp \
+        backend/apple/appledeviceinfo.cpp \
         backend/apple/appleinputsourceplatform.cpp \
         backend/apple/applekeyboardinputsource.cpp \
         backend/apple/applekeyboardmapper.cpp \
@@ -54,6 +56,7 @@ apple-screen-sharing {
         backend/apple/appleclipboard.h \
         backend/apple/appleconnectionstore.h \
         backend/apple/applecredentialstore.h \
+        backend/apple/appledeviceinfo.h \
         backend/apple/appleinputsourceplatform.h \
         backend/apple/applekeyboardinputsource.h \
         backend/apple/applekeyboardmapper.h \
@@ -94,6 +97,7 @@ apple-screen-sharing {
         LIBS += -framework Security -framework AudioToolbox -framework AVFAudio -framework Carbon -framework UniformTypeIdentifiers
         SOURCES += \
             backend/apple/appleclipboard_mac.mm \
+            backend/apple/appledeviceicon_mac.mm \
             backend/apple/applefiledrag_mac.mm \
             backend/apple/appleinputsourceplatform_mac.mm \
             backend/apple/applemacinputbridge.mm \

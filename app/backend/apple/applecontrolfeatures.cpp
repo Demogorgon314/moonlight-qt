@@ -527,6 +527,14 @@ AppleControlEvents AppleControlEventParser::parse(const QByteArray& message)
                 events.keyboardInputSourceUpdates.append(*state);
             }
         }
+        else if (encoding == 1110) {
+            const AppleRemoteDeviceInfo deviceInfo =
+                    AppleDeviceInfo::fromWirePayload(
+                            message.mid(payloadOffset, length));
+            if (deviceInfo.isValid()) {
+                events.deviceInfoUpdates.append(deviceInfo);
+            }
+        }
         offset = payloadOffset + length;
     }
     return events;

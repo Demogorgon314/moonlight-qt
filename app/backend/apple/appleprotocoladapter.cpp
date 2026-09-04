@@ -5,6 +5,10 @@
 #include "backend/protocol/resolvedlaunchplan.h"
 
 #include <qmdnsengine/browser.h>
+#include <qmdnsengine/dns.h>
+#include <qmdnsengine/message.h>
+#include <qmdnsengine/query.h>
+#include <qmdnsengine/record.h>
 #include <qmdnsengine/resolver.h>
 #include <qmdnsengine/server.h>
 #include <qmdnsengine/service.h>
@@ -188,6 +192,10 @@ AppleProtocolAdapter::AppleProtocolAdapter(
     : ProtocolAdapter(parent),
       m_Server(mdnsServer)
 {
+    if (m_Server) {
+        connect(m_Server.data(), &QMdnsEngine::Server::messageReceived,
+                this, &AppleProtocolAdapter::handleDeviceInfoMessage);
+    }
 }
 
 AppleProtocolAdapter::~AppleProtocolAdapter()
@@ -262,6 +270,7 @@ void AppleProtocolAdapter::stopDiscoveryAsync()
         delete resolver;
     }
     m_Resolvers.clear();
+    m_DeviceInfoQueries.clear();
     const QList<AppleDiscoveredConnection> removed = m_Discovered.values();
     m_Discovered.clear();
     for (const AppleDiscoveredConnection& connection : removed) {
@@ -342,7 +351,7 @@ QString AppleProtocolAdapter::saveConnection(const ConnectionIdentity& identity,
         return {};
     }
     const AppleSavedConnection saved = m_Store.saveDiscovered(
-            source.endpoint, source.displayName);
+            source.endpoint, source.displayName, source.deviceInfo);
     const QString savedId = ConnectionIdentity(
             ProtocolKind::AppleScreenSharing, saved.id).toString();
     emit connectionSaved(identity.toString(), savedId, QString());
@@ -585,6 +594,23 @@ StreamSession* AppleProtocolAdapter::createSession(
                         ProtocolKind::AppleScreenSharing,
                         connectionId).toString());
             });
+    connect(session,
+            &AppleScreenSharingSession::deviceInfoChanged,
+            adapter,
+            [adapter](const QString& connectionId,
+                      const AppleRemoteDeviceInfo& deviceInfo) {
+                bool found = false;
+                const AppleSavedConnection connection =
+                        adapter->m_Store.connection(connectionId, &found);
+                if (!found || connection.deviceInfo == deviceInfo ||
+                        !adapter->m_Store.setDeviceInfo(
+                                connectionId, deviceInfo)) {
+                    return;
+                }
+                emit adapter->connectionChanged(ConnectionIdentity(
+                        ProtocolKind::AppleScreenSharing,
+                        connectionId).toString());
+            });
     return session;
 }
 
@@ -679,12 +705,14 @@ void AppleProtocolAdapter::handleServiceAddedOrUpdated(
     if (existing != m_Discovered.cend()) {
         discovery.id = existing->id;
         discovery.addresses = existing->addresses;
+        discovery.deviceInfo = existing->deviceInfo;
     }
     else {
         discovery.id = identityForDiscovery(key).stableId();
     }
     m_Discovered[key] = discovery;
     resolveService(key);
+    requestDeviceInfo(key);
     m_Store.updateDiscoveredEndpoint(key, discovery.endpoint);
     emit connectionChanged(ConnectionIdentity(
             ProtocolKind::AppleScreenSharing, discovery.id).toString());
@@ -701,9 +729,88 @@ void AppleProtocolAdapter::handleServiceRemoved(const QMdnsEngine::Service& serv
     if (QMdnsEngine::Resolver* resolver = m_Resolvers.take(key)) {
         delete resolver;
     }
+    for (auto it = m_DeviceInfoQueries.begin();
+         it != m_DeviceInfoQueries.end();) {
+        if (it.value() == key) {
+            it = m_DeviceInfoQueries.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
     if (!removed.id.isEmpty()) {
         emit connectionChanged(ConnectionIdentity(
                 ProtocolKind::AppleScreenSharing, removed.id).toString());
+    }
+}
+
+void AppleProtocolAdapter::requestDeviceInfo(const QString& serviceKey)
+{
+    if (!m_Server || !m_Discovered.contains(serviceKey)) {
+        return;
+    }
+    const AppleDiscoveredConnection& discovery = m_Discovered.value(serviceKey);
+    const QByteArray name = AppleDeviceInfo::queryName(
+            discovery.endpoint.serviceName,
+            discovery.endpoint.serviceDomain);
+    if (name.isEmpty()) {
+        return;
+    }
+    m_DeviceInfoQueries.insert(name.toLower(), serviceKey);
+    QMdnsEngine::Query query;
+    query.setName(name);
+    query.setType(QMdnsEngine::TXT);
+    QMdnsEngine::Message message;
+    message.addQuery(query);
+    m_Server->sendMessageToAll(message);
+}
+
+void AppleProtocolAdapter::handleDeviceInfoMessage(
+        const QMdnsEngine::Message& message)
+{
+    if (!message.isResponse() || m_DeviceInfoQueries.isEmpty()) {
+        return;
+    }
+    for (const QMdnsEngine::Record& record : message.records()) {
+        if (record.type() != QMdnsEngine::TXT) {
+            continue;
+        }
+        const auto query = m_DeviceInfoQueries.constFind(
+                record.name().toLower());
+        if (query == m_DeviceInfoQueries.cend()) {
+            continue;
+        }
+        const AppleRemoteDeviceInfo deviceInfo =
+                AppleDeviceInfo::fromTxtAttributes(record.attributes());
+        if (deviceInfo.isValid()) {
+            applyDeviceInfo(query.value(), deviceInfo);
+        }
+    }
+}
+
+void AppleProtocolAdapter::applyDeviceInfo(
+        const QString& serviceKey,
+        const AppleRemoteDeviceInfo& deviceInfo)
+{
+    auto discovery = m_Discovered.find(serviceKey);
+    if (discovery == m_Discovered.end()) {
+        return;
+    }
+    if (discovery->deviceInfo != deviceInfo) {
+        discovery->deviceInfo = deviceInfo;
+        qInfo() << "Resolved Apple Screen Sharing device model:"
+                << discovery->displayName << deviceInfo.modelIdentifier
+                << deviceInfo.deviceColor << deviceInfo.enclosureColor;
+        emit connectionChanged(ConnectionIdentity(
+                ProtocolKind::AppleScreenSharing, discovery->id).toString());
+    }
+    for (const AppleSavedConnection& saved : m_Store.connections()) {
+        if (saved.endpoint.serviceKey() == serviceKey &&
+                saved.deviceInfo != deviceInfo &&
+                m_Store.setDeviceInfo(saved.id, deviceInfo)) {
+            emit connectionChanged(ConnectionIdentity(
+                    ProtocolKind::AppleScreenSharing, saved.id).toString());
+        }
     }
 }
 
@@ -787,6 +894,7 @@ CatalogConnectionView AppleProtocolAdapter::savedView(
     view.identity = ConnectionIdentity(ProtocolKind::AppleScreenSharing, connection.id);
     view.displayName = connection.displayName;
     view.protocolName = QStringLiteral("Apple Screen Sharing");
+    view.iconSource = AppleDeviceInfo::iconSource(connection.deviceInfo);
     view.online = connection.endpoint.isValid();
     const bool hasCredentialBinding = AppleCredentialStore::isReferenceForConnection(
             connection.credentialReference, connection.id);
@@ -818,6 +926,7 @@ CatalogConnectionView AppleProtocolAdapter::discoveredView(
     view.identity = ConnectionIdentity(ProtocolKind::AppleScreenSharing, connection.id);
     view.displayName = connection.displayName;
     view.protocolName = QStringLiteral("Apple Screen Sharing");
+    view.iconSource = AppleDeviceInfo::iconSource(connection.deviceInfo);
     view.online = true;
     view.paired = false;
     view.statusUnknown = false;

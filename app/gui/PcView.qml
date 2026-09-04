@@ -366,7 +366,11 @@ CenteredGridView {
             width: 160
             height: 160
             radius: width / 2
+            property bool hasHostIcon: model.iconSource !== ""
             color: {
+                if (hasHostIcon) {
+                    return "transparent"
+                }
                 // 根据名称生成固定颜色，确保同一台PC总是相同颜色
                 var hash = 0;
                 for (var i = 0; i < model.name.length; i++) {
@@ -385,6 +389,7 @@ CenteredGridView {
                 anchors.fill: parent
                 source: "qrc:/res/moon-mask.png"
                 opacity: 0.7
+                visible: !pcIcon.hasHostIcon
                 fillMode: Image.PreserveAspectFit
 
                 // 根据PC名称生成旋转角度
@@ -405,6 +410,17 @@ CenteredGridView {
                 font.pixelSize: parent.width * 0.6
                 font.bold: true
                 color: parent.color
+                visible: !pcIcon.hasHostIcon
+            }
+
+            Image {
+                anchors.fill: parent
+                anchors.margins: 4
+                source: model.iconSource
+                visible: pcIcon.hasHostIcon
+                fillMode: Image.PreserveAspectFit
+                sourceSize.width: 256
+                sourceSize.height: 256
             }
         }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "appledeviceinfo.h"
+
 #include <QList>
 #include <QString>
 
@@ -24,6 +26,7 @@ struct AppleSavedConnection
     QString trustedHostFingerprint;
     QString credentialReference;
     QString preferredUsername;
+    AppleRemoteDeviceInfo deviceInfo;
     int virtualDisplayCount = 1;
     bool sharedClipboardEnabled = true;
     bool keyboardInputSourceSharingEnabled = false;
@@ -43,7 +46,8 @@ public:
     AppleSavedConnection connection(const QString& id, bool* found = nullptr) const;
 
     AppleSavedConnection saveDiscovered(const AppleConnectionEndpoint& endpoint,
-                                         const QString& displayName);
+                                         const QString& displayName,
+                                         const AppleRemoteDeviceInfo& deviceInfo = {});
     bool remove(const QString& id, AppleSavedConnection* removed = nullptr);
     bool rename(const QString& id, const QString& displayName);
     bool updateDiscoveredEndpoint(const QString& serviceKey,
@@ -53,6 +57,8 @@ public:
                               const QString& credentialReference,
                               const QString& preferredUsername);
     bool clearCredentialBinding(const QString& id);
+    bool setDeviceInfo(const QString& id,
+                       const AppleRemoteDeviceInfo& deviceInfo);
     bool setVirtualDisplayCount(const QString& id, int displayCount);
     bool setSharedClipboardEnabled(const QString& id, bool enabled);
     bool setKeyboardInputSourceSharingEnabled(const QString& id, bool enabled);

@@ -52,6 +52,7 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
     case TrustedRole: return connection.trusted;
     case DirectLaunchRole: return connection.directLaunch;
     case AuthenticationKindRole: return connection.authenticationKind;
+    case IconSourceRole: return connection.iconSource;
     default: return QVariant();
     }
 }
@@ -78,6 +79,7 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
         {TrustedRole, "trusted"},
         {DirectLaunchRole, "directLaunch"},
         {AuthenticationKindRole, "authenticationKind"},
+        {IconSourceRole, "iconSource"},
     };
 }
 

@@ -68,13 +68,17 @@ AppleSavedConnection AppleConnectionStore::connection(const QString& id, bool* f
 
 AppleSavedConnection AppleConnectionStore::saveDiscovered(
         const AppleConnectionEndpoint& endpoint,
-        const QString& displayName)
+        const QString& displayName,
+        const AppleRemoteDeviceInfo& deviceInfo)
 {
     const QString serviceKey = endpoint.serviceKey();
     if (!serviceKey.isEmpty()) {
         for (AppleSavedConnection& existing : m_Connections) {
             if (existing.endpoint.serviceKey() == serviceKey) {
                 existing.endpoint = endpoint;
+                if (deviceInfo.isValid()) {
+                    existing.deviceInfo = deviceInfo;
+                }
                 ++existing.revision;
                 persist();
                 return existing;
@@ -88,6 +92,9 @@ AppleSavedConnection AppleConnectionStore::saveDiscovered(
             ? endpoint.displayAddress()
             : displayName.trimmed();
     connection.endpoint = endpoint;
+    if (deviceInfo.isValid()) {
+        connection.deviceInfo = deviceInfo;
+    }
     m_Connections.append(connection);
     persist();
     return connection;
@@ -207,6 +214,24 @@ bool AppleConnectionStore::clearCredentialBinding(const QString& id)
     return true;
 }
 
+bool AppleConnectionStore::setDeviceInfo(
+        const QString& id,
+        const AppleRemoteDeviceInfo& deviceInfo)
+{
+    const int index = indexOf(id);
+    if (index < 0 || !deviceInfo.isValid()) {
+        return false;
+    }
+    AppleSavedConnection& connection = m_Connections[index];
+    if (connection.deviceInfo == deviceInfo) {
+        return true;
+    }
+    connection.deviceInfo = deviceInfo;
+    ++connection.revision;
+    persist();
+    return true;
+}
+
 bool AppleConnectionStore::setVirtualDisplayCount(const QString& id,
                                                    int displayCount)
 {
@@ -282,6 +307,12 @@ void AppleConnectionStore::load()
                 settings->value(QStringLiteral("credentialReference")).toString();
         connection.preferredUsername =
                 settings->value(QStringLiteral("preferredUsername")).toString();
+        connection.deviceInfo.modelIdentifier =
+                settings->value(QStringLiteral("deviceModelIdentifier")).toString();
+        connection.deviceInfo.deviceColor =
+                settings->value(QStringLiteral("deviceColor")).toString();
+        connection.deviceInfo.enclosureColor =
+                settings->value(QStringLiteral("deviceEnclosureColor")).toString();
         connection.virtualDisplayCount = qBound(
                 1,
                 settings->value(QStringLiteral("virtualDisplayCount"), 1).toInt(),
@@ -321,6 +352,12 @@ void AppleConnectionStore::persist() const
         settings->setValue(QStringLiteral("credentialReference"),
                            connection.credentialReference);
         settings->setValue(QStringLiteral("preferredUsername"), connection.preferredUsername);
+        settings->setValue(QStringLiteral("deviceModelIdentifier"),
+                           connection.deviceInfo.modelIdentifier);
+        settings->setValue(QStringLiteral("deviceColor"),
+                           connection.deviceInfo.deviceColor);
+        settings->setValue(QStringLiteral("deviceEnclosureColor"),
+                           connection.deviceInfo.enclosureColor);
         settings->setValue(QStringLiteral("virtualDisplayCount"),
                            connection.virtualDisplayCount);
         settings->setValue(QStringLiteral("sharedClipboardEnabled"),

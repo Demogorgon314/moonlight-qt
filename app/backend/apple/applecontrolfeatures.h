@@ -1,5 +1,6 @@
 #pragma once
 
+#include "appledeviceinfo.h"
 #include "applekeyboardinputsource.h"
 
 #include <QByteArray>
@@ -89,12 +90,14 @@ struct AppleControlEvents
     QList<AppleDisplayLayout> displayLayouts;
     QList<QSet<quint32>> availableKeySymbolUpdates;
     QList<AppleKeyboardInputSourceState> keyboardInputSourceUpdates;
+    QList<AppleRemoteDeviceInfo> deviceInfoUpdates;
 
     bool isEmpty() const
     {
         return cursorUpdates.isEmpty() && displayLayouts.isEmpty() &&
                 availableKeySymbolUpdates.isEmpty() &&
-                keyboardInputSourceUpdates.isEmpty();
+                keyboardInputSourceUpdates.isEmpty() &&
+                deviceInfoUpdates.isEmpty();
     }
 };
 

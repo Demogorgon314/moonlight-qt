@@ -26,6 +26,7 @@ class ComputerModel : public QAbstractListModel
         TrustedRole,
         DirectLaunchRole,
         AuthenticationKindRole,
+        IconSourceRole,
     };
 
 public:

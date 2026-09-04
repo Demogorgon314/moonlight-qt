@@ -227,9 +227,16 @@ void AppleScreenSharingSession::applyControlEvents(
         m_KeyEventSubtype.store(
                 m_KeyboardInputSourceSharing.keyEventSubtype());
     }
+    for (const AppleRemoteDeviceInfo& deviceInfo : events.deviceInfoUpdates) {
+        if (m_Connection.deviceInfo != deviceInfo) {
+            m_Connection.deviceInfo = deviceInfo;
+            emit deviceInfoChanged(m_Connection.id, deviceInfo);
+        }
+    }
     if (!events.cursorUpdates.isEmpty() ||
             !events.availableKeySymbolUpdates.isEmpty() ||
-            !events.keyboardInputSourceUpdates.isEmpty()) {
+            !events.keyboardInputSourceUpdates.isEmpty() ||
+            !events.deviceInfoUpdates.isEmpty()) {
         updateControlSummary();
     }
 }
