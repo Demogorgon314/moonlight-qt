@@ -1775,6 +1775,36 @@ void testAppleHevcDecoderPreservesLowLatency444Output()
             "HEVC RExt 4:4:4 chroma and its matrix/range must survive the display boundary");
 }
 
+void testAppleHevcDecoderReportsMissingReferenceFrame()
+{
+    // The access unit is the first P-picture from a low-delay 8-bit 4:4:4
+    // stream, intentionally submitted without its preceding IDR picture.
+    // FFmpeg can otherwise log the missing reference and silently report
+    // success, preventing the media worker from requesting a fresh picture.
+    AppleHevcParameterSets parameterSets;
+    parameterSets.video = QByteArray::fromBase64(
+            "QAEMAf//BAgAAAMAnggAAAMAAP+6AkA=");
+    parameterSets.sequence = QByteArray::fromBase64(
+            "QgEBBAgAAAMAnggAAAMAAP+QBBAgst0lJheAtAQAAAMABAAAAwB4IA==");
+    parameterSets.pictures.append(QByteArray::fromBase64("RAHAcDBgkSA="));
+
+    AppleHevcAccessUnit accessUnit;
+    accessUnit.timestamp = 93'000;
+    accessUnit.frameSequenceNumber = 8;
+    accessUnit.nalUnits.append(QByteArray::fromBase64("AgHQCXiAt8kLPPA="));
+    require(parameterSets.isComplete() && accessUnit.containsVideoSlice(),
+            "the missing-reference HEVC fixture must be structurally complete");
+
+    AppleHevcDecoder decoder(false);
+    QString error;
+    require(decoder.open(&error),
+            "the software HEVC decoder must open for reference-loss recovery");
+    const QList<AppleDecodedTile> frames = decoder.decode(
+            accessUnit, parameterSets, 0, &error);
+    require(frames.isEmpty() && !error.isEmpty(),
+            "a missing HEVC reference must reach the media recovery path as a decode failure");
+}
+
 void testDecodedTilesPublishAsAtomicSenderFrames()
 {
     AppleDecodedFrameBatcher batcher;
@@ -3665,6 +3695,8 @@ int main(int argc, char* argv[])
     testDecodedNv12TileValidation();
     std::fprintf(stderr, "testAppleHevcDecoderPreservesLowLatency444Output\n");
     testAppleHevcDecoderPreservesLowLatency444Output();
+    std::fprintf(stderr, "testAppleHevcDecoderReportsMissingReferenceFrame\n");
+    testAppleHevcDecoderReportsMissingReferenceFrame();
     std::fprintf(stderr, "testDecodedTilesPublishAsAtomicSenderFrames\n");
     testDecodedTilesPublishAsAtomicSenderFrames();
     std::fprintf(stderr, "testDecodedTilesPublishOnFlsEndOfDataWithoutTearing\n");

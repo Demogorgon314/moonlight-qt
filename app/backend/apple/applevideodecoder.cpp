@@ -295,6 +295,10 @@ bool AppleHevcDecoder::openBackend(bool hardware,
     m_Context->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
     m_Context->flags |= AV_CODEC_FLAG_LOW_DELAY;
     m_Context->flags2 |= AV_CODEC_FLAG2_FAST;
+    // The HEVC decoder normally logs reference-list failures and silently
+    // skips the access unit. Surface invalid data to the media worker so it
+    // can request a fresh picture instead of waiting for the stall watchdog.
+    m_Context->err_recognition |= AV_EF_EXPLODE;
 
 #ifdef Q_OS_WIN
     if (hardware) {
