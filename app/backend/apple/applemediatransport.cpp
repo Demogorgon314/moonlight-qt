@@ -14,6 +14,8 @@
 
 #include <openssl/rand.h>
 
+#include <chrono>
+
 #ifdef Q_OS_WIN
 #include <winsock2.h>
 #include <MSWSock.h>
@@ -34,6 +36,12 @@ void setError(QString* error, const QString& value)
 bool isCancelled(std::atomic_bool* cancelled)
 {
     return cancelled != nullptr && cancelled->load();
+}
+
+qint64 monotonicNanoseconds()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 bool configurePlatformUdpSocket(QUdpSocket* socket,
@@ -139,12 +147,14 @@ bool AppleMediaTransport::bindSocket(QUdpSocket* socket,
             socket->close();
             return false;
         }
-        // A 4K60 multi-tile stream can queue several megabytes while a
-        // hardware frame is transferred for presentation.  Keep enough
-        // kernel-side headroom that synchronous decoder work doesn't turn
-        // into avoidable RTP loss.
+#ifdef Q_OS_WIN
+        // Keep Windows' larger buffer for the existing multi-display path.
+        // macOS follows the native client and uses the system default; its
+        // receive path is isolated from decode work and should not hide a
+        // long userspace backlog from the RCTL arrival-time estimator.
         socket->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption,
                                 16 * 1024 * 1024);
+#endif
         qInfo().nospace()
                 << "Apple Screen Sharing UDP port " << port
                 << " receive buffer="
@@ -252,6 +262,59 @@ bool AppleMediaTransport::receiveVideo(int mediaStreamIndex,
     buffer.resize(static_cast<int>(received));
     *datagram = std::move(buffer);
     return true;
+}
+
+bool AppleMediaTransport::receiveAvailableVideo(
+        int mediaStreamIndex,
+        QList<AppleReceivedVideoDatagram>* datagrams,
+        int timeoutMilliseconds,
+        std::atomic_bool* cancelled,
+        QString* error)
+{
+    QUdpSocket* socket = mediaStreamIndex == 0 ? m_VideoSocket.get()
+            : mediaStreamIndex == 1 ? m_SecondaryVideoSocket.get() : nullptr;
+    if (!isOpen() || datagrams == nullptr || socket == nullptr) {
+        return false;
+    }
+    datagrams->clear();
+    if (socket->state() != QAbstractSocket::BoundState) {
+        setError(error, QCoreApplication::translate(
+                "AppleMediaTransport", "The video UDP socket became unavailable: %1")
+                .arg(socket->errorString()));
+        return false;
+    }
+    punchIfDue();
+    if (!socket->hasPendingDatagrams() &&
+            !socket->waitForReadyRead(qMax(0, timeoutMilliseconds))) {
+        if (socket->error() != QAbstractSocket::SocketTimeoutError &&
+                !isCancelled(cancelled)) {
+            setError(error, QCoreApplication::translate(
+                    "AppleMediaTransport", "The video socket failed: %1")
+                    .arg(socket->errorString()));
+        }
+        return false;
+    }
+    if (isCancelled(cancelled)) {
+        return false;
+    }
+
+    // Match the native client: once the socket becomes readable, drain the
+    // complete kernel batch before doing assembly or decode work. Capturing
+    // each timestamp immediately before recv preserves packet spacing for the
+    // RCTL bandwidth estimator instead of timing a decoder-created backlog.
+    while (socket->hasPendingDatagrams()) {
+        AppleReceivedVideoDatagram received;
+        received.arrivalNanoseconds = monotonicNanoseconds();
+        received.data.resize(MaximumDatagramLength);
+        const qint64 size = socket->readDatagram(
+                received.data.data(), received.data.size());
+        if (size <= 0) {
+            break;
+        }
+        received.data.resize(static_cast<int>(size));
+        datagrams->append(std::move(received));
+    }
+    return !datagrams->isEmpty();
 }
 
 QList<QByteArray> AppleMediaTransport::drainControl()

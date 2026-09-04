@@ -1905,6 +1905,56 @@ quint16 findFourAvailableUdpPorts()
     return 0;
 }
 
+void testVideoReceiveDrainsOneSocketBatch()
+{
+    const quint16 basePort = findFourAvailableUdpPorts();
+    require(basePort != 0,
+            "four consecutive UDP ports must be available for the media batch test");
+
+    AppleMediaTransport media;
+    QString error;
+    std::atomic_bool cancelled = false;
+    require(media.open(QHostAddress::LocalHost, basePort, &error),
+            "media transport must bind its local video port for batch receive");
+
+    // The optimistic punch targets the initial local port on loopback. Drain
+    // it so only the three observable test datagrams remain in the batch.
+    QList<AppleReceivedVideoDatagram> initialPunch;
+    media.receiveAvailableVideo(
+            0, &initialPunch, 100, &cancelled, &error);
+    require(error.isEmpty(),
+            "draining the optimistic media punch must not fail");
+
+    QUdpSocket sender;
+    const QList<QByteArray> payloads = {
+        QByteArrayLiteral("first"),
+        QByteArrayLiteral("second"),
+        QByteArrayLiteral("third"),
+    };
+    for (const QByteArray& payload : payloads) {
+        require(sender.writeDatagram(
+                        payload, QHostAddress::LocalHost,
+                        static_cast<quint16>(basePort + 1)) == payload.size(),
+                "the media batch fixture must send every datagram");
+    }
+
+    QList<AppleReceivedVideoDatagram> received;
+    require(media.receiveAvailableVideo(
+                    0, &received, 250, &cancelled, &error),
+            "one readable notification must return its complete video batch");
+    require(received.size() == payloads.size(),
+            "video receive must drain all datagrams already queued by the kernel");
+    for (int index = 0; index < received.size(); ++index) {
+        require(received.at(index).data == payloads.at(index),
+                "video batch receive must preserve datagram order and payload");
+        require(received.at(index).arrivalNanoseconds > 0 &&
+                        (index == 0 ||
+                         received.at(index).arrivalNanoseconds >=
+                                 received.at(index - 1).arrivalNanoseconds),
+                "each video datagram must carry a monotonic receive timestamp");
+    }
+}
+
 void testUdpPunchIgnoresClosedOptimisticPortReset()
 {
 #ifdef Q_OS_WIN
@@ -3623,6 +3673,8 @@ int main(int argc, char* argv[])
     testDecodedTilesDoNotRetainFramesBehindMissingDecoderOutput();
     std::fprintf(stderr, "testUdpPunchIgnoresClosedOptimisticPortReset\n");
     testUdpPunchIgnoresClosedOptimisticPortReset();
+    std::fprintf(stderr, "testVideoReceiveDrainsOneSocketBatch\n");
+    testVideoReceiveDrainsOneSocketBatch();
     std::fprintf(stderr, "testStageFourCursorAndDisplayLayoutEvents\n");
     testStageFourCursorAndDisplayLayoutEvents();
     std::fprintf(stderr, "testRemoteCursorScalesForClientDpi\n");

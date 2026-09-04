@@ -19,7 +19,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <system_error>
+#include <thread>
 #include <utility>
 
 using AppleScreenSharingSessionPrivate::appleVideoDecoderBackendName;
@@ -494,6 +500,397 @@ private:
     bool m_NotifiedReady = false;
 };
 
+class ApplePrimaryVideoDecodeQueue
+{
+public:
+    struct Event
+    {
+        enum class Type
+        {
+            Decoded,
+            DecodeFailure,
+            DecoderReset,
+        };
+
+        Type type = Type::Decoded;
+        quint64 decodeNanoseconds = 0;
+        QList<quint32> decodedTimestamps;
+        QString error;
+        AppleVideoDecoderBackend backend =
+                AppleVideoDecoderBackend::Software;
+        bool hardwareFallback = false;
+    };
+
+    using BatchHandler = std::function<void(QList<AppleDecodedTile>)>;
+    using ReadyHandler = std::function<void(
+            const AppleCanvas&,
+            AppleVideoDecoderBackend,
+            bool,
+            std::shared_ptr<AppleVideoBackendContext>)>;
+
+    ApplePrimaryVideoDecodeQueue(bool preferHardware,
+                                 int tileCount,
+                                 AppleCanvas canvas,
+                                 BatchHandler batchHandler,
+                                 ReadyHandler readyHandler)
+        : m_PreferHardware(preferHardware),
+          m_TileCount(tileCount),
+          m_Canvas(canvas),
+          m_BatchHandler(std::move(batchHandler)),
+          m_ReadyHandler(std::move(readyHandler))
+    {
+    }
+
+    ~ApplePrimaryVideoDecodeQueue()
+    {
+        close();
+    }
+
+    ApplePrimaryVideoDecodeQueue(const ApplePrimaryVideoDecodeQueue&) = delete;
+    ApplePrimaryVideoDecodeQueue& operator=(
+            const ApplePrimaryVideoDecodeQueue&) = delete;
+
+    bool start(QString* error)
+    {
+        std::unique_lock<std::mutex> lock(m_Mutex);
+        if (m_Stopping) {
+            if (error != nullptr) {
+                *error = QCoreApplication::translate(
+                        "AppleVideoDecoder",
+                        "The HEVC decoder queue is already closed.");
+            }
+            return false;
+        }
+        if (m_Thread.joinable()) {
+            if (error != nullptr && !m_StartError.isEmpty()) {
+                *error = m_StartError;
+            }
+            return m_StartError.isEmpty();
+        }
+        m_StartCompleted = false;
+        m_StartError.clear();
+        try {
+            m_Thread = std::thread([this]() { run(); });
+        }
+        catch (const std::system_error&) {
+            if (error != nullptr) {
+                *error = QCoreApplication::translate(
+                        "AppleVideoDecoder",
+                        "The HEVC decoder worker could not be started.");
+            }
+            return false;
+        }
+        m_Changed.wait(lock, [this]() { return m_StartCompleted; });
+        if (error != nullptr && !m_StartError.isEmpty()) {
+            *error = m_StartError;
+        }
+        const bool started = m_StartError.isEmpty();
+        lock.unlock();
+        if (!started && m_Thread.joinable()) {
+            m_Thread.join();
+        }
+        return started;
+    }
+
+    bool isStarted() const
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return m_StartCompleted && m_StartError.isEmpty() &&
+                !m_Stopping;
+    }
+
+    AppleVideoDecoderBackend backend() const
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return m_Backend;
+    }
+
+    bool hardwareFallbackOccurred() const
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return m_HardwareFallback;
+    }
+
+    void submit(AppleHevcAccessUnit accessUnit,
+                AppleHevcParameterSets parameterSets,
+                QHash<quint32, int> sourceToTile)
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_Stopping || m_RecoveryPending) {
+            return;
+        }
+        Work work;
+        work.kind = Work::Kind::Submit;
+        work.accessUnit = std::move(accessUnit);
+        work.parameterSets = std::move(parameterSets);
+        work.sourceToTile = std::move(sourceToTile);
+        work.generation = m_RequestedGeneration;
+        m_Work.push_back(std::move(work));
+        m_Changed.notify_one();
+    }
+
+    void resetDecodingOrder(bool discardPending = false)
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_Stopping) {
+            return;
+        }
+        if (discardPending) {
+            m_Work.clear();
+        }
+        Work work;
+        work.kind = Work::Kind::ResetDecodingOrder;
+        work.generation = m_RequestedGeneration;
+        m_Work.push_back(std::move(work));
+        m_RecoveryPending = false;
+        m_Changed.notify_one();
+    }
+
+    void resetPipeline(const AppleCanvas& canvas)
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_Stopping || !m_Thread.joinable()) {
+            return;
+        }
+        m_Work.clear();
+        Work work;
+        work.kind = Work::Kind::ResetPipeline;
+        work.canvas = canvas;
+        work.generation = ++m_RequestedGeneration;
+        m_Work.push_back(std::move(work));
+        m_RecoveryPending = false;
+        m_Changed.notify_one();
+    }
+
+    QList<Event> takeEvents()
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        QList<Event> result;
+        result.swap(m_Events);
+        return result;
+    }
+
+    void close()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            if (!m_Thread.joinable()) {
+                return;
+            }
+            m_Stopping = true;
+            m_Work.clear();
+            m_Changed.notify_all();
+        }
+        m_Thread.join();
+    }
+
+private:
+    struct Work
+    {
+        enum class Kind
+        {
+            Submit,
+            ResetDecodingOrder,
+            ResetPipeline,
+        };
+
+        Kind kind = Kind::Submit;
+        AppleHevcAccessUnit accessUnit;
+        AppleHevcParameterSets parameterSets;
+        QHash<quint32, int> sourceToTile;
+        AppleCanvas canvas;
+        quint64 generation = 0;
+    };
+
+    void publishReadyBatches(AppleDecodedFrameBatcher* batcher)
+    {
+        QList<QList<AppleDecodedTile>> batches = batcher->takeReadyBatches();
+        for (QList<AppleDecodedTile>& batch : batches) {
+            m_BatchHandler(std::move(batch));
+        }
+    }
+
+    void appendEvent(Event event, bool recoveryPending = false)
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_Backend = event.backend;
+        m_HardwareFallback = event.hardwareFallback;
+        if (recoveryPending) {
+            // Samples already queued behind a decoder replacement belong to
+            // the old reference generation. The network worker will resume
+            // submission at the next random-access picture.
+            m_Work.clear();
+            m_RecoveryPending = true;
+        }
+        m_Events.append(std::move(event));
+    }
+
+    void run()
+    {
+        auto decoder = std::make_unique<AppleHevcDecoder>(
+                m_PreferHardware, m_TileCount);
+        QString startError;
+        const bool opened = decoder->open(&startError);
+        if (!opened && startError.isEmpty()) {
+            startError = QCoreApplication::translate(
+                    "AppleVideoDecoder",
+                    "The HEVC decoder could not be started.");
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            m_StartError = opened ? QString() : startError;
+            if (opened) {
+                m_Backend = decoder->backend();
+                m_HardwareFallback = decoder->hardwareFallbackOccurred();
+            }
+            m_StartCompleted = true;
+            m_Changed.notify_all();
+        }
+        if (!opened) {
+            return;
+        }
+
+        AppleHevcDecodingOrderQueue decodingOrder;
+        AppleDecodedFrameBatcher frameBatcher;
+        bool notifiedReady = false;
+        quint64 activeGeneration = 0;
+        for (;;) {
+            Work work;
+            {
+                std::unique_lock<std::mutex> lock(m_Mutex);
+                m_Changed.wait(lock, [this]() {
+                    return m_Stopping || !m_Work.empty();
+                });
+                if (m_Stopping) {
+                    break;
+                }
+                work = std::move(m_Work.front());
+                m_Work.pop_front();
+            }
+
+            if (work.kind == Work::Kind::ResetDecodingOrder) {
+                if (work.generation != activeGeneration) {
+                    continue;
+                }
+                decodingOrder.reset();
+                continue;
+            }
+            if (work.kind == Work::Kind::ResetPipeline) {
+                activeGeneration = work.generation;
+                decodingOrder.reset();
+                frameBatcher.reset();
+                decoder->flush();
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                m_Canvas = work.canvas;
+                m_Backend = decoder->backend();
+                m_HardwareFallback = decoder->hardwareFallbackOccurred();
+                continue;
+            }
+
+            const QList<AppleHevcAccessUnit> readyUnits =
+                    decodingOrder.enqueue({std::move(work.accessUnit)});
+            for (const AppleHevcAccessUnit& ready : readyUnits) {
+                {
+                    std::lock_guard<std::mutex> lock(m_Mutex);
+                    if (work.generation != m_RequestedGeneration) {
+                        frameBatcher.reset();
+                        decodingOrder.reset();
+                        break;
+                    }
+                }
+                if (!work.sourceToTile.contains(
+                            ready.synchronizationSource)) {
+                    continue;
+                }
+                const int tile = work.sourceToTile.value(
+                        ready.synchronizationSource);
+                frameBatcher.recordSubmission(ready, tile);
+                publishReadyBatches(&frameBatcher);
+
+                QString decodeError;
+                QElapsedTimer decodeClock;
+                decodeClock.start();
+                const quint64 generation = decoder->generation();
+                QList<AppleDecodedTile> frames = decoder->decode(
+                        ready, work.parameterSets, tile, &decodeError);
+
+                {
+                    std::lock_guard<std::mutex> lock(m_Mutex);
+                    if (work.generation != m_RequestedGeneration) {
+                        frameBatcher.reset();
+                        decodingOrder.reset();
+                        break;
+                    }
+                }
+
+                Event event;
+                event.decodeNanoseconds = decodeClock.nsecsElapsed();
+                event.backend = decoder->backend();
+                event.hardwareFallback =
+                        decoder->hardwareFallbackOccurred();
+                if (decoder->generation() != generation) {
+                    frameBatcher.reset();
+                    decodingOrder.reset();
+                    event.type = Event::Type::DecoderReset;
+                    event.error = decodeError;
+                    appendEvent(std::move(event), true);
+                    break;
+                }
+
+                for (const AppleDecodedTile& frame : std::as_const(frames)) {
+                    event.decodedTimestamps.append(frame.rtpTimestamp);
+                }
+                if (!frames.isEmpty()) {
+                    event.type = Event::Type::Decoded;
+                    frameBatcher.recordDecodedFrames(std::move(frames));
+                    publishReadyBatches(&frameBatcher);
+                    if (!notifiedReady) {
+                        notifiedReady = true;
+                        AppleCanvas canvas;
+                        {
+                            std::lock_guard<std::mutex> lock(m_Mutex);
+                            canvas = m_Canvas;
+                        }
+                        m_ReadyHandler(
+                                canvas,
+                                decoder->backend(),
+                                decoder->hardwareFallbackOccurred(),
+                                decoder->presentationContext());
+                    }
+                }
+                else if (!decodeError.isEmpty()) {
+                    event.type = Event::Type::DecodeFailure;
+                    event.error = decodeError;
+                    frameBatcher.recordDecodeFailure(
+                            ready.frameSequenceNumber, tile);
+                    publishReadyBatches(&frameBatcher);
+                }
+                appendEvent(std::move(event));
+            }
+        }
+        decoder->close();
+    }
+
+    const bool m_PreferHardware;
+    const int m_TileCount;
+    mutable std::mutex m_Mutex;
+    std::condition_variable m_Changed;
+    std::thread m_Thread;
+    std::deque<Work> m_Work;
+    QList<Event> m_Events;
+    AppleCanvas m_Canvas;
+    BatchHandler m_BatchHandler;
+    ReadyHandler m_ReadyHandler;
+    QString m_StartError;
+    AppleVideoDecoderBackend m_Backend =
+            AppleVideoDecoderBackend::Software;
+    bool m_HardwareFallback = false;
+    bool m_StartCompleted = false;
+    bool m_Stopping = false;
+    bool m_RecoveryPending = false;
+    quint64 m_RequestedGeneration = 0;
+};
+
 class AppleHighPerformanceSessionTask final : public QRunnable
 {
 public:
@@ -770,12 +1167,9 @@ private:
             }
         }
         AppleHevcAssembler assembler;
-        AppleHevcDecodingOrderQueue decodingOrder;
-        AppleDecodedFrameBatcher frameBatcher;
         QList<quint32> sources;
         QSet<quint32> abandonedSources;
         QHash<quint32, int> sourceToTile;
-        std::unique_ptr<AppleHevcDecoder> decoder;
         QElapsedTimer clock;
         clock.start();
         qint64 firstPacketAt = -1;
@@ -786,7 +1180,6 @@ private:
         qint64 lastRateControlAt = 0;
         qint64 lastKeyFrameAt = -KeyFrameRetryIntervalMs;
         quint8 keyFrameSequence = 0;
-        bool notifiedMediaReady = false;
         AppleVideoDecoderBackend decoderBackend =
                 AppleVideoDecoderBackend::Software;
         bool hardwareFallback = false;
@@ -812,6 +1205,37 @@ private:
         AppleCanvas activeCanvas = negotiation.canvas;
         bool hasReceivedInitialLayout = false;
         qint64 dynamicResolutionResponsePendingAt = -1;
+        ApplePrimaryVideoDecodeQueue decoderQueue(
+                m_PreferHardware,
+                activeCanvas.tileCount,
+                activeCanvas,
+                [session = QPointer<AppleScreenSharingSession>(m_Session)](
+                        QList<AppleDecodedTile> frames) mutable {
+                    if (session != nullptr) {
+                        session->queueDecodedFrames(std::move(frames));
+                    }
+                },
+                [session = QPointer<AppleScreenSharingSession>(m_Session)](
+                        const AppleCanvas& canvas,
+                        AppleVideoDecoderBackend backend,
+                        bool fallback,
+                        std::shared_ptr<AppleVideoBackendContext> context) {
+                    if (session == nullptr) {
+                        return;
+                    }
+                    session->m_EverMediaReady.store(true);
+                    QMetaObject::invokeMethod(
+                            session,
+                            [session, canvas, backend, fallback,
+                             context = std::move(context)]() mutable {
+                                if (session != nullptr) {
+                                    session->mediaReady(
+                                            canvas, backend, fallback,
+                                            std::move(context));
+                                }
+                            },
+                            Qt::QueuedConnection);
+                });
 
         for (const QByteArray& pending : negotiation.pendingMessages) {
             const AppleControlEvents events =
@@ -834,13 +1258,11 @@ private:
 
         auto resetVideoPipeline = [&]() {
             assembler = AppleHevcAssembler();
-            decodingOrder.reset();
-            frameBatcher.reset();
             sources.clear();
             abandonedSources.clear();
             sourceToTile.clear();
-            if (decoder) {
-                decoder->flush();
+            if (decoderQueue.isStarted()) {
+                decoderQueue.resetPipeline(activeCanvas);
             }
             firstPacketAt = -1;
             videoWaitStartedAt = clock.elapsed();
@@ -876,6 +1298,82 @@ private:
                         }
                     },
                     Qt::QueuedConnection);
+        };
+
+        const auto processDecoderEvents = [&](qint64 now) {
+            for (const ApplePrimaryVideoDecodeQueue::Event& event :
+                 decoderQueue.takeEvents()) {
+                ++performanceDecodeCalls;
+                performanceDecodeNanoseconds += event.decodeNanoseconds;
+                performanceDecodedTiles += static_cast<quint64>(
+                        event.decodedTimestamps.size());
+                decoderBackend = event.backend;
+                hardwareFallback = event.hardwareFallback;
+                for (quint32 timestamp : event.decodedTimestamps) {
+                    if (performanceDecodedSourceTimestamps.contains(timestamp)) {
+                        continue;
+                    }
+                    performanceDecodedSourceTimestamps.insert(timestamp);
+                    if (lastPerformanceSourceTimestamp.has_value() &&
+                            *lastPerformanceSourceTimestamp != timestamp &&
+                            lastPerformanceSourceFrameAt >= 0) {
+                        performanceSourceFrameIntervals.append(
+                                now - lastPerformanceSourceFrameAt);
+                        const quint32 rtpDelta = timestamp -
+                                *lastPerformanceSourceTimestamp;
+                        if (rtpDelta < 0x7fffffffU) {
+                            performanceRtpFrameIntervals.append(
+                                    rtpDelta * 1000.0 / 90000.0);
+                        }
+                    }
+                    lastPerformanceSourceTimestamp = timestamp;
+                    lastPerformanceSourceFrameAt = now;
+                }
+                if (!event.decodedTimestamps.isEmpty()) {
+                    lastDecodedAt = now;
+                }
+
+                if (event.type ==
+                        ApplePrimaryVideoDecodeQueue::Event::Type::DecoderReset) {
+                    assembler.discardIncomplete();
+                    awaitingRandomAccessPicture = true;
+                    hasEnteredDecodeRefreshState = true;
+                    if (!sources.isEmpty() &&
+                            !requestKeyFrames(
+                                    media, feedback,
+                                    negotiation.offers.videoSynchronizationSource,
+                                    sources, &keyFrameSequence, error)) {
+                        return false;
+                    }
+                    performanceFirs += static_cast<quint64>(sources.size());
+                    lastKeyFrameAt = now;
+                    qWarning().noquote()
+                            << "Apple HEVC decoder reset:"
+                            << event.error
+                            << "backend="
+                            << appleVideoDecoderBackendName(event.backend);
+                    continue;
+                }
+
+                if (event.type ==
+                            ApplePrimaryVideoDecodeQueue::Event::Type::DecodeFailure &&
+                        now - lastKeyFrameAt >= KeyFrameRetryIntervalMs) {
+                    if (!requestKeyFrames(
+                                media, feedback,
+                                negotiation.offers.videoSynchronizationSource,
+                                sources, &keyFrameSequence, error)) {
+                        return false;
+                    }
+                    performanceFirs += static_cast<quint64>(sources.size());
+                    if (!hasEnteredDecodeRefreshState) {
+                        hasEnteredDecodeRefreshState = true;
+                        assembler.discardIncomplete();
+                        decoderQueue.resetDecodingOrder(true);
+                    }
+                    lastKeyFrameAt = now;
+                }
+            }
+            return true;
         };
 
         while (!m_Cancelled->load()) {
@@ -1112,7 +1610,7 @@ private:
                 return false;
             }
 
-            const qint64 now = clock.elapsed();
+            qint64 now = clock.elapsed();
             if (dynamicResolutionResponsePendingAt >= 0 &&
                     now - dynamicResolutionResponsePendingAt >= 3000) {
                 qWarning() << "Apple Screen Sharing dynamic resolution timed out waiting for a layout or media canvas response";
@@ -1125,27 +1623,31 @@ private:
             else {
                 media.drainControl();
             }
-            QByteArray datagram;
+            QList<AppleReceivedVideoDatagram> datagrams;
             QString receiveError;
             bool primaryReceived = false;
-            if (media.receiveVideo(&datagram,
-                                   secondaryVideo ? 0 :
-                                                    RealtimeMediaPollTimeoutMs,
-                                   m_Cancelled,
-                                   &receiveError)) {
+            if (media.receiveAvailableVideo(
+                        0, &datagrams,
+                        secondaryVideo ? 0 : RealtimeMediaPollTimeoutMs,
+                        m_Cancelled, &receiveError)) {
                 primaryReceived = true;
-                AppleRtpPacket packet;
-                if (decryptor.decrypt(datagram, &packet, nullptr)) {
-                    ++performancePackets;
-                    performanceBytes += static_cast<quint64>(datagram.size());
-                    if (firstPacketAt < 0) {
-                        firstPacketAt = now;
+                for (AppleReceivedVideoDatagram& received : datagrams) {
+                    AppleRtpPacket packet;
+                    if (!decryptor.decrypt(received.data, &packet, nullptr)) {
+                        continue;
                     }
-                    lastPacketAt = now;
+                    const qint64 packetNow = clock.elapsed();
+                    ++performancePackets;
+                    performanceBytes += static_cast<quint64>(
+                            received.data.size());
+                    if (firstPacketAt < 0) {
+                        firstPacketAt = packetNow;
+                    }
+                    lastPacketAt = packetNow;
                     AppleHevcAccessUnit accessUnit;
                     const bool completed = assembler.process(
-                            packet, now, &accessUnit,
-                            static_cast<qint64>(steadyNanoseconds()));
+                            packet, packetNow, &accessUnit,
+                            received.arrivalNanoseconds);
                     if (completed) {
                         ++performanceAccessUnits;
                     }
@@ -1160,29 +1662,28 @@ private:
                             return assembler.completedSources().contains(source);
                         });
                         const bool burstSettled = assembler.totalPacketCount() >= 100 ||
-                                (firstPacketAt >= 0 && now - firstPacketAt >= 2300);
+                                (firstPacketAt >= 0 &&
+                                 packetNow - firstPacketAt >= 2300);
                         if (candidatesComplete && burstSettled) {
                             sources = candidates;
                             for (int index = 0; index < sources.size(); ++index) {
                                 sourceToTile.insert(sources.at(index), index);
                             }
-                            if (!decoder) {
-                                decoder = std::make_unique<AppleHevcDecoder>(
-                                        m_PreferHardware,
-                                        activeCanvas.tileCount);
-                                if (!decoder->open(error)) {
+                            if (!decoderQueue.isStarted()) {
+                                if (!decoderQueue.start(error)) {
                                     return false;
                                 }
                             }
-                            decoderBackend = decoder->backend();
-                            hardwareFallback = decoder->hardwareFallbackOccurred();
+                            decoderBackend = decoderQueue.backend();
+                            hardwareFallback =
+                                    decoderQueue.hardwareFallbackOccurred();
                             if (!requestKeyFrames(media, feedback,
                                                   negotiation.offers.videoSynchronizationSource,
                                                   sources, &keyFrameSequence, error)) {
                                 return false;
                             }
                             performanceFirs += static_cast<quint64>(sources.size());
-                            lastKeyFrameAt = now;
+                            lastKeyFrameAt = packetNow;
                             awaitingRandomAccessPicture = true;
                         }
                     }
@@ -1193,157 +1694,13 @@ private:
                             if (!accessUnit.containsRandomAccessPicture()) {
                                 continue;
                             }
-                            // The decoder has no valid reference history until
-                            // the first post-FIR random-access picture. Start
-                            // DON admission at this clean boundary instead of
-                            // feeding stale inter pictures into a new context.
-                            decodingOrder.reset();
+                            decoderQueue.resetDecodingOrder();
                             awaitingRandomAccessPicture = false;
                         }
-                        const QList<AppleHevcAccessUnit> readyUnits =
-                                decodingOrder.enqueue({accessUnit});
-                        for (const AppleHevcAccessUnit& ready : readyUnits) {
-                            const int tile = sourceToTile.value(
-                                    ready.synchronizationSource);
-                            frameBatcher.recordSubmission(ready, tile);
-                            QList<QList<AppleDecodedTile>> readyBatches =
-                                    frameBatcher.takeReadyBatches();
-                            for (QList<AppleDecodedTile>& batch : readyBatches) {
-                                m_Session->queueDecodedFrames(std::move(batch));
-                            }
-                            QString decodeError;
-                            QElapsedTimer decodeClock;
-                            decodeClock.start();
-                            ++performanceDecodeCalls;
-                            const quint64 decoderGeneration =
-                                    decoder->generation();
-                            QList<AppleDecodedTile> frames = decoder->decode(
-                                    ready, assembler.parameterSets(), tile,
-                                    &decodeError);
-                            performanceDecodeNanoseconds += decodeClock.nsecsElapsed();
-                            performanceDecodedTiles +=
-                                    static_cast<quint64>(frames.size());
-                            if (decoder->generation() != decoderGeneration) {
-                                // FFmpeg has no VideoToolbox-style completion
-                                // callback for an accepted sample that later
-                                // produces no frame. A codec replacement is
-                                // therefore an explicit discontinuity across
-                                // the decoder, DON queue, and tile batcher.
-                                frames.clear();
-                                frameBatcher.reset();
-                                assembler.discardIncomplete();
-                                decodingOrder.reset();
-                                awaitingRandomAccessPicture = true;
-                                hasEnteredDecodeRefreshState = true;
-                                decoderBackend = decoder->backend();
-                                hardwareFallback =
-                                        decoder->hardwareFallbackOccurred();
-                                if (!requestKeyFrames(
-                                            media, feedback,
-                                            negotiation.offers.videoSynchronizationSource,
-                                            sources, &keyFrameSequence, error)) {
-                                    return false;
-                                }
-                                performanceFirs += static_cast<quint64>(
-                                        sources.size());
-                                lastKeyFrameAt = now;
-                                qWarning().noquote()
-                                        << "Apple HEVC decoder reset:"
-                                        << decodeError
-                                        << "backend="
-                                        << appleVideoDecoderBackendName(
-                                                   decoderBackend);
-                                continue;
-                            }
-                            for (const AppleDecodedTile& frame : frames) {
-                                if (!performanceDecodedSourceTimestamps.contains(
-                                            frame.rtpTimestamp)) {
-                                    performanceDecodedSourceTimestamps.insert(
-                                            frame.rtpTimestamp);
-                                    const qint64 sourceFrameAt = clock.elapsed();
-                                    if (lastPerformanceSourceTimestamp.has_value() &&
-                                            *lastPerformanceSourceTimestamp !=
-                                                    frame.rtpTimestamp &&
-                                            lastPerformanceSourceFrameAt >= 0) {
-                                        performanceSourceFrameIntervals.append(
-                                                sourceFrameAt -
-                                                lastPerformanceSourceFrameAt);
-                                        const quint32 rtpDelta =
-                                                frame.rtpTimestamp -
-                                                *lastPerformanceSourceTimestamp;
-                                        if (rtpDelta < 0x7fffffffU) {
-                                            performanceRtpFrameIntervals.append(
-                                                    rtpDelta * 1000.0 / 90000.0);
-                                        }
-                                    }
-                                    lastPerformanceSourceTimestamp = frame.rtpTimestamp;
-                                    lastPerformanceSourceFrameAt = sourceFrameAt;
-                                }
-                            }
-                            hardwareFallback = decoder->hardwareFallbackOccurred();
-                            decoderBackend = decoder->backend();
-                            if (!frames.isEmpty()) {
-                                lastDecodedAt = clock.elapsed();
-                                frameBatcher.recordDecodedFrames(std::move(frames));
-                                readyBatches = frameBatcher.takeReadyBatches();
-                                for (QList<AppleDecodedTile>& batch : readyBatches) {
-                                    m_Session->queueDecodedFrames(std::move(batch));
-                                }
-                                if (!notifiedMediaReady) {
-                                    notifiedMediaReady = true;
-                                    m_Session->m_EverMediaReady.store(true);
-                                    const QPointer<AppleScreenSharingSession> session = m_Session;
-                                    const AppleCanvas canvas = activeCanvas;
-                                    const AppleVideoDecoderBackend decoderBackend =
-                                            decoder->backend();
-                                    const std::shared_ptr<AppleVideoBackendContext>
-                                            decoderContext =
-                                                    decoder->presentationContext();
-                                    QMetaObject::invokeMethod(
-                                            session,
-                                            [session, canvas, decoderBackend,
-                                             hardwareFallback, decoderContext]() {
-                                                if (session != nullptr) {
-                                                    session->mediaReady(canvas,
-                                                                        decoderBackend,
-                                                                        hardwareFallback,
-                                                                        decoderContext);
-                                                }
-                                            },
-                                            Qt::QueuedConnection);
-                                }
-                            }
-                            else if (!decodeError.isEmpty()) {
-                                frameBatcher.recordDecodeFailure(
-                                        ready.frameSequenceNumber, tile);
-                                readyBatches = frameBatcher.takeReadyBatches();
-                                for (QList<AppleDecodedTile>& batch : readyBatches) {
-                                    m_Session->queueDecodedFrames(std::move(batch));
-                                }
-                                if (now - lastKeyFrameAt >=
-                                        KeyFrameRetryIntervalMs) {
-                                    if (!requestKeyFrames(
-                                                media, feedback,
-                                                negotiation.offers.videoSynchronizationSource,
-                                                sources, &keyFrameSequence, error)) {
-                                        return false;
-                                    }
-                                    performanceFirs += static_cast<quint64>(
-                                            sources.size());
-                                    // Native AVConference discards buffered
-                                    // access units only when first entering
-                                    // refresh recovery. It keeps submitting
-                                    // later units so a usable reference can
-                                    // recover the decoder without a freeze.
-                                    if (!hasEnteredDecodeRefreshState) {
-                                        hasEnteredDecodeRefreshState = true;
-                                        assembler.discardIncomplete();
-                                        decodingOrder.reset();
-                                    }
-                                    lastKeyFrameAt = now;
-                                }
-                            }
-                        }
+                        decoderQueue.submit(
+                                std::move(accessUnit),
+                                assembler.parameterSets(),
+                                sourceToTile);
                     }
                 }
             }
@@ -1351,6 +1708,10 @@ private:
                 if (error != nullptr) {
                     *error = receiveError;
                 }
+                return false;
+            }
+            now = clock.elapsed();
+            if (!processDecoderEvents(now)) {
                 return false;
             }
             bool secondaryReceived = false;
@@ -1389,10 +1750,8 @@ private:
                         for (int index = 0; index < sources.size(); ++index) {
                             sourceToTile.insert(sources.at(index), index);
                         }
-                        frameBatcher.reset();
-                        decodingOrder.reset();
                         assembler.discardIncomplete();
-                        decoder->flush();
+                        decoderQueue.resetPipeline(activeCanvas);
                         awaitingRandomAccessPicture = true;
                         hasEnteredDecodeRefreshState = false;
                         lastDecodedAt = now;
@@ -1477,7 +1836,7 @@ private:
                         return false;
                     }
                     performanceFirs += static_cast<quint64>(sources.size());
-                    decodingOrder.reset();
+                    decoderQueue.resetDecodingOrder(true);
                     if (awaitingFirstFrame) {
                         assembler.discardIncomplete();
                     }

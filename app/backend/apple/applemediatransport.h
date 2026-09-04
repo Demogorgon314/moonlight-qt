@@ -12,6 +12,12 @@ class AppleControlChannel;
 class AppleTcpTransport;
 class QUdpSocket;
 
+struct AppleReceivedVideoDatagram
+{
+    QByteArray data;
+    qint64 arrivalNanoseconds = 0;
+};
+
 class AppleMediaTransport
 {
 public:
@@ -45,6 +51,12 @@ public:
                       int timeoutMilliseconds,
                       std::atomic_bool* cancelled,
                       QString* error = nullptr);
+    bool receiveAvailableVideo(
+            int mediaStreamIndex,
+            QList<AppleReceivedVideoDatagram>* datagrams,
+            int timeoutMilliseconds,
+            std::atomic_bool* cancelled,
+            QString* error = nullptr);
     QList<QByteArray> drainControl();
     bool sendVideoControl(const QByteArray& datagram,
                           QString* error = nullptr);
