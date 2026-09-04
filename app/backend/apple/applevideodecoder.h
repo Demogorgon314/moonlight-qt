@@ -66,6 +66,7 @@ struct AppleDecodedTile
     quint32 rtpTimestamp = 0;
     quint64 decodeSubmittedAtNanoseconds = 0;
     std::optional<quint16> frameSequenceNumber;
+    std::optional<quint16> longTermReferenceDecodingOrderNumber;
     PixelFormat pixelFormat = PixelFormat::Nv12;
     ColorSpace colorSpace = ColorSpace::Unknown;
     ColorRange colorRange = ColorRange::Unknown;
@@ -159,6 +160,7 @@ private:
                                          int tileIndex,
                                          quint32 timestamp,
                                          std::optional<quint16> frameSequenceNumber,
+                                         std::optional<quint16> longTermReferenceDecodingOrderNumber,
                                          QString* error);
     AppleDecodedTile convertFrame(AVFrame* frame,
                                   int tileIndex,

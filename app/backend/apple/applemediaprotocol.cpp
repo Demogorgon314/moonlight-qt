@@ -1233,6 +1233,17 @@ QList<QByteArray> fullIntraRequests(quint32 sender,
     return packets;
 }
 
+QByteArray longTermReferenceAcknowledgement(
+        quint32 sender,
+        quint16 decodingOrderNumber)
+{
+    QByteArray packet = QByteArray::fromHex("80cc0003");
+    AppleWire::appendUInt32(packet, sender);
+    AppleWire::appendUInt32(packet, 5);
+    AppleWire::appendUInt32(packet, decodingOrderNumber);
+    return packet;
+}
+
 QByteArray rateControl(quint32 sender,
                        quint32 rtpTimestamp,
                        quint32 estimatedBandwidthKilobitsPerSecond,
@@ -1661,8 +1672,8 @@ bool AppleSrtpDecryptor::decrypt(const QByteArray& datagram,
     return false;
 }
 
-std::optional<AppleRtpPacket::FramePacketInfo>
-AppleRtpPacket::framePacketInfo() const
+std::optional<AppleRtpPacket::MediaControlExtension>
+AppleRtpPacket::mediaControlExtension() const
 {
     if (header.size() < 12 || (byteAt(header, 0) & 0x10) == 0) {
         return std::nullopt;
@@ -1676,18 +1687,37 @@ AppleRtpPacket::framePacketInfo() const
         return std::nullopt;
     }
     const int endOffset = extensionOffset + 4 + wordCount * 4;
-    const quint8 controlByte = byteAt(header, extensionOffset + 1);
     const int infoOffset = extensionOffset + 4;
-    if ((controlByte & 0x01) == 0 || endOffset > header.size() ||
-            infoOffset + 4 > endOffset) {
+    if (endOffset > header.size()) {
+        return std::nullopt;
+    }
+    return MediaControlExtension{
+        byteAt(header, extensionOffset + 1), infoOffset, endOffset,
+    };
+}
+
+bool AppleRtpPacket::isLongTermReferenceFrame() const
+{
+    const auto extension = mediaControlExtension();
+    return extension.has_value() &&
+            (extension->controlByte & 0x10) != 0;
+}
+
+std::optional<AppleRtpPacket::FramePacketInfo>
+AppleRtpPacket::framePacketInfo() const
+{
+    const auto extension = mediaControlExtension();
+    if (!extension.has_value() ||
+            (extension->controlByte & 0x01) == 0 ||
+            extension->infoOffset + 4 > extension->endOffset) {
         return std::nullopt;
     }
     bool packetCountOk = false;
     bool frameSequenceOk = false;
     const quint16 packetCount = AppleWire::readUInt16(
-            header, infoOffset, &packetCountOk);
+            header, extension->infoOffset, &packetCountOk);
     const quint16 frameSequence = AppleWire::readUInt16(
-            header, infoOffset + 2, &frameSequenceOk);
+            header, extension->infoOffset + 2, &frameSequenceOk);
     if (!packetCountOk || !frameSequenceOk) {
         return std::nullopt;
     }
@@ -2088,6 +2118,8 @@ bool AppleHevcAssembler::process(const AppleRtpPacket& packet,
     PendingAccessUnit group = m_Groups.value(key);
     if (group.firstSeenAt == 0) {
         group.firstSeenAt = nowMilliseconds;
+        group.isLongTermReferenceFrame =
+                packet.isLongTermReferenceFrame();
     }
     const std::optional<quint16> decodingOrder =
             firstDecodingOrderNumber(packet.payload);
@@ -2155,6 +2187,8 @@ bool AppleHevcAssembler::process(const AppleRtpPacket& packet,
     accessUnit->decodingOrderNumber = group.decodingOrderNumber;
     accessUnit->frameSequenceNumber = group.frameSequenceNumber;
     accessUnit->totalPacketsPerFrame = group.totalPacketsPerFrame;
+    accessUnit->isLongTermReferenceFrame =
+            group.isLongTermReferenceFrame;
     accessUnit->nalUnits = units;
     accessUnit->subframeBoundary = subframeBoundary(units);
     return true;

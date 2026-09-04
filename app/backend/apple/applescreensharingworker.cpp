@@ -205,6 +205,17 @@ private:
                 return true;
             }
             if (!frames.isEmpty()) {
+                for (const AppleDecodedTile& frame : std::as_const(frames)) {
+                    if (frame.longTermReferenceDecodingOrderNumber.has_value() &&
+                            !sendFeedback(
+                                    media,
+                                    AppleMediaWire::longTermReferenceAcknowledgement(
+                                            m_Negotiation.synchronizationSource,
+                                            *frame.longTermReferenceDecodingOrderNumber),
+                                    error)) {
+                        return false;
+                    }
+                }
                 m_PerformanceDecodedTiles +=
                         static_cast<quint64>(frames.size());
                 if (!m_PerformanceDecodedSourceTimestamps.contains(
@@ -515,6 +526,7 @@ public:
         Type type = Type::Decoded;
         quint64 decodeNanoseconds = 0;
         QList<quint32> decodedTimestamps;
+        QList<quint16> decodedLongTermReferences;
         QString error;
         AppleVideoDecoderBackend backend =
                 AppleVideoDecoderBackend::Software;
@@ -839,6 +851,10 @@ private:
 
                 for (const AppleDecodedTile& frame : std::as_const(frames)) {
                     event.decodedTimestamps.append(frame.rtpTimestamp);
+                    if (frame.longTermReferenceDecodingOrderNumber.has_value()) {
+                        event.decodedLongTermReferences.append(
+                                *frame.longTermReferenceDecodingOrderNumber);
+                    }
                 }
                 if (!frames.isEmpty()) {
                     event.type = Event::Type::Decoded;
@@ -1303,6 +1319,17 @@ private:
         const auto processDecoderEvents = [&](qint64 now) {
             for (const ApplePrimaryVideoDecodeQueue::Event& event :
                  decoderQueue.takeEvents()) {
+                for (quint16 decodingOrderNumber :
+                     event.decodedLongTermReferences) {
+                    if (!sendFeedback(
+                                media, feedback,
+                                AppleMediaWire::longTermReferenceAcknowledgement(
+                                        negotiation.offers.videoSynchronizationSource,
+                                        decodingOrderNumber),
+                                error)) {
+                        return false;
+                    }
+                }
                 ++performanceDecodeCalls;
                 performanceDecodeNanoseconds += event.decodeNanoseconds;
                 performanceDecodedTiles += static_cast<quint64>(
@@ -1623,80 +1650,78 @@ private:
             else {
                 media.drainControl();
             }
-            QList<AppleReceivedVideoDatagram> datagrams;
+            QByteArray datagram;
             QString receiveError;
             bool primaryReceived = false;
-            if (media.receiveAvailableVideo(
-                        0, &datagrams,
+            if (media.receiveVideo(
+                        0, &datagram,
                         secondaryVideo ? 0 : RealtimeMediaPollTimeoutMs,
                         m_Cancelled, &receiveError)) {
                 primaryReceived = true;
-                for (AppleReceivedVideoDatagram& received : datagrams) {
-                    AppleRtpPacket packet;
-                    if (!decryptor.decrypt(received.data, &packet, nullptr)) {
-                        continue;
-                    }
-                    const qint64 packetNow = clock.elapsed();
-                    ++performancePackets;
-                    performanceBytes += static_cast<quint64>(
-                            received.data.size());
-                    if (firstPacketAt < 0) {
-                        firstPacketAt = packetNow;
-                    }
-                    lastPacketAt = packetNow;
-                    AppleHevcAccessUnit accessUnit;
-                    const bool completed = assembler.process(
-                            packet, packetNow, &accessUnit,
-                            received.arrivalNanoseconds);
-                    if (completed) {
-                        ++performanceAccessUnits;
-                    }
+                AppleRtpPacket packet;
+                if (!decryptor.decrypt(datagram, &packet, nullptr)) {
+                    continue;
+                }
+                const qint64 packetNow = clock.elapsed();
+                ++performancePackets;
+                performanceBytes += static_cast<quint64>(datagram.size());
+                if (firstPacketAt < 0) {
+                    firstPacketAt = packetNow;
+                }
+                lastPacketAt = packetNow;
+                AppleHevcAccessUnit accessUnit;
+                const bool completed = assembler.process(
+                        packet, packetNow, &accessUnit,
+                        static_cast<qint64>(steadyNanoseconds()));
+                if (completed) {
+                    ++performanceAccessUnits;
+                }
 
-                    if (sources.isEmpty() && assembler.parameterSets().isComplete()) {
-                        const QList<quint32> candidates = assembler.primarySources(
-                                activeCanvas.tileCount);
-                        const bool candidatesComplete = candidates.size() ==
-                                activeCanvas.tileCount &&
-                                std::all_of(candidates.cbegin(), candidates.cend(),
-                                            [&assembler](quint32 source) {
-                            return assembler.completedSources().contains(source);
-                        });
-                        const bool burstSettled = assembler.totalPacketCount() >= 100 ||
-                                (firstPacketAt >= 0 &&
-                                 packetNow - firstPacketAt >= 2300);
-                        if (candidatesComplete && burstSettled) {
-                            sources = candidates;
-                            for (int index = 0; index < sources.size(); ++index) {
-                                sourceToTile.insert(sources.at(index), index);
-                            }
-                            if (!decoderQueue.isStarted()) {
-                                if (!decoderQueue.start(error)) {
-                                    return false;
-                                }
-                            }
-                            decoderBackend = decoderQueue.backend();
-                            hardwareFallback =
-                                    decoderQueue.hardwareFallbackOccurred();
-                            if (!requestKeyFrames(media, feedback,
-                                                  negotiation.offers.videoSynchronizationSource,
-                                                  sources, &keyFrameSequence, error)) {
+                if (sources.isEmpty() && assembler.parameterSets().isComplete()) {
+                    const QList<quint32> candidates = assembler.primarySources(
+                            activeCanvas.tileCount);
+                    const bool candidatesComplete = candidates.size() ==
+                            activeCanvas.tileCount &&
+                            std::all_of(candidates.cbegin(), candidates.cend(),
+                                        [&assembler](quint32 source) {
+                        return assembler.completedSources().contains(source);
+                    });
+                    const bool burstSettled = assembler.totalPacketCount() >= 100 ||
+                            (firstPacketAt >= 0 &&
+                             packetNow - firstPacketAt >= 2300);
+                    if (candidatesComplete && burstSettled) {
+                        sources = candidates;
+                        for (int index = 0; index < sources.size(); ++index) {
+                            sourceToTile.insert(sources.at(index), index);
+                        }
+                        if (!decoderQueue.isStarted()) {
+                            if (!decoderQueue.start(error)) {
                                 return false;
                             }
-                            performanceFirs += static_cast<quint64>(sources.size());
-                            lastKeyFrameAt = packetNow;
-                            awaitingRandomAccessPicture = true;
                         }
+                        decoderBackend = decoderQueue.backend();
+                        hardwareFallback =
+                                decoderQueue.hardwareFallbackOccurred();
+                        if (!requestKeyFrames(media, feedback,
+                                              negotiation.offers.videoSynchronizationSource,
+                                              sources, &keyFrameSequence, error)) {
+                            return false;
+                        }
+                        performanceFirs += static_cast<quint64>(sources.size());
+                        lastKeyFrameAt = packetNow;
+                        awaitingRandomAccessPicture = true;
                     }
+                }
 
-                    if (completed && sourceToTile.contains(
-                                accessUnit.synchronizationSource)) {
-                        if (awaitingRandomAccessPicture) {
-                            if (!accessUnit.containsRandomAccessPicture()) {
-                                continue;
-                            }
+                if (completed && sourceToTile.contains(
+                            accessUnit.synchronizationSource)) {
+                    if (awaitingRandomAccessPicture) {
+                        if (accessUnit.containsRandomAccessPicture()) {
                             decoderQueue.resetDecodingOrder();
                             awaitingRandomAccessPicture = false;
                         }
+                    }
+                    if (!awaitingRandomAccessPicture) {
                         decoderQueue.submit(
                                 std::move(accessUnit),
                                 assembler.parameterSets(),

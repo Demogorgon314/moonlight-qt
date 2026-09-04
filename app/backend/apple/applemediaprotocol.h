@@ -307,6 +307,9 @@ QByteArray fullIntraRequest(quint32 sender,
 QList<QByteArray> fullIntraRequests(quint32 sender,
                                     const QList<quint32>& mediaSources,
                                     quint8 initialSequence);
+QByteArray longTermReferenceAcknowledgement(
+        quint32 sender,
+        quint16 decodingOrderNumber);
 QByteArray rateControl(quint32 sender,
                        quint32 rtpTimestamp,
                        quint32 estimatedBandwidthKilobitsPerSecond,
@@ -340,7 +343,18 @@ struct AppleRtpPacket
     quint8 payloadType = 0;
     bool marker = false;
 
+    bool isLongTermReferenceFrame() const;
     std::optional<FramePacketInfo> framePacketInfo() const;
+
+private:
+    struct MediaControlExtension
+    {
+        quint8 controlByte = 0;
+        int infoOffset = 0;
+        int endOffset = 0;
+    };
+
+    std::optional<MediaControlExtension> mediaControlExtension() const;
 };
 
 class AppleSrtpDecryptor
@@ -416,6 +430,7 @@ struct AppleHevcAccessUnit
     std::optional<quint16> decodingOrderNumber;
     std::optional<quint16> frameSequenceNumber;
     std::optional<quint16> totalPacketsPerFrame;
+    bool isLongTermReferenceFrame = false;
     QList<QByteArray> nalUnits;
     SubframeBoundary subframeBoundary = SubframeBoundary::Unknown;
 
@@ -488,6 +503,7 @@ private:
         std::optional<quint16> decodingOrderNumber;
         std::optional<quint16> frameSequenceNumber;
         std::optional<quint16> totalPacketsPerFrame;
+        bool isLongTermReferenceFrame = false;
         QList<PendingPacket> packets;
     };
 

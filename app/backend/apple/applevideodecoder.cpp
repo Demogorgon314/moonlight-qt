@@ -40,6 +40,8 @@ struct AppleDecodedFrameMetadata
     quint64 decodeSubmittedAtNanoseconds;
     quint16 frameSequenceNumber;
     quint16 hasFrameSequenceNumber;
+    quint16 longTermReferenceDecodingOrderNumber;
+    quint16 hasLongTermReferenceDecodingOrderNumber;
 };
 
 quint64 steadyNanoseconds()
@@ -513,7 +515,12 @@ QList<AppleDecodedTile> AppleHevcDecoder::decode(
     QString decodeError;
     QList<AppleDecodedTile> frames = decodePacket(
             packet, tileIndex, accessUnit.timestamp,
-            accessUnit.frameSequenceNumber, &decodeError);
+            accessUnit.frameSequenceNumber,
+            accessUnit.isLongTermReferenceFrame &&
+                    accessUnit.decodingOrderNumber.value_or(0) != 0
+                            ? accessUnit.decodingOrderNumber
+                            : std::nullopt,
+            &decodeError);
     if (decodeError.isEmpty() || m_Backend == Backend::Software) {
         if (decodeError.isEmpty() && !frames.isEmpty() &&
                 m_Backend != Backend::Software) {
@@ -559,6 +566,7 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
         int tileIndex,
         quint32 timestamp,
         std::optional<quint16> frameSequenceNumber,
+        std::optional<quint16> longTermReferenceDecodingOrderNumber,
         QString* error)
 {
     QList<AppleDecodedTile> result;
@@ -583,6 +591,9 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
         steadyNanoseconds(),
         frameSequenceNumber.value_or(0),
         static_cast<quint16>(frameSequenceNumber.has_value()),
+        longTermReferenceDecodingOrderNumber.value_or(0),
+        static_cast<quint16>(
+                longTermReferenceDecodingOrderNumber.has_value()),
     };
     std::memcpy(m_Packet->opaque_ref->data, &metadata, sizeof(metadata));
     auto receiveAvailableFrames = [&]() -> int {
@@ -604,6 +615,8 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
             quint32 outputTimestamp = timestamp;
             quint64 outputDecodeSubmittedAtNanoseconds = 0;
             std::optional<quint16> outputFrameSequenceNumber = frameSequenceNumber;
+            std::optional<quint16> outputLongTermReferenceDecodingOrderNumber =
+                    longTermReferenceDecodingOrderNumber;
             if (m_Frame->opaque_ref != nullptr &&
                     m_Frame->opaque_ref->size >= sizeof(AppleDecodedFrameMetadata)) {
                 AppleDecodedFrameMetadata outputMetadata;
@@ -617,10 +630,16 @@ QList<AppleDecodedTile> AppleHevcDecoder::decodePacket(
                 if (outputMetadata.hasFrameSequenceNumber != 0) {
                     outputFrameSequenceNumber = outputMetadata.frameSequenceNumber;
                 }
+                if (outputMetadata.hasLongTermReferenceDecodingOrderNumber != 0) {
+                    outputLongTermReferenceDecodingOrderNumber =
+                            outputMetadata.longTermReferenceDecodingOrderNumber;
+                }
             }
             AppleDecodedTile frame = convertFrame(
                     m_Frame, outputTileIndex, outputTimestamp, error);
             frame.frameSequenceNumber = outputFrameSequenceNumber;
+            frame.longTermReferenceDecodingOrderNumber =
+                    outputLongTermReferenceDecodingOrderNumber;
             frame.decodeSubmittedAtNanoseconds =
                     outputDecodeSubmittedAtNanoseconds;
             if (frame.isValid()) {

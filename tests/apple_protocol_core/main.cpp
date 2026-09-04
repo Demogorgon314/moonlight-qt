@@ -852,6 +852,13 @@ void testSrtpAndRecoveryFeedbackVectors()
     require(framePacketInfo.has_value() &&
             *framePacketInfo == AppleRtpPacket::FramePacketInfo{0x25, 0x1682},
             "Apple MCI Info ID 6 must expose packet count and sender frame sequence");
+    AppleRtpPacket longTermReference = extended;
+    longTermReference.header[17] = static_cast<char>(
+            static_cast<quint8>(longTermReference.header.at(17)) | 0x10);
+    require(longTermReference.isLongTermReferenceFrame() &&
+                    !extended.isLongTermReferenceFrame() &&
+                    !packet.isLongTermReferenceFrame(),
+            "Apple MCI Info ID 4 must expose only marked long-term reference frames");
 
     AppleSrtcpEncryptor encryptor(keyBlob, &error);
     const QByteArray plain = QByteArray::fromHex(
@@ -894,6 +901,11 @@ void testSrtpAndRecoveryFeedbackVectors()
                 QByteArray::fromHex(
                     "80cc0007112233445243544c850000043456000000001234567800000abcea61"),
             "periodic RCTL feedback must match Apple's fixed-LAN wire format");
+    require(AppleMediaWire::longTermReferenceAcknowledgement(
+                    0x11223344, 0x1682) ==
+                QByteArray::fromHex(
+                    "80cc0003112233440000000500001682"),
+            "decoded long-term references must use Apple's standalone acknowledgement packet");
 
     const AppleRtpReceptionReport report{
         0x55667788, 0x55, 1, 0x00010002, 0x1234, 0, 0,
@@ -1018,6 +1030,17 @@ void testHevcAssemblyAndLossTracking()
             unit.subframeBoundary ==
                     AppleHevcAccessUnit::SubframeBoundary::Last,
             "the negotiated FLS EOD bit must close the final tile after removing RBSP emulation prevention bytes");
+
+    AppleHevcAssembler longTermReferenceAssembler;
+    AppleRtpPacket longTermReferencePacket = packet(
+            102, 43, 14, true, QByteArray::fromHex("0201000145"));
+    longTermReferencePacket.header = QByteArray::fromHex(
+            "9060000e0000002b0000006680100000");
+    require(longTermReferenceAssembler.process(
+                    longTermReferencePacket, 44, &unit) &&
+                    unit.isLongTermReferenceFrame &&
+                    unit.decodingOrderNumber == std::optional<quint16>(1),
+            "access-unit assembly must preserve the LTR acknowledgement request and DON");
 
     require(assembler.primarySources(2) == QList<quint32>({100, 101}) &&
             assembler.completedSources().contains(100) &&
@@ -1739,6 +1762,8 @@ void testAppleHevcDecoderPreservesLowLatency444Output()
     AppleHevcAccessUnit accessUnit;
     accessUnit.timestamp = 90'000;
     accessUnit.frameSequenceNumber = 7;
+    accessUnit.decodingOrderNumber = 0x1682;
+    accessUnit.isLongTermReferenceFrame = true;
     for (const QByteArray& nalUnit : splitAnnexB(encoded)) {
         require(nalUnit.size() >= 2, "the embedded HEVC fixture must contain valid NAL units");
         const int type = (static_cast<quint8>(nalUnit.at(0)) >> 1) & 0x3f;
@@ -1770,6 +1795,8 @@ void testAppleHevcDecoderPreservesLowLatency444Output()
     require(frame.pixelFormat == AppleDecodedTile::PixelFormat::Vuya &&
             frame.colorSpace == AppleDecodedTile::ColorSpace::Bt601 &&
             frame.colorRange == AppleDecodedTile::ColorRange::Limited &&
+            frame.longTermReferenceDecodingOrderNumber ==
+                    std::optional<quint16>(0x1682) &&
             frame.stride >= frame.width * 4 &&
             frame.pixels.size() >= frame.stride * frame.height,
             "HEVC RExt 4:4:4 chroma and its matrix/range must survive the display boundary");
@@ -1935,23 +1962,22 @@ quint16 findFourAvailableUdpPorts()
     return 0;
 }
 
-void testVideoReceiveDrainsOneSocketBatch()
+void testVideoReceivePreservesDatagramBoundaries()
 {
     const quint16 basePort = findFourAvailableUdpPorts();
     require(basePort != 0,
-            "four consecutive UDP ports must be available for the media batch test");
+            "four consecutive UDP ports must be available for the media receive test");
 
     AppleMediaTransport media;
     QString error;
     std::atomic_bool cancelled = false;
     require(media.open(QHostAddress::LocalHost, basePort, &error),
-            "media transport must bind its local video port for batch receive");
+            "media transport must bind its local video port for datagram receive");
 
     // The optimistic punch targets the initial local port on loopback. Drain
-    // it so only the three observable test datagrams remain in the batch.
-    QList<AppleReceivedVideoDatagram> initialPunch;
-    media.receiveAvailableVideo(
-            0, &initialPunch, 100, &cancelled, &error);
+    // it so only the three observable test datagrams remain queued.
+    QByteArray initialPunch;
+    media.receiveVideo(0, &initialPunch, 100, &cancelled, &error);
     require(error.isEmpty(),
             "draining the optimistic media punch must not fail");
 
@@ -1963,25 +1989,18 @@ void testVideoReceiveDrainsOneSocketBatch()
     };
     for (const QByteArray& payload : payloads) {
         require(sender.writeDatagram(
-                        payload, QHostAddress::LocalHost,
+                payload, QHostAddress::LocalHost,
                         static_cast<quint16>(basePort + 1)) == payload.size(),
-                "the media batch fixture must send every datagram");
+                "the media fixture must send every datagram");
     }
 
-    QList<AppleReceivedVideoDatagram> received;
-    require(media.receiveAvailableVideo(
-                    0, &received, 250, &cancelled, &error),
-            "one readable notification must return its complete video batch");
-    require(received.size() == payloads.size(),
-            "video receive must drain all datagrams already queued by the kernel");
-    for (int index = 0; index < received.size(); ++index) {
-        require(received.at(index).data == payloads.at(index),
-                "video batch receive must preserve datagram order and payload");
-        require(received.at(index).arrivalNanoseconds > 0 &&
-                        (index == 0 ||
-                         received.at(index).arrivalNanoseconds >=
-                                 received.at(index - 1).arrivalNanoseconds),
-                "each video datagram must carry a monotonic receive timestamp");
+    for (const QByteArray& payload : payloads) {
+        QByteArray received;
+        require(media.receiveVideo(
+                        0, &received, 250, &cancelled, &error),
+                "each queued video datagram must remain individually readable");
+        require(received == payload,
+                "video receive must preserve datagram order and payload");
     }
 }
 
@@ -3705,8 +3724,8 @@ int main(int argc, char* argv[])
     testDecodedTilesDoNotRetainFramesBehindMissingDecoderOutput();
     std::fprintf(stderr, "testUdpPunchIgnoresClosedOptimisticPortReset\n");
     testUdpPunchIgnoresClosedOptimisticPortReset();
-    std::fprintf(stderr, "testVideoReceiveDrainsOneSocketBatch\n");
-    testVideoReceiveDrainsOneSocketBatch();
+    std::fprintf(stderr, "testVideoReceivePreservesDatagramBoundaries\n");
+    testVideoReceivePreservesDatagramBoundaries();
     std::fprintf(stderr, "testStageFourCursorAndDisplayLayoutEvents\n");
     testStageFourCursorAndDisplayLayoutEvents();
     std::fprintf(stderr, "testRemoteCursorScalesForClientDpi\n");
