@@ -102,6 +102,83 @@ AppleDecodedTile::ColorRange decodedColorRange(const AVFrame* frame)
 
 } // namespace
 
+bool AppleVideoFrameQueue::setCanvas(const AppleCanvas& canvas)
+{
+    if (!canvas.isUsable() || canvas == m_Canvas) {
+        return false;
+    }
+    // Initial output belongs to this canvas even if the GUI notification is
+    // delayed. Only an actual change of geometry invalidates pending frames.
+    if (m_Canvas.isUsable()) {
+        m_Pending = {};
+        m_DecodedTiles.clear();
+    }
+    m_Canvas = canvas;
+    for (auto tile = m_Pending.tiles.begin(); tile != m_Pending.tiles.end();) {
+        if (tile.key() >= canvas.tileCount) {
+            m_DecodedTiles.remove(tile.key());
+            tile = m_Pending.tiles.erase(tile);
+        }
+        else {
+            ++tile;
+        }
+    }
+    if (m_Pending.tiles.isEmpty()) {
+        m_Pending.batchCount = 0;
+    }
+    return true;
+}
+
+bool AppleVideoFrameQueue::enqueue(QList<AppleDecodedTile> frames)
+{
+    bool accepted = false;
+    for (AppleDecodedTile& frame : frames) {
+        if (!frame.isValid() ||
+                (m_Canvas.isUsable() && frame.tileIndex >= m_Canvas.tileCount)) {
+            continue;
+        }
+        m_DecodedTiles.insert(frame.tileIndex);
+        m_Pending.tiles.insert(frame.tileIndex, std::move(frame));
+        accepted = true;
+    }
+    if (accepted) {
+        ++m_Pending.batchCount;
+    }
+    return accepted;
+}
+
+bool AppleVideoFrameQueue::hasCompleteFrame() const
+{
+    if (!m_Canvas.isUsable()) {
+        return false;
+    }
+    for (int tile = 0; tile < m_Canvas.tileCount; ++tile) {
+        if (!m_DecodedTiles.contains(tile)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+AppleVideoFrameQueue::PendingFrames AppleVideoFrameQueue::takePendingFrames()
+{
+    // Apple sends sparse updates after the initial canvas. Keep each tile's
+    // first output until all regions are covered, then drain incrementally.
+    if (!hasCompleteFrame()) {
+        return {};
+    }
+    PendingFrames result = std::move(m_Pending);
+    m_Pending = {};
+    return result;
+}
+
+void AppleVideoFrameQueue::clear()
+{
+    m_Canvas = {};
+    m_Pending = {};
+    m_DecodedTiles.clear();
+}
+
 void AppleDecodedFrameBatcher::recordSubmission(
         const AppleHevcAccessUnit& accessUnit,
         int tileIndex)

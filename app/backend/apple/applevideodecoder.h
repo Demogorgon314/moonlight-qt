@@ -99,6 +99,30 @@ struct AppleDecodedTile
     }
 };
 
+// The session serializes this queue with its frame mutex. Frames can arrive
+// before the GUI thread installs the initial canvas or creates the renderer.
+class AppleVideoFrameQueue
+{
+public:
+    struct PendingFrames
+    {
+        QHash<int, AppleDecodedTile> tiles;
+        quint64 batchCount = 0;
+    };
+
+    const AppleCanvas& canvas() const { return m_Canvas; }
+    bool setCanvas(const AppleCanvas& canvas);
+    bool enqueue(QList<AppleDecodedTile> frames);
+    bool hasCompleteFrame() const;
+    PendingFrames takePendingFrames();
+    void clear();
+
+private:
+    AppleCanvas m_Canvas;
+    PendingFrames m_Pending;
+    QSet<int> m_DecodedTiles;
+};
+
 // Mirrors Apple's tile-frame synchronizer: all submitted tiles carrying one
 // sender frame sequence are published atomically after that frame closes and
 // every corresponding decoder output has arrived.

@@ -426,7 +426,7 @@ std::optional<QPair<quint16, quint16>> AppleScreenSharingSession::remotePoint(
         int displayIndex) const
 {
     const AppleCanvas canvas = displayIndex == 1
-            ? m_SecondaryCanvas : m_Canvas;
+            ? m_SecondaryFrames.canvas() : m_PrimaryFrames.canvas();
     SDL_Window* window = displayIndex == 1
             ? m_SecondaryWindow : m_Runtime->streamWindow();
     if (!canvas.isUsable() || window == nullptr) {

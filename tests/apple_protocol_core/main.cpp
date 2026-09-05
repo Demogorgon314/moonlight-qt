@@ -1832,6 +1832,96 @@ void testAppleHevcDecoderReportsMissingReferenceFrame()
             "a missing HEVC reference must reach the media recovery path as a decode failure");
 }
 
+AppleDecodedTile initialPresentationTile(int tileIndex, char value = 64)
+{
+    AppleDecodedTile frame;
+    frame.tileIndex = tileIndex;
+    frame.width = 2;
+    frame.height = 2;
+    frame.stride = 2;
+    frame.chromaOffset = 4;
+    frame.chromaStride = 4;
+    frame.pixelFormat = AppleDecodedTile::PixelFormat::Nv24;
+    frame.pixels = QByteArray(12, value);
+    return frame;
+}
+
+void testInitialTilesSurviveDeferredCanvasSetup()
+{
+    AppleVideoFrameQueue frames;
+    QObject gui;
+    // The decoder submits its output directly, but mediaReady installs the
+    // canvas through a queued GUI callback. Hold that callback until every
+    // initial tile has arrived, as happens when window creation is delayed.
+    QMetaObject::invokeMethod(&gui, [&frames]() {
+        frames.setCanvas({2, 8, 4});
+    }, Qt::QueuedConnection);
+    frames.enqueue({initialPresentationTile(0), initialPresentationTile(1),
+                    initialPresentationTile(2), initialPresentationTile(3)});
+    require(frames.takePendingFrames().tiles.isEmpty(),
+            "output received before canvas setup must remain queued");
+    QCoreApplication::sendPostedEvents(&gui, QEvent::MetaCall);
+    const auto first = frames.takePendingFrames();
+    require(first.tiles.size() == 4 && first.batchCount == 1,
+            "deferred canvas setup must retain every already-decoded initial tile");
+}
+
+void testInitialPresentationWaitsForEveryTile()
+{
+    AppleVideoFrameQueue frames;
+    frames.setCanvas({2, 8, 4});
+    frames.enqueue({initialPresentationTile(0), initialPresentationTile(1),
+                    initialPresentationTile(2)});
+    require(frames.takePendingFrames().tiles.isEmpty(),
+            "presentation must not expose an initial canvas with a missing tile");
+    frames.enqueue({initialPresentationTile(0, 80)});
+    AppleDecodedTile invalid = initialPresentationTile(3);
+    invalid.pixels.clear();
+    require(!frames.enqueue({invalid, initialPresentationTile(4)}) &&
+                    !frames.hasCompleteFrame(),
+            "duplicate, invalid, and out-of-canvas tiles must not complete the initial canvas");
+    require(frames.takePendingFrames().tiles.isEmpty(),
+            "repeated display ticks must retain the incomplete initial canvas");
+    frames.enqueue({initialPresentationTile(3)});
+    const auto first = frames.takePendingFrames();
+    require(first.tiles.size() == 4 && first.batchCount == 3 &&
+                    first.tiles.value(0).pixels.at(0) == 80,
+            "the last missing tile must release the complete canvas with the latest tile values");
+    frames.enqueue({initialPresentationTile(2, 90)});
+    const auto incremental = frames.takePendingFrames();
+    require(incremental.tiles.size() == 1 && incremental.tiles.contains(2) &&
+                    incremental.batchCount == 1,
+            "after the first complete canvas a sparse update must not wait for unchanged tiles");
+}
+
+void testInitialPresentationResetsForNewCanvasAndReconnect()
+{
+    AppleVideoFrameQueue frames;
+    frames.setCanvas({2, 8, 4});
+    frames.enqueue({initialPresentationTile(0), initialPresentationTile(1),
+                    initialPresentationTile(2), initialPresentationTile(3)});
+    require(!frames.setCanvas({2, 8, 4}) && !frames.setCanvas({}) &&
+                    frames.hasCompleteFrame(),
+            "duplicate or invalid layout notifications must retain the pending complete frame");
+    require(frames.takePendingFrames().tiles.size() == 4,
+            "repeated layout notifications must not discard initial output");
+    frames.enqueue({initialPresentationTile(3)});
+    frames.setCanvas({2, 4, 2});
+    frames.enqueue({initialPresentationTile(0)});
+    require(!frames.hasCompleteFrame() && frames.takePendingFrames().tiles.isEmpty(),
+            "a new canvas must not inherit tile readiness from the old geometry");
+    frames.enqueue({initialPresentationTile(1)});
+    require(frames.takePendingFrames().tiles.size() == 2,
+            "a new canvas must release only its own complete initial output");
+    frames.clear();
+    require(!frames.canvas().isUsable() && !frames.hasCompleteFrame(),
+            "reconnect must discard the previous canvas and readiness");
+    frames.enqueue({initialPresentationTile(0)});
+    frames.setCanvas({2, 2, 1});
+    require(frames.takePendingFrames().tiles.size() == 1,
+            "a single-tile reconnect must retain output received before canvas setup");
+}
+
 void testDecodedTilesPublishAsAtomicSenderFrames()
 {
     AppleDecodedFrameBatcher batcher;
@@ -3619,6 +3709,37 @@ void testNativePresentationFactoryUsesLowLatencyAdapter()
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
+    std::fprintf(stderr, "testInitialTilesSurviveDeferredCanvasSetup\n");
+    testInitialTilesSurviveDeferredCanvasSetup();
+    std::fprintf(stderr, "testInitialPresentationWaitsForEveryTile\n");
+    testInitialPresentationWaitsForEveryTile();
+    std::fprintf(stderr, "testInitialPresentationResetsForNewCanvasAndReconnect\n");
+    testInitialPresentationResetsForNewCanvasAndReconnect();
+    if (application.arguments().contains(QStringLiteral("--initial-frame-tests"))) {
+        return 0;
+    }
+    if (application.arguments().contains(QStringLiteral("--video-pipeline-tests"))) {
+        // These cases exercise media and frame delivery without creating a
+        // native window, changing focus, or touching the system clipboard.
+        testHighPerformanceMediaOfferAndAnswer();
+        testStageFourDisplayConfigurationAndDynamicResolution();
+        testSrtpAndRecoveryFeedbackVectors();
+        testAdaptiveRateControlFeedback();
+        testHevcAssemblyAndLossTracking();
+        testMinimizedFrameUpdatePolicy();
+        testHevcGlobalDecodingOrderAdmission();
+        testHevcDecoderBackendFallback();
+        testScaledTileBoundariesRemainContiguous();
+        testDecodedNv12TileValidation();
+        testAppleHevcDecoderPreservesLowLatency444Output();
+        testAppleHevcDecoderReportsMissingReferenceFrame();
+        testDecodedTilesPublishAsAtomicSenderFrames();
+        testDecodedTilesPublishOnFlsEndOfDataWithoutTearing();
+        testDecodedTilesDoNotRetainFramesBehindMissingDecoderOutput();
+        testVideoReceivePreservesDatagramBoundaries();
+        std::fprintf(stderr, "Apple video pipeline tests passed\n");
+        return 0;
+    }
 #ifdef Q_OS_WIN
     if (application.arguments().contains(
                 QStringLiteral("--windows-promised-file-test"))) {

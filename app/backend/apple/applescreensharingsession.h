@@ -132,6 +132,8 @@ private:
                     std::shared_ptr<AppleVideoBackendContext> decoderContext,
                     int displayIndex = 0);
     void applyCanvas(const AppleCanvas& canvas);
+    void firstFramePresented(int displayIndex);
+    bool usesDisplayLinkPacing() const;
     void updatePerformanceStatistics(
             const QString& summary,
             const ApplePerformanceOverlayMetrics& metrics);
@@ -277,20 +279,18 @@ private:
     QHash<int, quint32> m_TextureFormats;
     SDL_Texture* m_PerformanceOverlayTexture = nullptr;
     QPair<int, int> m_PerformanceOverlaySize;
-    QHash<int, AppleDecodedTile> m_LatestFrames;
-    QHash<int, AppleDecodedTile> m_SecondaryLatestFrames;
+    AppleVideoFrameQueue m_PrimaryFrames;
+    AppleVideoFrameQueue m_SecondaryFrames;
     QHash<int, int> m_TileHeights;
     QHash<int, int> m_SecondaryTileHeights;
-    quint64 m_PendingFrameBatches = 0;
-    quint64 m_SecondaryPendingFrameBatches = 0;
+    std::atomic_bool m_PrimaryFirstFramePresented{false};
+    std::atomic_bool m_SecondaryFirstFramePresented{false};
     quint64 m_AwaitingPresentationBatches = 0;
     QHash<int, quint64> m_AwaitingDecodeSubmissions;
     mutable QMutex m_FrameMutex;
     QList<AppleOutboundControl> m_PendingControls;
     QMutex m_InputMutex;
     QMutex m_PerformanceMutex;
-    AppleCanvas m_Canvas;
-    AppleCanvas m_SecondaryCanvas;
     AppleDisplayLayout m_DisplayLayout;
     QList<quint32> m_MediaDisplayIds;
     std::optional<quint32> m_SelectedInputDisplayId;

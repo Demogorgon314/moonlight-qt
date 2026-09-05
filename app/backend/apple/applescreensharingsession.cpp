@@ -166,7 +166,7 @@ protected:
         while (!isInterruptionRequested()) {
             const bool signalled = m_Session->m_PresentationWake.tryAcquire(
                     1, 100);
-            if (!signalled && m_Session->m_DisplayLinkActive.load()) {
+            if (!signalled && m_Session->usesDisplayLinkPacing()) {
                 continue;
             }
             if (isInterruptionRequested()) {
@@ -174,11 +174,12 @@ protected:
             }
             m_Session->renderLatestFrames();
             m_Session->renderSecondaryFrames();
-            if (!m_Session->m_DisplayLinkActive.load() &&
-                    (m_Session->m_PresentationNeeded.load() ||
-                     m_Session->m_SecondaryPresentationNeeded.load())) {
-                // Non-Metal renderers retry a temporarily busy swap chain
-                // without restoring the old unconditional 1 ms poll.
+            if (!m_Session->usesDisplayLinkPacing() &&
+                    ((m_Session->m_VideoRenderer != nullptr &&
+                      m_Session->m_PresentationNeeded.load()) ||
+                     (m_Session->m_SecondaryVideoRenderer != nullptr &&
+                      m_Session->m_SecondaryPresentationNeeded.load()))) {
+                // Retry a busy renderer until its display clock can pace it.
                 QThread::msleep(1);
                 m_Session->wakePresentation();
             }
@@ -224,12 +225,22 @@ AppleScreenSharingSession::~AppleScreenSharingSession()
 
 void AppleScreenSharingSession::wakePresentation(bool displayLinkTick)
 {
-    if (!displayLinkTick && m_DisplayLinkActive.load()) {
+    if (!displayLinkTick && usesDisplayLinkPacing()) {
         return;
     }
     if (m_PresentationWake.available() == 0) {
         m_PresentationWake.release();
     }
+}
+
+bool AppleScreenSharingSession::usesDisplayLinkPacing() const
+{
+    // A hidden window's display link may not tick. Initial tile delivery must
+    // wake rendering independently, otherwise showing the window would wait
+    // for a first presentation that itself waits for the window to be shown.
+    return m_DisplayLinkActive.load() &&
+            m_PrimaryFirstFramePresented.load() &&
+            (m_DisplayCount == 1 || m_SecondaryFirstFramePresented.load());
 }
 
 void AppleScreenSharingSession::setWindowMiniaturized(
@@ -623,7 +634,7 @@ void AppleScreenSharingSession::mediaReady(
         }
         {
             QMutexLocker locker(&m_FrameMutex);
-            m_SecondaryCanvas = canvas;
+            m_SecondaryFrames.setCanvas(canvas);
         }
         const auto restored = restoredWindowGeometry(AppleWindowRole::Secondary);
         const int width = restored.has_value()
@@ -680,14 +691,6 @@ void AppleScreenSharingSession::mediaReady(
                 << ", decoder="
                 << appleVideoDecoderBackendName(decoderBackend)
                 << (hardwareFallbackOccurred ? " (fallback)" : "");
-        SDL_ShowWindow(m_SecondaryWindow);
-        SDL_RaiseWindow(m_SecondaryWindow);
-        updateKeyboardGrabState(m_SecondaryWindow);
-        if ((SDL_GetWindowFlags(m_SecondaryWindow) &
-             SDL_WINDOW_INPUT_FOCUS) != 0) {
-            setClipboardWindowFocused(
-                    SDL_GetWindowID(m_SecondaryWindow), true);
-        }
         m_SecondaryPresentationNeeded.store(true);
         wakePresentation();
         return;
@@ -1034,23 +1037,61 @@ void AppleScreenSharingSession::mediaReady(
     m_EverMediaReady.store(true);
     updateControlSummary();
     setRunning();
-    emit connectionStarted();
-    QPointer<AppleScreenSharingSession> guard(this);
-    QTimer::singleShot(360, this, [guard]() {
-        if (guard == nullptr || guard->m_Cancelled.load() ||
-                guard->m_Runtime->streamWindow() == nullptr) {
+}
+
+void AppleScreenSharingSession::firstFramePresented(int displayIndex)
+{
+    std::atomic_bool& presented = displayIndex == 1
+            ? m_SecondaryFirstFramePresented : m_PrimaryFirstFramePresented;
+    if (presented.exchange(true)) {
+        return;
+    }
+    const QPointer<AppleScreenSharingSession> guard(this);
+    QMetaObject::invokeMethod(this, [guard, displayIndex]() {
+        if (guard == nullptr || guard->m_Cancelled.load()) {
             return;
         }
-        if (guard->m_QtWindow != nullptr) {
-            guard->m_QtWindow->hide();
-        }
-        SDL_ShowWindow(guard->m_Runtime->streamWindow());
-        SDL_RaiseWindow(guard->m_Runtime->streamWindow());
-        guard->updateKeyboardGrabState(guard->m_Runtime->streamWindow());
+        const auto showWindow = [guard, displayIndex]() {
+            if (guard == nullptr || guard->m_Cancelled.load()) {
+                return;
+            }
+            const bool secondary = displayIndex == 1;
+            if (!(secondary ? guard->m_SecondaryFirstFramePresented.load()
+                            : guard->m_PrimaryFirstFramePresented.load())) {
+                return;
+            }
+            SDL_Window* window = secondary
+                    ? guard->m_SecondaryWindow : guard->m_Runtime->streamWindow();
+            if (window == nullptr) {
+                return;
+            }
+            if (!secondary && guard->m_QtWindow != nullptr) {
+                guard->m_QtWindow->hide();
+            }
+            SDL_ShowWindow(window);
+            SDL_RaiseWindow(window);
+            guard->updateKeyboardGrabState(window);
+            if ((SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0) {
+                guard->setClipboardWindowFocused(SDL_GetWindowID(window), true);
+            }
 #ifdef Q_OS_WIN
-        guard->syncWindowsRemoteMenuButton();
+            if (!secondary) {
+                guard->syncWindowsRemoteMenuButton();
+            }
 #endif
-    });
+        };
+        qInfo() << "Apple High Performance first complete frame presented: display="
+                << displayIndex + 1;
+        if (displayIndex == 0) {
+            emit guard->connectionStarted();
+            // Preserve StreamSegue's fade-out, but start it only after a
+            // complete frame exists. The timer is not a frame-readiness test.
+            QTimer::singleShot(360, guard, showWindow);
+        }
+        else {
+            showWindow();
+        }
+    }, Qt::QueuedConnection);
 }
 
 void AppleScreenSharingSession::destroyPresentation()
@@ -1101,11 +1142,11 @@ void AppleScreenSharingSession::destroyPresentation()
     m_TextureFormats.clear();
     {
         QMutexLocker locker(&m_FrameMutex);
-        m_LatestFrames.clear();
-        m_SecondaryLatestFrames.clear();
-        m_PendingFrameBatches = 0;
-        m_SecondaryPendingFrameBatches = 0;
+        m_PrimaryFrames.clear();
+        m_SecondaryFrames.clear();
     }
+    m_PrimaryFirstFramePresented.store(false);
+    m_SecondaryFirstFramePresented.store(false);
     m_AwaitingPresentationBatches = 0;
     m_AwaitingDecodeSubmissions.clear();
     m_PerformanceOverlayUpdateNeeded.store(false);
@@ -1134,7 +1175,6 @@ void AppleScreenSharingSession::destroyPresentation()
         m_SecondaryWindow = nullptr;
     }
     m_SecondaryTileHeights.clear();
-    m_SecondaryCanvas = {};
     m_SecondaryMediaReady = false;
     m_PrimaryKeyboardGrabActive = false;
     m_SecondaryKeyboardGrabActive = false;

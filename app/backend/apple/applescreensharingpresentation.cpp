@@ -106,26 +106,13 @@ void AppleScreenSharingSession::queueDecodedFrames(QList<AppleDecodedTile> frame
                                                    int displayIndex)
 {
     QMutexLocker locker(&m_FrameMutex);
-    bool acceptedBatch = false;
-    for (AppleDecodedTile& frame : frames) {
-        if (frame.isValid()) {
-            if (displayIndex == 1) {
-                m_SecondaryLatestFrames.insert(
-                        frame.tileIndex, std::move(frame));
-            }
-            else {
-                m_LatestFrames.insert(frame.tileIndex, std::move(frame));
-            }
-            acceptedBatch = true;
-        }
-    }
-    if (acceptedBatch) {
+    AppleVideoFrameQueue& queue = displayIndex == 1
+            ? m_SecondaryFrames : m_PrimaryFrames;
+    if (queue.enqueue(std::move(frames))) {
         if (displayIndex == 1) {
-            ++m_SecondaryPendingFrameBatches;
             m_SecondaryPresentationNeeded.store(true);
         }
         else {
-            ++m_PendingFrameBatches;
             m_PresentationNeeded.store(true);
         }
         wakePresentation();
@@ -140,10 +127,10 @@ void AppleScreenSharingSession::applyCanvas(const AppleCanvas& canvas)
     }
     {
         QMutexLocker locker(&m_FrameMutex);
-        m_Canvas = canvas;
-        m_LatestFrames.clear();
+        if (!m_PrimaryFrames.setCanvas(canvas)) {
+            return;
+        }
         m_TileHeights.clear();
-        m_PendingFrameBatches = 0;
         m_AwaitingPresentationBatches = 0;
         m_AwaitingDecodeSubmissions.clear();
     }
@@ -256,7 +243,8 @@ void AppleScreenSharingSession::updatePerformanceOverlayTexture()
     }
     if (!performanceMetrics.canvasSize.isValid()) {
         QMutexLocker locker(&m_FrameMutex);
-        performanceMetrics.canvasSize = QSize(m_Canvas.width, m_Canvas.height);
+        const AppleCanvas canvas = m_PrimaryFrames.canvas();
+        performanceMetrics.canvasSize = QSize(canvas.width, canvas.height);
     }
 
     const bool moonlightStyle = m_PerformanceOverlayStyle ==
@@ -402,11 +390,14 @@ void AppleScreenSharingSession::renderLatestFrames()
     AppleCanvas canvas;
     {
         QMutexLocker locker(&m_FrameMutex);
-        canvas = m_Canvas;
-        frames = std::move(m_LatestFrames);
-        m_LatestFrames.clear();
-        pendingFrameBatches = m_PendingFrameBatches;
-        m_PendingFrameBatches = 0;
+        if (!m_PrimaryFrames.hasCompleteFrame()) {
+            m_PresentationNeeded.store(false);
+            return;
+        }
+        canvas = m_PrimaryFrames.canvas();
+        auto pending = m_PrimaryFrames.takePendingFrames();
+        frames = std::move(pending.tiles);
+        pendingFrameBatches = pending.batchCount;
     }
     if (!canvas.isUsable()) {
         return;
@@ -439,6 +430,13 @@ void AppleScreenSharingSession::renderLatestFrames()
         qWarning().nospace()
                 << "Apple High Performance ignored non-4:4:4 decoded tile "
                 << frame.tileIndex;
+    }
+
+    for (int tile = 0; tile < canvas.tileCount; ++tile) {
+        if (!m_TileHeights.contains(tile)) {
+            m_PresentationNeeded.store(false);
+            return;
+        }
     }
 
     // Clear the request before rendering so a frame or window event arriving
@@ -476,6 +474,7 @@ void AppleScreenSharingSession::renderLatestFrames()
         m_AwaitingDecodeSubmissions.clear();
         return;
     }
+    firstFramePresented(0);
     ++m_PresentationCount;
     m_PresentedTileUpdates += static_cast<quint64>(
             m_AwaitingDecodeSubmissions.size());
@@ -592,10 +591,12 @@ void AppleScreenSharingSession::renderSecondaryFrames()
     AppleCanvas canvas;
     {
         QMutexLocker locker(&m_FrameMutex);
-        canvas = m_SecondaryCanvas;
-        frames = std::move(m_SecondaryLatestFrames);
-        m_SecondaryLatestFrames.clear();
-        m_SecondaryPendingFrameBatches = 0;
+        if (!m_SecondaryFrames.hasCompleteFrame()) {
+            m_SecondaryPresentationNeeded.store(false);
+            return;
+        }
+        canvas = m_SecondaryFrames.canvas();
+        frames = m_SecondaryFrames.takePendingFrames().tiles;
     }
     if (!canvas.isUsable()) {
         return;
@@ -614,6 +615,12 @@ void AppleScreenSharingSession::renderSecondaryFrames()
             qWarning().nospace()
                     << "Apple High Performance display 2 upload failed: "
                     << uploadError;
+        }
+    }
+    for (int tile = 0; tile < canvas.tileCount; ++tile) {
+        if (!m_SecondaryTileHeights.contains(tile)) {
+            m_SecondaryPresentationNeeded.store(false);
+            return;
         }
     }
     if (!m_SecondaryPresentationNeeded.exchange(false)) {
@@ -640,5 +647,8 @@ void AppleScreenSharingSession::renderSecondaryFrames()
         qWarning().nospace()
                 << "Apple High Performance display 2 render failed: "
                 << renderError;
+    }
+    else {
+        firstFramePresented(1);
     }
 }

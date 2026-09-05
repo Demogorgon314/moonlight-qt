@@ -1195,9 +1195,10 @@ void AppleScreenSharingSession::scheduleDynamicResolution(
     if (!size.isValid()) {
         return;
     }
+    const AppleCanvas canvas = m_PrimaryFrames.canvas();
     if (size == m_LastRequestedDynamicResolution ||
-            (m_Canvas.width == size.width() * 2 &&
-             m_Canvas.height == size.height() * 2)) {
+            (canvas.width == size.width() * 2 &&
+             canvas.height == size.height() * 2)) {
         m_PendingDynamicResolution = {};
         m_DynamicResolutionTimer->stop();
         return;
