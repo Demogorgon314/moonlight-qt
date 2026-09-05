@@ -28,6 +28,7 @@ bool testAppleMacInputBridgeReleasesModifiersOnFocusLoss();
 bool testAppleMacClipboardPreservesMultipleItemsAndFlavors();
 bool testAppleMacClipboardMenuRoutesCommandsAndTracksState();
 bool testAppleMacRemoteMenuRoutesSupportedCommands();
+bool testAppleMetalTexturesSurviveUntilCompletion();
 #endif
 #include "backend/apple/applemediaprotocol.h"
 #include "backend/apple/applemediatransport.h"
@@ -4108,6 +4109,9 @@ int main(int argc, char* argv[])
     std::fprintf(stderr, "testAppleMacRemoteMenuRoutesSupportedCommands\n");
     require(testAppleMacRemoteMenuRoutesSupportedCommands(),
             "the macOS remote menu did not gate and route host capabilities");
+    std::fprintf(stderr, "testAppleMetalTexturesSurviveUntilCompletion\n");
+    require(testAppleMetalTexturesSurviveUntilCompletion(),
+            "Core Video textures must survive GPU work and be reclaimed afterward");
 #endif
     std::fprintf(stderr, "testAppleStreamWindowPlacementPersistence\n");
     testAppleStreamWindowPlacementPersistence();

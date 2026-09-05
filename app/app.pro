@@ -107,7 +107,8 @@ apple-screen-sharing {
         HEADERS += \
             backend/apple/applefiledrag_mac.h \
             backend/apple/applemacinputbridge.h \
-            backend/apple/applemetalrenderer.h
+            backend/apple/applemetalrenderer.h \
+            backend/apple/applemetaltexturereferences_p.h
     }
 }
 

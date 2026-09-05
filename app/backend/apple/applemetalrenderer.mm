@@ -1,6 +1,7 @@
 #include "applemetalrenderer.h"
 
 #include "applecontrolfeatures.h"
+#include "applemetaltexturereferences_p.h"
 
 #include "SDL.h"
 
@@ -708,6 +709,7 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
         return RenderResult::Failed;
     }
 
+    AppleMetalTextureReferences textureReferences;
     const auto retryFrame = [&](const QString& reason) {
         // Nothing from this command buffer may reach the screen unless every
         // visible tile was encoded. Keep the previous drawable and let the
@@ -802,6 +804,8 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
                 nullptr, MTLPixelFormatRG8Unorm,
                 CVPixelBufferGetWidthOfPlane(pixelBuffer, 1),
                 CVPixelBufferGetHeightOfPlane(pixelBuffer, 1), 1, &chromaImage);
+        textureReferences.adopt(lumaImage);
+        textureReferences.adopt(chromaImage);
         const bool mapped = lumaResult == kCVReturnSuccess &&
                 chromaResult == kCVReturnSuccess &&
                 lumaImage != nullptr && chromaImage != nullptr &&
@@ -816,12 +820,6 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
             [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                         vertexStart:0
                         vertexCount:4];
-        }
-        if (lumaImage != nullptr) {
-            CFRelease(lumaImage);
-        }
-        if (chromaImage != nullptr) {
-            CFRelease(chromaImage);
         }
         if (!mapped) {
             return retryFrame(QStringLiteral(
@@ -862,6 +860,7 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
         feedback->recordPresentation(submittedAt, presentedDrawable.presentedTime);
     }];
     [commandBuffer presentDrawable:drawable];
+    textureReferences.retainUntilCompleted(commandBuffer);
     dispatch_semaphore_t gate = implementation.inFlightGate;
     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         feedback->recordGpu(completed.status == MTLCommandBufferStatusCompleted,

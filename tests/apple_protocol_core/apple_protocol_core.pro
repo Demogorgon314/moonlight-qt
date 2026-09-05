@@ -42,12 +42,14 @@ macx {
         ../../app/backend/apple/applemacinputbridge.mm \
         ../../app/backend/apple/applemetalrenderer.mm \
         ../../app/backend/apple/appleaudiodecoder_macos.mm \
-        mac_input_bridge_tests.mm
+        mac_input_bridge_tests.mm \
+        metal_texture_tests.mm
     HEADERS += \
         ../../app/backend/apple/appleclipboard.h \
         ../../app/backend/apple/applefiledrag_mac.h \
         ../../app/backend/apple/applemacinputbridge.h \
-        ../../app/backend/apple/applemetalrenderer.h
+        ../../app/backend/apple/applemetalrenderer.h \
+        ../../app/backend/apple/applemetaltexturereferences_p.h
 }
 
 SOURCES += \
