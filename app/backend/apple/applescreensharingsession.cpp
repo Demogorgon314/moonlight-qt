@@ -1137,6 +1137,8 @@ void AppleScreenSharingSession::destroyPresentation()
         m_PresentationThread.reset();
     }
     m_PresentationWake.tryAcquire(m_PresentationWake.available());
+    m_PresentationCanvasRevision = 0;
+    m_TileHeights.clear();
     m_Textures.clear();
     m_TextureSizes.clear();
     m_TextureFormats.clear();

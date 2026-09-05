@@ -114,6 +114,7 @@ bool AppleVideoFrameQueue::setCanvas(const AppleCanvas& canvas)
         m_DecodedTiles.clear();
     }
     m_Canvas = canvas;
+    ++m_CanvasRevision;
     for (auto tile = m_Pending.tiles.begin(); tile != m_Pending.tiles.end();) {
         if (tile.key() >= canvas.tileCount) {
             m_DecodedTiles.remove(tile.key());
@@ -168,6 +169,8 @@ AppleVideoFrameQueue::PendingFrames AppleVideoFrameQueue::takePendingFrames()
         return {};
     }
     PendingFrames result = std::move(m_Pending);
+    result.canvas = m_Canvas;
+    result.canvasRevision = m_CanvasRevision;
     m_Pending = {};
     return result;
 }
@@ -175,6 +178,7 @@ AppleVideoFrameQueue::PendingFrames AppleVideoFrameQueue::takePendingFrames()
 void AppleVideoFrameQueue::clear()
 {
     m_Canvas = {};
+    ++m_CanvasRevision;
     m_Pending = {};
     m_DecodedTiles.clear();
 }

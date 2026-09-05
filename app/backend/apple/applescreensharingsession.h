@@ -281,6 +281,8 @@ private:
     QPair<int, int> m_PerformanceOverlaySize;
     AppleVideoFrameQueue m_PrimaryFrames;
     AppleVideoFrameQueue m_SecondaryFrames;
+    // Owned by the presentation thread; reset only after that thread stops.
+    quint64 m_PresentationCanvasRevision = 0;
     QHash<int, int> m_TileHeights;
     QHash<int, int> m_SecondaryTileHeights;
     std::atomic_bool m_PrimaryFirstFramePresented{false};

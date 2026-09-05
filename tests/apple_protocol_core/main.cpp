@@ -1922,6 +1922,45 @@ void testInitialPresentationResetsForNewCanvasAndReconnect()
             "a single-tile reconnect must retain output received before canvas setup");
 }
 
+void testPresentationSnapshotSurvivesCanvasChanges()
+{
+    AppleVideoFrameQueue frames;
+    const AppleCanvas original{2, 4, 2};
+    frames.setCanvas(original);
+    frames.enqueue({initialPresentationTile(0, 10), initialPresentationTile(1, 20)});
+    const auto rendering = frames.takePendingFrames();
+
+    // Hold an in-flight render snapshot while the GUI applies two resizes.
+    // Returning to the same geometry must still invalidate retained layout
+    // and pending presentation statistics on the next render iteration.
+    frames.setCanvas({2, 2, 1});
+    frames.enqueue({initialPresentationTile(0, 30)});
+    frames.setCanvas(original);
+    frames.enqueue({initialPresentationTile(0, 40)});
+    require(frames.takePendingFrames().tiles.isEmpty(),
+            "a resize must not borrow missing tiles from the in-flight snapshot");
+    frames.enqueue({initialPresentationTile(1, 50)});
+    const auto resized = frames.takePendingFrames();
+    require(rendering.canvas == original && rendering.tiles.size() == 2 &&
+                    rendering.tiles.value(0).pixels.at(0) == 10 &&
+                    rendering.batchCount == 1,
+            "GUI canvas changes must not mutate the detached render snapshot");
+    require(resized.canvas == original &&
+                    resized.canvasRevision != rendering.canvasRevision &&
+                    resized.tiles.value(0).pixels.at(0) == 40 &&
+                    resized.batchCount == 2,
+            "same-size round-trip resize must deliver a new presentation revision");
+    frames.setCanvas(original);
+    const auto idle = frames.takePendingFrames();
+    require(idle.canvasRevision == resized.canvasRevision && idle.tiles.isEmpty(),
+            "unchanged canvas must preserve presentation state on an idle render tick");
+    frames.clear();
+    frames.setCanvas(original);
+    frames.enqueue({initialPresentationTile(0), initialPresentationTile(1)});
+    require(frames.takePendingFrames().canvasRevision != resized.canvasRevision,
+            "reconnect at the same geometry must invalidate prior presentation state");
+}
+
 void testDecodedTilesPublishAsAtomicSenderFrames()
 {
     AppleDecodedFrameBatcher batcher;
@@ -3715,6 +3754,8 @@ int main(int argc, char* argv[])
     testInitialPresentationWaitsForEveryTile();
     std::fprintf(stderr, "testInitialPresentationResetsForNewCanvasAndReconnect\n");
     testInitialPresentationResetsForNewCanvasAndReconnect();
+    std::fprintf(stderr, "testPresentationSnapshotSurvivesCanvasChanges\n");
+    testPresentationSnapshotSurvivesCanvasChanges();
     if (application.arguments().contains(QStringLiteral("--initial-frame-tests"))) {
         return 0;
     }

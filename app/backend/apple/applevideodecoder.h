@@ -108,6 +108,8 @@ public:
     {
         QHash<int, AppleDecodedTile> tiles;
         quint64 batchCount = 0;
+        AppleCanvas canvas;
+        quint64 canvasRevision = 0;
     };
 
     const AppleCanvas& canvas() const { return m_Canvas; }
@@ -119,6 +121,7 @@ public:
 
 private:
     AppleCanvas m_Canvas;
+    quint64 m_CanvasRevision = 0;
     PendingFrames m_Pending;
     QSet<int> m_DecodedTiles;
 };

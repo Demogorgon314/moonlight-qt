@@ -130,9 +130,6 @@ void AppleScreenSharingSession::applyCanvas(const AppleCanvas& canvas)
         if (!m_PrimaryFrames.setCanvas(canvas)) {
             return;
         }
-        m_TileHeights.clear();
-        m_AwaitingPresentationBatches = 0;
-        m_AwaitingDecodeSubmissions.clear();
     }
     {
         QMutexLocker locker(&m_PerformanceMutex);
@@ -387,6 +384,7 @@ void AppleScreenSharingSession::renderLatestFrames()
     }
     QHash<int, AppleDecodedTile> frames;
     quint64 pendingFrameBatches = 0;
+    quint64 canvasRevision = 0;
     AppleCanvas canvas;
     {
         QMutexLocker locker(&m_FrameMutex);
@@ -394,13 +392,23 @@ void AppleScreenSharingSession::renderLatestFrames()
             m_PresentationNeeded.store(false);
             return;
         }
-        canvas = m_PrimaryFrames.canvas();
         auto pending = m_PrimaryFrames.takePendingFrames();
+        canvas = pending.canvas;
+        canvasRevision = pending.canvasRevision;
         frames = std::move(pending.tiles);
         pendingFrameBatches = pending.batchCount;
     }
     if (!canvas.isUsable()) {
         return;
+    }
+    // Apply layout changes on their owner thread, alongside the matching
+    // frame snapshot. A GUI resize may arrive while this snapshot is being
+    // uploaded; it must not clear the in-flight render's bookkeeping.
+    if (canvasRevision != m_PresentationCanvasRevision) {
+        m_TileHeights.clear();
+        m_AwaitingPresentationBatches = 0;
+        m_AwaitingDecodeSubmissions.clear();
+        m_PresentationCanvasRevision = canvasRevision;
     }
     if (pendingFrameBatches > 0) {
         m_AwaitingPresentationBatches += pendingFrameBatches;
