@@ -590,14 +590,18 @@ void AppleClipboardExchange::setAutomaticEligible(bool eligible)
         return;
     }
     m_AutomaticEligible = eligible;
-    ++m_EligibilityGeneration;
-    if (!eligible &&
-            (m_RequestState == RequestState::AwaitingAutomaticPromises ||
-             m_RequestState == RequestState::AwaitingAutomaticData)) {
-        resetRequest();
-    }
     if (!eligible) {
         m_HasUnfulfilledPromises = false;
+    }
+}
+
+void AppleClipboardExchange::setReceiveGeneration(quint64 generation)
+{
+    if (m_EligibilityGeneration == generation) return;
+    m_EligibilityGeneration = generation;
+    if (m_RequestState == RequestState::AwaitingAutomaticPromises ||
+            m_RequestState == RequestState::AwaitingAutomaticData) {
+        resetRequest();
     }
 }
 
@@ -703,7 +707,7 @@ AppleClipboardResult AppleClipboardExchange::receive(
         }
         if (m_RequestState == RequestState::AwaitingAutomaticPromises &&
                 promises && sessionId == m_RequestSessionId) {
-            if (!m_SharingEnabled || !m_AutomaticEligible ||
+            if (!m_SharingEnabled || m_EligibilityGeneration == 0 ||
                     m_RequestEligibilityGeneration !=
                             m_EligibilityGeneration) {
                 resetRequest();
@@ -714,10 +718,11 @@ AppleClipboardResult AppleClipboardExchange::receive(
         }
         else if (m_RequestState == RequestState::AwaitingAutomaticData &&
                  !promises && sessionId == 0) {
-            if (m_SharingEnabled && m_AutomaticEligible &&
+            if (m_SharingEnabled && m_EligibilityGeneration != 0 &&
                     m_RequestEligibilityGeneration ==
                             m_EligibilityGeneration) {
                 result.receivedAutomatically = true;
+                result.receiveGeneration = m_RequestEligibilityGeneration;
                 result.receivedArchive = std::move(archive);
             }
             resetRequest();
@@ -758,7 +763,7 @@ AppleClipboardResult AppleClipboardExchange::receive(
         result.consumed = true;
         if (subtype == 2 && m_RequestState == RequestState::Idle) {
             m_HasUnfulfilledPromises = false;
-            if (m_SharingEnabled && m_AutomaticEligible) {
+            if (m_SharingEnabled && m_EligibilityGeneration != 0) {
                 const quint32 sessionId = nextSessionId();
                 beginRequest(RequestState::AwaitingAutomaticPromises,
                              sessionId,
@@ -788,7 +793,33 @@ void AppleClipboardExchange::resetForReconnect()
     m_SharingStateKnown = false;
     m_AutomaticEligible = false;
     m_HasUnfulfilledPromises = false;
-    ++m_EligibilityGeneration;
+    m_EligibilityGeneration = 0;
+}
+
+void AppleClipboardReceiveOwnership::claim(const void* owner, quint64 revision)
+{
+    if (m_Owner != owner || m_Revision != revision) {
+        ++m_Generation;
+        if (m_Generation == 0) ++m_Generation;
+    }
+    m_Owner = owner;
+    m_Revision = revision;
+}
+
+void AppleClipboardReceiveOwnership::release(const void* owner)
+{
+    if (m_Owner == owner) m_Owner = nullptr;
+}
+
+quint64 AppleClipboardReceiveOwnership::lease(const void* owner, quint64 revision) const
+{
+    return owner != nullptr && m_Owner == owner && m_Revision == revision
+            ? m_Generation : 0;
+}
+
+void AppleClipboardReceiveOwnership::didReceive(const void* owner, quint64 revision)
+{
+    if (m_Owner == owner) m_Revision = revision;
 }
 
 QByteArray AppleClipboardExchange::request(bool promises, quint32 sessionId)

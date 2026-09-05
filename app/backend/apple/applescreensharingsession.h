@@ -61,6 +61,7 @@ struct AppleOutboundControl
         LocalClipboardArchive,
         SetClipboardSharing,
         SetClipboardAutomaticEligible,
+        SetClipboardReceiveGeneration,
         RequestRemoteClipboard,
         SendClipboardArchive,
         SetObserving,
@@ -77,6 +78,7 @@ struct AppleOutboundControl
     AppleInputEncryptionRequest input;
     QByteArray message;
     AppleClipboardArchive clipboardArchive;
+    quint64 clipboardReceiveGeneration = 0;
     quint64 queuedAtNanoseconds = 0;
     quint32 timestampDeltaMicroseconds = 0;
     bool observing = false;
@@ -144,7 +146,8 @@ private:
     void refreshRemoteCursor(SDL_Window* window, bool force);
     void useDefaultRemoteCursor();
     void applyRemoteClipboardArchive(const AppleClipboardArchive& archive,
-                                     bool receivedAutomatically);
+                                     bool receivedAutomatically,
+                                     quint64 receiveGeneration);
     void applyFileTransferEvents(QList<AppleFileTransferEvent> events);
     bool activateRemoteFileDragIfEligible(
             bool pointerInsideStream,
@@ -155,6 +158,8 @@ private:
     void refreshLocalClipboard(bool windowFocusGained);
     void setClipboardWindowFocused(quint32 windowId, bool focused);
     void updateClipboardAutomaticEligibility(bool refreshWhenEligible);
+    void updateClipboardReceiveEligibility();
+    void releaseClipboardReceiveOwnership();
     void toggleClipboardSharing();
     void requestRemoteClipboard();
     void sendLocalClipboard();
@@ -358,6 +363,7 @@ private:
     std::atomic_bool m_SharedClipboardSupported{false};
     std::atomic_bool m_ClipboardSharingEnabled{true};
     std::atomic_bool m_ClipboardAutomaticEligible{false};
+    std::atomic<quint64> m_ClipboardReceiveGeneration{0};
     std::atomic_bool m_ControlReady{false};
     std::atomic<quint8> m_KeyEventSubtype{1};
     std::atomic_bool m_NativePrecisionScrollSupported{false};

@@ -1158,6 +1158,7 @@ void AppleScreenSharingSession::destroyPresentation()
     m_PrimaryWindowMiniaturized.store(false);
     m_SecondaryWindowMiniaturized.store(false);
     m_ClipboardFocusedWindows.clear();
+    releaseClipboardReceiveOwnership();
     m_ClipboardAutomaticEligible.store(false);
     m_FrameUpdatePauseState = AppleFrameUpdatePauseState();
     m_LastRenderLoopAtNanoseconds = 0;

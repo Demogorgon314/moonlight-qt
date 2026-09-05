@@ -19,6 +19,8 @@ std::optional<AppleClipboardArchive> archiveFromMimeData(
 // transient pasteboard flavors are filtered at the individual flavor boundary.
 std::optional<AppleClipboardArchive> readSystemArchive();
 bool writeSystemArchive(const AppleClipboardArchive& archive);
+// Read on the GUI thread; changes even for copies of identical content.
+quint64 systemRevision();
 
 bool isSynchronizableType(const QString& type);
 

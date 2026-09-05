@@ -47,6 +47,9 @@
 
 using AppleScreenSharingSessionPrivate::cursorDpiScale;
 using AppleScreenSharingSessionPrivate::steadyNanoseconds;
+namespace {
+AppleClipboardReceiveOwnership clipboardReceiveOwnership;
+}
 #ifdef Q_OS_WIN
 using AppleScreenSharingSessionPrivate::nativeHandleForWindow;
 #endif
@@ -329,21 +332,26 @@ void AppleScreenSharingSession::useDefaultRemoteCursor()
 
 void AppleScreenSharingSession::applyRemoteClipboardArchive(
         const AppleClipboardArchive& archive,
-        bool receivedAutomatically)
+        bool receivedAutomatically,
+        quint64 receiveGeneration)
 {
+    updateClipboardReceiveEligibility();
     if (m_Observing.load() || archive.isEmpty() ||
             (receivedAutomatically &&
-             !m_ClipboardAutomaticEligible.load())) {
+             (receiveGeneration == 0 ||
+              receiveGeneration != m_ClipboardReceiveGeneration.load()))) {
         return;
     }
     m_ApplyingRemoteClipboard = true;
     m_LocalClipboardTracker.expectRemoteArchive(archive);
     if (!AppleClipboard::writeSystemArchive(archive)) {
+        releaseClipboardReceiveOwnership();
         m_LocalClipboardTracker.reset();
         m_ApplyingRemoteClipboard = false;
         qWarning() << "Apple clipboard could not install the remote archive";
         return;
     }
+    clipboardReceiveOwnership.didReceive(this, AppleClipboard::systemRevision());
     // Consume the native write immediately. QClipboard::dataChanged may be
     // delivered synchronously or later depending on the platform plugin.
     (void)m_LocalClipboardTracker.dataChanged(
@@ -964,6 +972,7 @@ void AppleScreenSharingSession::localClipboardChanged()
     if (m_ApplyingRemoteClipboard) {
         return;
     }
+    updateClipboardReceiveEligibility();
     refreshLocalClipboard(false);
 }
 
@@ -1012,6 +1021,15 @@ void AppleScreenSharingSession::updateClipboardAutomaticEligibility(
     const bool eligible = m_SharedClipboardSupported.load() &&
             m_ClipboardSharingEnabled.load() && !m_Observing.load() &&
             !m_ClipboardFocusedWindows.isEmpty();
+    if (eligible && refreshWhenEligible) {
+        auto* previous = const_cast<AppleScreenSharingSession*>(
+                static_cast<const AppleScreenSharingSession*>(clipboardReceiveOwnership.owner()));
+        clipboardReceiveOwnership.claim(this, AppleClipboard::systemRevision());
+        if (previous != nullptr && previous != this) {
+            previous->updateClipboardReceiveEligibility();
+        }
+    }
+    updateClipboardReceiveEligibility();
     const bool changed = m_ClipboardAutomaticEligible.exchange(eligible) !=
             eligible;
     if (changed && m_ControlReady.load()) {
@@ -1024,6 +1042,29 @@ void AppleScreenSharingSession::updateClipboardAutomaticEligibility(
     if (eligible && refreshWhenEligible) {
         refreshLocalClipboard(true);
     }
+}
+
+void AppleScreenSharingSession::updateClipboardReceiveEligibility()
+{
+    if (m_Cancelled.load() || m_Observing.load() ||
+            !m_SharedClipboardSupported.load() || !m_ClipboardSharingEnabled.load()) {
+        clipboardReceiveOwnership.release(this);
+    }
+    const quint64 generation = clipboardReceiveOwnership.lease(
+            this, AppleClipboard::systemRevision());
+    if (m_ClipboardReceiveGeneration.exchange(generation) != generation &&
+            m_ControlReady.load()) {
+        AppleOutboundControl outbound;
+        outbound.kind = AppleOutboundControl::Kind::SetClipboardReceiveGeneration;
+        outbound.clipboardReceiveGeneration = generation;
+        queueControl(std::move(outbound));
+    }
+}
+
+void AppleScreenSharingSession::releaseClipboardReceiveOwnership()
+{
+    clipboardReceiveOwnership.release(this);
+    updateClipboardReceiveEligibility();
 }
 
 void AppleScreenSharingSession::toggleClipboardSharing()

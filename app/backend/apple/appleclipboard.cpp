@@ -8,6 +8,9 @@
 #include <QSet>
 
 #include <memory>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace {
 
@@ -209,6 +212,20 @@ std::optional<AppleClipboardArchive> readSystemArchive()
     const QClipboard* clipboard = QGuiApplication::clipboard();
     return archiveFromMimeData(
             clipboard != nullptr ? clipboard->mimeData() : nullptr);
+}
+
+quint64 systemRevision()
+{
+#ifdef Q_OS_WIN
+    return GetClipboardSequenceNumber();
+#else
+    static quint64 revision = 0;
+    static const auto connection = QObject::connect(
+            QGuiApplication::clipboard(), &QClipboard::dataChanged,
+            QGuiApplication::instance(), [] { ++revision; });
+    Q_UNUSED(connection);
+    return revision;
+#endif
 }
 
 bool writeSystemArchive(const AppleClipboardArchive& archive)

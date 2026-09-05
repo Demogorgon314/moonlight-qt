@@ -172,6 +172,7 @@ struct AppleClipboardArchive
 
 struct AppleClipboardResult
 {
+    quint64 receiveGeneration = 0;
     bool consumed = false;
     bool receivedAutomatically = false;
     QList<QByteArray> outboundMessages;
@@ -180,8 +181,7 @@ struct AppleClipboardResult
 
 // Owns the promise/data exchange and encrypted-record reassembly used by the
 // native shared pasteboard protocol. Automatic responses are guarded by an
-// eligibility generation so a clipboard fetched for an inactive window is
-// never installed later.
+// receive generation independent of the focused window's send eligibility.
 class AppleClipboardExchange
 {
 public:
@@ -191,7 +191,10 @@ public:
     static constexpr qint64 RequestLifetimeMilliseconds = 120 * 1000;
 
     QList<QByteArray> setSharingEnabled(bool enabled);
+    // Focus gates local advertisements and their responses, not remote receipt.
     void setAutomaticEligible(bool eligible);
+    // Zero revokes automatic receipt; changing the lease discards pending requests.
+    void setReceiveGeneration(quint64 generation);
     QList<QByteArray> advertiseLocalArchive(
             const AppleClipboardArchive& archive,
             QString* error = nullptr);
@@ -253,6 +256,23 @@ private:
     bool m_SharingStateKnown = false;
     bool m_AutomaticEligible = false;
     bool m_HasUnfulfilledPromises = false;
+};
+
+// Main-thread ownership of the system pasteboard. A local write or another
+// session taking ownership invalidates even an already-decoded remote result.
+class AppleClipboardReceiveOwnership
+{
+public:
+    const void* owner() const { return m_Owner; }
+    void claim(const void* owner, quint64 revision);
+    void release(const void* owner);
+    quint64 lease(const void* owner, quint64 revision) const;
+    void didReceive(const void* owner, quint64 revision);
+
+private:
+    const void* m_Owner = nullptr;
+    quint64 m_Revision = 0;
+    quint64 m_Generation = 0;
 };
 
 // Keeps the local clipboard snapshot used by the Apple promise exchange. The

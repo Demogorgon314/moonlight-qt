@@ -184,6 +184,11 @@ std::optional<AppleClipboardArchive> readSystemArchive()
     return archiveFromNativePasteboard([NSPasteboard generalPasteboard]);
 }
 
+quint64 systemRevision()
+{
+    return static_cast<quint64>([NSPasteboard generalPasteboard].changeCount);
+}
+
 bool writeSystemArchive(const AppleClipboardArchive& archive)
 {
     return writeNativePasteboard(

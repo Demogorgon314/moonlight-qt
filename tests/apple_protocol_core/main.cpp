@@ -2390,6 +2390,7 @@ void testStageFourRichClipboardExchange()
     require(enable == QList<QByteArray>{QByteArray::fromHex("1500000100000000")},
             "controlling mode must explicitly enable the shared pasteboard");
     exchange.setAutomaticEligible(true);
+    exchange.setReceiveGeneration(1);
 
     const AppleClipboardArchive richArchive{{
         {{
@@ -2454,9 +2455,10 @@ void testStageFourRichClipboardExchange()
             "a host request must resolve the most recently advertised local archive");
 
     exchange.setAutomaticEligible(false);
+    exchange.setReceiveGeneration(0);
     result = exchange.receive(changed, &error, 14);
     require(result.consumed && result.outboundMessages.isEmpty(),
-            "an unfocused session must ignore automatic remote clipboard changes");
+            "a session without receive ownership must ignore automatic remote clipboard changes");
 
     const QList<QByteArray> disable = exchange.setSharingEnabled(false);
     require(disable == QList<QByteArray>{QByteArray::fromHex("1500000200000000")},
@@ -2491,6 +2493,7 @@ void testStageFourRichClipboardExchange()
     AppleClipboardExchange focusLease;
     focusLease.setSharingEnabled(true);
     focusLease.setAutomaticEligible(true);
+    focusLease.setReceiveGeneration(1);
     result = focusLease.receive(changed, &error, 100);
     const QList<QByteArray> focusPromise =
             AppleClipboardExchange::encodeArchive(
@@ -2505,8 +2508,8 @@ void testStageFourRichClipboardExchange()
     for (const QByteArray& fragment : encoded) {
         result = focusLease.receive(fragment, &error, 102);
     }
-    require(!result.receivedArchive.has_value(),
-            "losing focus must revoke an in-flight automatic clipboard lease");
+    require(result.receivedArchive == std::optional<AppleClipboardArchive>(richArchive),
+            "losing focus must preserve an in-flight automatic clipboard lease");
 
     AppleClipboardExchange invalidAdvertisement;
     invalidAdvertisement.setSharingEnabled(true);
@@ -2529,16 +2532,22 @@ void testClipboardContinuationOwnership()
         QByteArrayLiteral("Clipboard payload spanning encrypted records"), 0,
     }}}}};
     const QByteArray changed = QByteArray::fromHex("1400000000000002");
-    enum class Scenario { Current, Replaced, Expired, Unfocused, SharingDisabled };
+    enum class Scenario {
+        Current, Replaced, Expired, Unfocused, SharingDisabled,
+        OwnershipRevoked, OwnershipChanged,
+    };
     for (Scenario scenario : {Scenario::Current, Scenario::Replaced,
                               Scenario::Expired, Scenario::Unfocused,
-                              Scenario::SharingDisabled}) {
+                              Scenario::SharingDisabled, Scenario::OwnershipRevoked,
+                              Scenario::OwnershipChanged}) {
         AppleClipboardExchange exchange;
         QString error;
         exchange.setSharingEnabled(true);
         exchange.setAutomaticEligible(true);
+        exchange.setReceiveGeneration(1);
         const bool automatic = scenario == Scenario::Unfocused ||
-                scenario == Scenario::SharingDisabled;
+                scenario == Scenario::SharingDisabled ||
+                scenario == Scenario::OwnershipRevoked || scenario == Scenario::OwnershipChanged;
         if (automatic) {
             exchange.receive(changed, &error, 0);
             for (const QByteArray& fragment :
@@ -2564,6 +2573,8 @@ void testClipboardContinuationOwnership()
         if (scenario == Scenario::Expired) now = AppleClipboardExchange::RequestLifetimeMilliseconds;
         if (scenario == Scenario::Unfocused) exchange.setAutomaticEligible(false);
         if (scenario == Scenario::SharingDisabled) exchange.setSharingEnabled(false);
+        if (scenario == Scenario::OwnershipRevoked) exchange.setReceiveGeneration(0);
+        if (scenario == Scenario::OwnershipChanged) exchange.setReceiveGeneration(2);
 
         AppleClipboardResult result;
         // Record boundaries may split compressed data anywhere; none of these
@@ -2577,7 +2588,7 @@ void testClipboardContinuationOwnership()
                         "partial clipboard data must never be installed");
             }
         }
-        require(scenario == Scenario::Current
+        require((scenario == Scenario::Current || scenario == Scenario::Unfocused)
                         ? result.receivedArchive == std::optional<AppleClipboardArchive>(archive)
                         : !result.receivedArchive.has_value(),
                 "only the still-current request may install the completed archive");
@@ -2597,6 +2608,79 @@ void testClipboardContinuationOwnership()
         exchange.resetForReconnect();
         require(!exchange.receiveContinuation(changed, &error, now).consumed,
                 "a new connection must not inherit unfinished payload ownership");
+    }
+}
+
+void testClipboardReceiveOwnershipAcrossFocusChanges()
+{
+    const int firstSession = 1;
+    const int secondSession = 2;
+    const AppleClipboardArchive image{{{{{
+        QStringLiteral("public.png"), {}, QByteArray::fromHex("89504e470d0a1a0a"), 0,
+    }}}}};
+    const AppleClipboardArchive text{{{{{
+        QStringLiteral("public.utf8-plain-text"), {}, QByteArrayLiteral("New text"), 0,
+    }}}}};
+    for (int loseFocusAt = 0; loseFocusAt < 3; ++loseFocusAt) {
+        AppleClipboardReceiveOwnership ownership;
+        ownership.claim(&firstSession, 10);
+        const quint64 lease = ownership.lease(&firstSession, 10);
+        AppleClipboardExchange exchange;
+        exchange.setSharingEnabled(true);
+        exchange.setAutomaticEligible(true);
+        exchange.setReceiveGeneration(lease);
+        QString error;
+        AppleClipboardResult result;
+        quint32 requestId = 1;
+        quint64 revision = 10;
+        for (const auto& archive : {image, text}) {
+            if (loseFocusAt == 0) exchange.setAutomaticEligible(false);
+            result = exchange.receive(QByteArray::fromHex("1400000000000002"), &error, 1);
+            require(result.outboundMessages == QList<QByteArray>{
+                            AppleClipboardExchange::request(true, requestId)},
+                    "the last receive owner must fetch a change arriving after focus loss");
+            if (loseFocusAt == 1) exchange.setAutomaticEligible(false);
+            for (const auto& fragment : AppleClipboardExchange::encodeArchive(
+                         archive, true, requestId++, &error)) {
+                result = exchange.receive(fragment, &error, 2);
+            }
+            require(result.outboundMessages == QList<QByteArray>{
+                            AppleClipboardExchange::request(false, 0)},
+                    "promises arriving after focus loss must still resolve");
+            if (loseFocusAt == 2) exchange.setAutomaticEligible(false);
+            for (const auto& fragment : AppleClipboardExchange::encodeArchive(
+                         archive, false, 0, &error)) {
+                result = exchange.receive(fragment, &error, 3);
+            }
+            require(error.isEmpty() && result.receivedArchive ==
+                            std::optional<AppleClipboardArchive>(archive) &&
+                            result.receiveGeneration == ownership.lease(&firstSession, revision),
+                    "background image and subsequent text must retain their receive lease");
+            ownership.didReceive(&firstSession, ++revision);
+            require(ownership.lease(&firstSession, revision) == lease,
+                    "our own remote write must allow the next remote clipboard update");
+            require(exchange.advertiseLocalArchive(text, &error).isEmpty(),
+                    "background receive ownership must not authorize local advertisements");
+        }
+
+        require(ownership.lease(&firstSession, revision + 1) == 0,
+                "a local copy must reject an already decoded remote image before installation");
+        ownership.claim(&firstSession, revision + 1);
+        require(ownership.lease(&firstSession, revision + 1) != result.receiveGeneration,
+                "refocusing after a local copy must not revive a stale result");
+        ownership.claim(&secondSession, revision + 1);
+        require(ownership.lease(&firstSession, revision + 1) == 0,
+                "switching sessions must revoke the previous receive owner");
+        ownership.release(&firstSession);
+        require(ownership.lease(&secondSession, revision + 1) != 0,
+                "closing an old session must preserve the new owner's lease");
+        const quint64 oldLease = ownership.lease(&secondSession, revision + 1);
+        ownership.release(&secondSession);
+        require(ownership.lease(&secondSession, revision + 1) == 0,
+                "closing or disabling sharing must revoke receive ownership");
+        ownership.claim(&secondSession, revision + 1);
+        require(ownership.lease(&secondSession, revision + 1) != oldLease,
+                "re-enabling sharing must not revive an old lease");
     }
 }
 
@@ -4057,6 +4141,8 @@ int main(int argc, char* argv[])
     testStageFourRichClipboardExchange();
     std::fprintf(stderr, "testClipboardContinuationOwnership\n");
     testClipboardContinuationOwnership();
+    std::fprintf(stderr, "testClipboardReceiveOwnershipAcrossFocusChanges\n");
+    testClipboardReceiveOwnershipAcrossFocusChanges();
     std::fprintf(stderr, "testRichClipboardMimeAdapter\n");
     testRichClipboardMimeAdapter();
     std::fprintf(stderr, "testAppleFileTransferNativeWireContract\n");

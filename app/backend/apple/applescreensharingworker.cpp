@@ -1134,6 +1134,7 @@ private:
             clipboard.setAutomaticEligible(
                     sharedClipboardSupported &&
                     m_Session->m_ClipboardAutomaticEligible.load());
+            clipboard.setReceiveGeneration(m_Session->m_ClipboardReceiveGeneration.load());
             if (sharedClipboardSupported) {
                 for (const QByteArray& message : clipboard.setSharingEnabled(
                              m_Session->m_ClipboardSharingEnabled.load() &&
@@ -1516,6 +1517,9 @@ private:
                     messages = clipboard.requestRemoteClipboard(
                             clock.elapsed());
                     break;
+                case AppleOutboundControl::Kind::SetClipboardReceiveGeneration:
+                    clipboard.setReceiveGeneration(outbound.clipboardReceiveGeneration);
+                    break;
                 case AppleOutboundControl::Kind::SendClipboardArchive:
                     messages = AppleClipboardExchange::encodeArchive(
                             outbound.clipboardArchive, false, 0, error);
@@ -1688,15 +1692,16 @@ private:
                             std::move(*clipboardResult.receivedArchive);
                     const bool receivedAutomatically =
                             clipboardResult.receivedAutomatically;
+                    const quint64 receiveGeneration = clipboardResult.receiveGeneration;
                     QMetaObject::invokeMethod(
                             session,
                             [session,
                              archive = std::move(archive),
-                             receivedAutomatically]() {
+                             receivedAutomatically, receiveGeneration]() {
                                 if (session != nullptr) {
                                     session->applyRemoteClipboardArchive(
                                             archive,
-                                            receivedAutomatically);
+                                            receivedAutomatically, receiveGeneration);
                                 }
                             },
                             Qt::QueuedConnection);
