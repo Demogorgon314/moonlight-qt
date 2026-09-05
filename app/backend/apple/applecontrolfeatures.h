@@ -298,7 +298,12 @@ struct ApplePerformanceOverlayMetrics
     double presentedFramesPerSecond = 0.0;
     double networkMegabitsPerSecond = 0.0;
     double decodeMilliseconds = 0.0;
+    double decodeQueueMilliseconds = 0.0;
     double renderMilliseconds = 0.0;
+    double gpuMilliseconds = 0.0;
+    double submitToDisplayMilliseconds = 0.0;
+    bool hasGpuSample = false;
+    bool hasDisplaySample = false;
     QString decoderBackend;
     bool hasMediaSample = false;
     bool hasPresentationSample = false;

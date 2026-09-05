@@ -1203,13 +1203,22 @@ QList<ApplePerformanceOverlayTextRun> appleMoonlightPerformanceRuns(
         {QStringLiteral(" · %1 ").arg(decoded), 18, false},
         {QStringLiteral("De"), 14, false},
         {QStringLiteral(" · %1 ").arg(presented), 18, false},
-        {QStringLiteral("Rd"), 14, false},
+        {QStringLiteral("Sub"), 14, false},
         {QStringLiteral("  Network Video UDP "), 18, false},
         {bandwidth, 18, true},
-        {QStringLiteral(" Mb/s  |  Render "), 16, false},
+        {QStringLiteral(" Mb/s  |  Submit "), 16, false},
         {render, 18, true},
         {QStringLiteral(" ms · Decode "), 18, false},
         {decode, 18, true},
+        {QStringLiteral(" ms · Queue "), 18, false},
+        {metrics.hasMediaSample ? QString::number(metrics.decodeQueueMilliseconds, 'f', 2)
+                                : unavailable, 18, true},
+        {QStringLiteral(" ms · GPU "), 18, false},
+        {metrics.hasGpuSample ? QString::number(metrics.gpuMilliseconds, 'f', 2)
+                             : unavailable, 18, true},
+        {QStringLiteral(" ms · Submit→Display "), 18, false},
+        {metrics.hasDisplaySample ? QString::number(metrics.submitToDisplayMilliseconds, 'f', 2)
+                                 : unavailable, 18, true},
         {QStringLiteral(" ms"), 18, false},
     };
 }

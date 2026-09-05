@@ -158,6 +158,7 @@ void AppleScreenSharingSession::updatePerformanceStatistics(
                 metrics.networkMegabitsPerSecond;
         m_PerformanceMetrics.decodeMilliseconds =
                 metrics.decodeMilliseconds;
+        m_PerformanceMetrics.decodeQueueMilliseconds = metrics.decodeQueueMilliseconds;
         m_PerformanceMetrics.decoderBackend = metrics.decoderBackend;
         m_PerformanceMetrics.hasMediaSample = metrics.hasMediaSample;
     }
@@ -371,6 +372,9 @@ void AppleScreenSharingSession::renderLatestFrames()
         return;
     }
     const quint64 renderLoopAtNanoseconds = steadyNanoseconds();
+    const auto timings = m_VideoRenderer->takePresentationTimings();
+    m_GpuDurations.append(timings.gpuMilliseconds);
+    m_ActualDisplayLatencies.append(timings.submitToDisplayMilliseconds);
     if (m_LastRenderLoopAtNanoseconds != 0 &&
             renderLoopAtNanoseconds >= m_LastRenderLoopAtNanoseconds) {
         m_MaxRenderLoopGapMilliseconds = qMax(
@@ -482,7 +486,14 @@ void AppleScreenSharingSession::renderLatestFrames()
         m_AwaitingDecodeSubmissions.clear();
         return;
     }
-    firstFramePresented(0);
+    if (m_VideoRenderer->hasCompletedFrame()) {
+        firstFramePresented(0);
+    }
+    else {
+        // A hidden drawable may never receive an on-screen callback. Wait for
+        // successful GPU completion before showing it, and keep startup awake.
+        m_PresentationNeeded.store(true);
+    }
     ++m_PresentationCount;
     m_PresentedTileUpdates += static_cast<quint64>(
             m_AwaitingDecodeSubmissions.size());
@@ -524,11 +535,20 @@ void AppleScreenSharingSession::renderLatestFrames()
                 calculateIntervalStatistics(m_SubmitToDisplayLatencies);
         const IntervalStatistics renderCalls =
                 calculateIntervalStatistics(m_RenderCallDurations);
+        const auto gpu = calculateIntervalStatistics(m_GpuDurations);
+        const auto display = calculateIntervalStatistics(m_ActualDisplayLatencies);
+        const QString gpuTime = m_GpuDurations.isEmpty()
+                ? QStringLiteral("—") : QString::number(gpu.average, 'f', 2);
+        const QString displayTime = m_ActualDisplayLatencies.isEmpty()
+                ? QStringLiteral("—") : QString::number(display.average, 'f', 2);
+        const QString displayP95 = m_ActualDisplayLatencies.isEmpty()
+                ? QStringLiteral("—") : QString::number(display.percentile95, 'f', 2);
         const QString presentationSummary = QStringLiteral(
-                "DISPLAY %1 FPS   VSYNC %2 Hz   TILE UPDATES %3/s   COALESCED %4\n"
+                "SUBMITTED %1 FPS   PRESENT CALLS %2/s   TILE UPDATES %3/s   COALESCED %4\n"
                 "FRAME TIME %5 ms avg   %6 p95   JITTER %7 ms\n"
-                        "DECODE TO PRESENT %8 ms avg   %9 p95\n"
-                "PRESENT CALL %10 ms avg   %11 p95   BUSY %12")
+                        "DECODE TO SUBMIT %8 ms avg   %9 p95\n"
+                "PRESENT CALL %10 ms avg   %11 p95   BUSY %12\n"
+                "GPU %13 ms   SUBMIT TO DISPLAY %14/%15 ms avg/p95")
                 .arg(m_DisplayedFrameBatches / seconds, 0, 'f', 1)
                 .arg(m_PresentationCount / seconds, 0, 'f', 1)
                 .arg(m_PresentedTileUpdates / seconds, 0, 'f', 1)
@@ -540,13 +560,18 @@ void AppleScreenSharingSession::renderLatestFrames()
                 .arg(submitToDisplay.percentile95, 0, 'f', 1)
                 .arg(renderCalls.average, 0, 'f', 2)
                 .arg(renderCalls.percentile95, 0, 'f', 2)
-                .arg(m_PresentationBusyCount);
+                .arg(m_PresentationBusyCount)
+                .arg(gpuTime).arg(displayTime).arg(displayP95);
         {
             QMutexLocker locker(&m_PerformanceMutex);
             m_PerformancePresentationSummary = presentationSummary;
             m_PerformanceMetrics.presentedFramesPerSecond =
                     m_DisplayedFrameBatches / seconds;
             m_PerformanceMetrics.renderMilliseconds = renderCalls.average;
+            m_PerformanceMetrics.gpuMilliseconds = gpu.average;
+            m_PerformanceMetrics.submitToDisplayMilliseconds = display.average;
+            m_PerformanceMetrics.hasGpuSample = !m_GpuDurations.isEmpty();
+            m_PerformanceMetrics.hasDisplaySample = !m_ActualDisplayLatencies.isEmpty();
             m_PerformanceMetrics.hasPresentationSample = true;
         }
         qInfo().nospace()
@@ -554,20 +579,22 @@ void AppleScreenSharingSession::renderLatestFrames()
                 << QString::number(m_PresentationCount / seconds, 'f', 1)
                 << " presents/s, "
                 << QString::number(m_PresentedTileUpdates / seconds, 'f', 1)
-                << " tile updates/s, displayed="
+                << " tile updates/s, submitted="
                 << QString::number(m_DisplayedFrameBatches / seconds, 'f', 1)
-                << " fps, coalesced=" << m_DroppedFrameBatches
+                << " submitted fps, coalesced=" << m_DroppedFrameBatches
                 << ", frame interval avg/p95/jitter="
                 << QString::number(displayCadence.average, 'f', 1) << "/"
                 << QString::number(displayCadence.percentile95, 'f', 1) << "/"
                 << QString::number(displayCadence.jitter, 'f', 1)
-                << " ms, decode-to-present avg/p95="
+                << " ms, decode-to-submit avg/p95="
                 << QString::number(submitToDisplay.average, 'f', 1) << "/"
                 << QString::number(submitToDisplay.percentile95, 'f', 1)
                 << " ms, present-call avg/p95="
                 << QString::number(renderCalls.average, 'f', 2) << "/"
                 << QString::number(renderCalls.percentile95, 'f', 2)
                 << " ms, busy=" << m_PresentationBusyCount
+                << ", gpu=" << gpuTime
+                << " ms, submit-to-display avg/p95=" << displayTime << "/" << displayP95
                 << ", render-loop max="
                 << QString::number(m_MaxRenderLoopGapMilliseconds, 'f', 2)
                 << " ms, overlay-update max="
@@ -582,6 +609,8 @@ void AppleScreenSharingSession::renderLatestFrames()
         m_DisplayFrameIntervals.clear();
         m_SubmitToDisplayLatencies.clear();
         m_RenderCallDurations.clear();
+        m_GpuDurations.clear();
+        m_ActualDisplayLatencies.clear();
         m_MaxRenderLoopGapMilliseconds = 0.0;
         m_MaxOverlayUpdateMilliseconds = 0.0;
         requestPerformanceOverlayUpdate();
@@ -656,7 +685,10 @@ void AppleScreenSharingSession::renderSecondaryFrames()
                 << "Apple High Performance display 2 render failed: "
                 << renderError;
     }
-    else {
+    else if (m_SecondaryVideoRenderer->hasCompletedFrame()) {
         firstFramePresented(1);
+    }
+    else {
+        m_SecondaryPresentationNeeded.store(true);
     }
 }

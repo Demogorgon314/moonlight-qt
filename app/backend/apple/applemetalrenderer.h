@@ -29,6 +29,8 @@ public:
     bool uploadOverlay(const QImage& image,
                        QString* error = nullptr) override;
     void clearOverlay() override;
+    bool hasCompletedFrame() const override;
+    AppleVideoPresentationTimings takePresentationTimings() override;
     RenderResult render(const AppleCanvas& canvas,
                         const QList<int>& tileHeights,
                         QString* error = nullptr) override;

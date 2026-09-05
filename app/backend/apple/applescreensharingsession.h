@@ -315,6 +315,8 @@ private:
     QVector<double> m_DisplayFrameIntervals;
     QVector<double> m_SubmitToDisplayLatencies;
     QVector<double> m_RenderCallDurations;
+    QVector<double> m_GpuDurations;
+    QVector<double> m_ActualDisplayLatencies;
     QString m_PerformanceMediaSummary;
     QString m_SecondaryPerformanceSummary;
     QString m_PerformancePresentationSummary;

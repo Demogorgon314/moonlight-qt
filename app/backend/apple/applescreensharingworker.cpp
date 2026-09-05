@@ -526,6 +526,8 @@ public:
 
         Type type = Type::Decoded;
         quint64 decodeNanoseconds = 0;
+        quint64 queueWaitNanoseconds = 0;
+        bool decodeAttempted = false;
         QList<quint32> decodedTimestamps;
         QList<quint16> decodedLongTermReferences;
         QString error;
@@ -636,12 +638,14 @@ public:
         for (const QByteArray& nal : accessUnit.nalUnits) {
             bytes += static_cast<quint64>(nal.size());
         }
-        if (!m_Backlog.admit(bytes, steadyNanoseconds())) {
+        const quint64 queuedAt = steadyNanoseconds();
+        if (!m_Backlog.admit(bytes, queuedAt)) {
             recoverBacklogLocked();
             return;
         }
         Work work;
         work.kind = Work::Kind::Submit;
+        accessUnit.decodeQueuedAtNanoseconds = queuedAt;
         work.accessUnit = std::move(accessUnit);
         work.parameterSets = std::move(parameterSets);
         work.sourceToTile = std::move(sourceToTile);
@@ -868,6 +872,7 @@ private:
                 }
 
                 QString decodeError;
+                const quint64 decodeStartedAt = steadyNanoseconds();
                 QElapsedTimer decodeClock;
                 decodeClock.start();
                 const quint64 generation = decoder->generation();
@@ -885,6 +890,10 @@ private:
 
                 Event event;
                 event.decodeNanoseconds = decodeClock.nsecsElapsed();
+                event.decodeAttempted = true;
+                event.queueWaitNanoseconds = ready.decodeQueuedAtNanoseconds != 0 &&
+                        decodeStartedAt >= ready.decodeQueuedAtNanoseconds
+                        ? decodeStartedAt - ready.decodeQueuedAtNanoseconds : 0;
                 event.backend = decoder->backend();
                 event.hardwareFallback =
                         decoder->hardwareFallbackOccurred();
@@ -1268,6 +1277,7 @@ private:
         QVector<double> performanceRtpFrameIntervals;
         QVector<double> performanceControlSendLatencies;
         qint64 performanceDecodeNanoseconds = 0;
+        QVector<double> performanceDecodeQueueWaits;
         AppleAudioStatistics previousAudioStatistics;
         bool observing = m_Session->m_Observing.load();
         AppleCanvas activeCanvas = negotiation.canvas;
@@ -1382,7 +1392,10 @@ private:
                         return false;
                     }
                 }
-                ++performanceDecodeCalls;
+                if (event.decodeAttempted) {
+                    ++performanceDecodeCalls;
+                    performanceDecodeQueueWaits.append(event.queueWaitNanoseconds / 1000000.0);
+                }
                 performanceDecodeNanoseconds += event.decodeNanoseconds;
                 performanceDecodedTiles += static_cast<quint64>(
                         event.decodedTimestamps.size());
@@ -1952,10 +1965,12 @@ private:
                                 0, std::memory_order_relaxed);
                 const QString backend =
                         appleVideoDecoderBackendName(decoderBackend);
+                const auto decodeQueue = calculateIntervalStatistics(performanceDecodeQueueWaits);
                 const QString mediaSummary = QStringLiteral(
                         "SOURCE %1 FPS   RX %2 Mbps   HEVC 4:4:4 %3 tiles/s @ %4 ms   %5\n"
                         "ARRIVAL %6/%7 ms avg/p95   RTP %8/%9 ms avg/p95   JITTER %10 ms   NACK %11   FIR %12\n"
-                        "CONTROL SEND %13/%14 ms avg/p95   POINTER MERGED %15/s   QUEUE MAX %16")
+                        "CONTROL SEND %13/%14 ms avg/p95   POINTER MERGED %15/s   QUEUE MAX %16\n"
+                        "DECODE QUEUE %17/%18 ms avg/p95")
                         .arg(sourceFramesPerSecond, 0, 'f', 1)
                         .arg(performanceBytes * 8.0 / seconds / 1000000.0,
                              0, 'f', 1)
@@ -1972,7 +1987,9 @@ private:
                         .arg(controlLatency.average, 0, 'f', 2)
                         .arg(controlLatency.percentile95, 0, 'f', 2)
                         .arg(coalescedPointerMotions / seconds, 0, 'f', 1)
-                        .arg(maximumControlDepth);
+                        .arg(maximumControlDepth)
+                        .arg(decodeQueue.average, 0, 'f', 2)
+                        .arg(decodeQueue.percentile95, 0, 'f', 2);
                 ApplePerformanceOverlayMetrics overlayMetrics;
                 overlayMetrics.canvasSize = QSize(activeCanvas.width,
                                                    activeCanvas.height);
@@ -1985,6 +2002,7 @@ private:
                         performanceBytes * 8.0 / seconds / 1000000.0;
                 overlayMetrics.decodeMilliseconds =
                         averageDecodeMilliseconds;
+                overlayMetrics.decodeQueueMilliseconds = decodeQueue.average;
                 overlayMetrics.decoderBackend = backend;
                 overlayMetrics.hasMediaSample = true;
                 if (audio != nullptr) {
@@ -2043,7 +2061,10 @@ private:
                         << QString::number(performanceDecodedTiles / seconds, 'f', 1)
                         << " tiles/s, source="
                         << QString::number(sourceFramesPerSecond, 'f', 1)
-                        << " fps, avg decode="
+                        << " fps, decode queue avg/p95="
+                        << QString::number(decodeQueue.average, 'f', 2) << "/"
+                        << QString::number(decodeQueue.percentile95, 'f', 2)
+                        << " ms, avg decode="
                         << QString::number(averageDecodeMilliseconds, 'f', 2)
                         << " ms, backend="
                         << appleVideoDecoderBackendName(decoderBackend)
@@ -2089,6 +2110,7 @@ private:
                 performanceRtpFrameIntervals.clear();
                 performanceControlSendLatencies.clear();
                 performanceDecodeNanoseconds = 0;
+                performanceDecodeQueueWaits.clear();
             }
         }
         return true;

@@ -1080,7 +1080,7 @@ void AppleScreenSharingSession::firstFramePresented(int displayIndex)
             }
 #endif
         };
-        qInfo() << "Apple High Performance first complete frame presented: display="
+        qInfo() << "Apple High Performance first complete frame ready: display="
                 << displayIndex + 1;
         if (displayIndex == 0) {
             emit guard->connectionStarted();
@@ -1138,6 +1138,8 @@ void AppleScreenSharingSession::destroyPresentation()
     }
     m_PresentationWake.tryAcquire(m_PresentationWake.available());
     m_PresentationCanvasRevision = 0;
+    m_GpuDurations.clear();
+    m_ActualDisplayLatencies.clear();
     m_TileHeights.clear();
     m_Textures.clear();
     m_TextureSizes.clear();

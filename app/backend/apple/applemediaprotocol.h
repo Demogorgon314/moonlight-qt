@@ -431,6 +431,8 @@ struct AppleHevcAccessUnit
     std::optional<quint16> frameSequenceNumber;
     std::optional<quint16> totalPacketsPerFrame;
     bool isLongTermReferenceFrame = false;
+    // Local monotonic time; carried through DON reordering, never serialized.
+    quint64 decodeQueuedAtNanoseconds = 0;
     QList<QByteArray> nalUnits;
     SubframeBoundary subframeBoundary = SubframeBoundary::Unknown;
 

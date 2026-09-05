@@ -1169,6 +1169,16 @@ void testHevcGlobalDecodingOrderAdmission()
             admission.enqueue({unit(200, 9)}).isEmpty() &&
             admission.enqueue({unit(300, 12)}).size() == 1,
             "DON admission must be shared across tile SSRCs and allow forward gaps");
+    admission.reset();
+    auto arrivedFirst = unit(100, 20);
+    arrivedFirst.decodeQueuedAtNanoseconds = 1000000;
+    auto arrivedSecond = unit(200, 19);
+    arrivedSecond.decodeQueuedAtNanoseconds = 2000000;
+    const auto reordered = admission.enqueue({arrivedFirst, arrivedSecond});
+    require(reordered.size() == 2 &&
+                    reordered.at(0).decodeQueuedAtNanoseconds == 2000000 &&
+                    reordered.at(1).decodeQueuedAtNanoseconds == 1000000,
+            "decode reordering must preserve each access unit's original queue entry time");
 }
 
 void testEncryptedInputWireBoundary()
@@ -1920,6 +1930,37 @@ void testInitialPresentationResetsForNewCanvasAndReconnect()
     frames.setCanvas({2, 2, 1});
     require(frames.takePendingFrames().tiles.size() == 1,
             "a single-tile reconnect must retain output received before canvas setup");
+}
+
+void testPresentationFeedbackSeparatesCompletionFromDisplay()
+{
+    auto feedback = std::make_shared<AppleVideoPresentationFeedback>();
+    require(!feedback->hasCompletedFrame(), "submission alone must not mark the first frame ready");
+    feedback->recordGpu(false, 10.0, 10.001);
+    require(!feedback->hasCompletedFrame(), "failed GPU work must not reveal the stream window");
+    feedback->recordPresentation(10.0, 0.0);
+    feedback->recordPresentation(10.0, 9.0);
+    require(feedback->takeTimings().submitToDisplayMilliseconds.isEmpty(),
+            "dropped and invalid presentation timestamps must not become latency samples");
+    feedback->recordGpu(true, 0.0, 0.0);
+    require(feedback->hasCompletedFrame() && feedback->takeTimings().gpuMilliseconds.isEmpty(),
+            "successful GPU completion must allow hidden-window startup without display timestamps");
+    auto delayedCallback = [feedback]() {
+        feedback->recordGpu(true, 20.0, 20.002);
+        feedback->recordPresentation(20.0, 20.015);
+    };
+    auto observer = feedback;
+    feedback.reset();
+    delayedCallback();
+    const auto sample = observer->takeTimings();
+    require(sample.gpuMilliseconds.size() == 1 &&
+                    sample.submitToDisplayMilliseconds.size() == 1 &&
+                    qAbs(sample.gpuMilliseconds.first() - 2.0) < 0.001 &&
+                    qAbs(sample.submitToDisplayMilliseconds.first() - 15.0) < 0.001,
+            "late native callbacks must retain feedback and keep GPU and display timings separate");
+    const auto drained = observer->takeTimings();
+    require(drained.gpuMilliseconds.isEmpty() && drained.submitToDisplayMilliseconds.isEmpty(),
+            "each asynchronous timing must be reported exactly once");
 }
 
 void testDecodeBacklogBoundsAndRecovery()
@@ -3678,16 +3719,19 @@ void testApplePerformanceOverlayFollowsSharedSettingsAndPlacement()
     metrics.hasMediaSample = true;
     metrics.hasPresentationSample = true;
     const QStringList compactLines = appleMoonlightPerformanceLines(metrics);
+    require(compactLines.first().contains(QStringLiteral("GPU — ms")) &&
+                    compactLines.first().contains(QStringLiteral("Submit→Display — ms")),
+            "unavailable native timing must not be displayed as a measured zero");
     require(compactLines.size() == 1 &&
                     compactLines.at(0).contains(
                             QStringLiteral(
-                                    "3840x2160@60 HEVC 4:4:4/D3D11VA  FPS 59.8 Rx · 59.7 De · 59.6 Rd")) &&
+                                    "3840x2160@60 HEVC 4:4:4/D3D11VA  FPS 59.8 Rx · 59.7 De · 59.6 Sub")) &&
                     compactLines.at(0).contains(
                             QStringLiteral(
                                     "Network Video UDP 42.3 Mb/s")) &&
                     compactLines.at(0).contains(
                             QStringLiteral(
-                                    "Render 0.18 ms · Decode 0.42 ms")),
+                                    "Submit 0.18 ms · Decode 0.42 ms")),
             "Moonlight-style Apple metrics must remain on Moonlight's single rendered row");
     const QList<ApplePerformanceOverlayTextRun> compactRuns =
             appleMoonlightPerformanceRuns(metrics);
@@ -3780,6 +3824,8 @@ void testNativePresentationFactoryUsesLowLatencyAdapter()
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
+    std::fprintf(stderr, "testPresentationFeedbackSeparatesCompletionFromDisplay\n");
+    testPresentationFeedbackSeparatesCompletionFromDisplay();
     std::fprintf(stderr, "testDecodeBacklogBoundsAndRecovery\n");
     testDecodeBacklogBoundsAndRecovery();
     std::fprintf(stderr, "testInitialTilesSurviveDeferredCanvasSetup\n");
@@ -3794,6 +3840,7 @@ int main(int argc, char* argv[])
         return 0;
     }
     if (application.arguments().contains(QStringLiteral("--video-pipeline-tests"))) {
+        testApplePerformanceOverlayFollowsSharedSettingsAndPlacement();
         // These cases exercise media and frame delivery without creating a
         // native window, changing focus, or touching the system clipboard.
         testHighPerformanceMediaOfferAndAnswer();

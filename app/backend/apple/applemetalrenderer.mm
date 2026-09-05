@@ -410,6 +410,8 @@ public:
 
     SDL_Window* window = nullptr;
     QString lastFrameRetryError;
+    std::shared_ptr<AppleVideoPresentationFeedback> presentationFeedback =
+            std::make_shared<AppleVideoPresentationFeedback>();
     SDL_MetalView metalView = nullptr;
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
@@ -854,15 +856,35 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
                     vertexCount:4];
     }
     [encoder endEncoding];
+    const auto feedback = implementation.presentationFeedback;
+    const double submittedAt = CACurrentMediaTime();
+    [drawable addPresentedHandler:^(id<MTLDrawable> presentedDrawable) {
+        feedback->recordPresentation(submittedAt, presentedDrawable.presentedTime);
+    }];
     [commandBuffer presentDrawable:drawable];
     dispatch_semaphore_t gate = implementation.inFlightGate;
-    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        feedback->recordGpu(completed.status == MTLCommandBufferStatusCompleted,
+                            completed.GPUStartTime, completed.GPUEndTime);
         dispatch_semaphore_signal(gate);
     }];
     [commandBuffer commit];
     implementation.lastFrameRetryError.clear();
     return RenderResult::Presented;
 }}
+
+bool AppleMetalRenderer::hasCompletedFrame() const
+{
+    return m_Implementation != nullptr &&
+            m_Implementation->presentationFeedback->hasCompletedFrame();
+}
+
+AppleVideoPresentationTimings AppleMetalRenderer::takePresentationTimings()
+{
+    return m_Implementation != nullptr
+            ? m_Implementation->presentationFeedback->takeTimings()
+            : AppleVideoPresentationTimings{};
+}
 
 bool AppleMetalRenderer::startDisplayLink(
         const std::function<void()>& callback)
