@@ -5,6 +5,7 @@
 #include "SDL.h"
 
 #include <QCoreApplication>
+#include <QDebug>
 #include <QHash>
 #include <QImage>
 #include <QPoint>
@@ -408,6 +409,7 @@ public:
     }
 
     SDL_Window* window = nullptr;
+    QString lastFrameRetryError;
     SDL_MetalView metalView = nullptr;
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
@@ -704,6 +706,20 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
         return RenderResult::Failed;
     }
 
+    const auto retryFrame = [&](const QString& reason) {
+        // Nothing from this command buffer may reach the screen unless every
+        // visible tile was encoded. Keep the previous drawable and let the
+        // session retry the retained tiles, even if the sender is now idle.
+        [encoder endEncoding];
+        dispatch_semaphore_signal(implementation.inFlightGate);
+        setError(error, reason);
+        if (reason != implementation.lastFrameRetryError) {
+            qWarning().noquote() << "Apple Metal frame deferred:" << reason;
+            implementation.lastFrameRetryError = reason;
+        }
+        return RenderResult::Busy;
+    };
+
     const double scale = qMin(static_cast<double>(outputWidth) / canvas.width,
                               static_cast<double>(outputHeight) / canvas.height);
     const int contentWidth = qRound(canvas.width * scale);
@@ -720,8 +736,11 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
         const int tileHeight = tileHeights.value(tileIndex);
         const int validHeight = qMin(tileHeight, canvas.height - logicalTop);
         logicalTop += tileHeight;
-        if (tileIterator == implementation.tiles.cend() || validHeight <= 0) {
+        if (validHeight <= 0) {
             continue;
+        }
+        if (tileIterator == implementation.tiles.cend()) {
+            return retryFrame(QStringLiteral("Missing visible tile %1").arg(tileIndex));
         }
         const Implementation::TileResource& resource = tileIterator.value();
         const AppleDecodedTile& tile = resource.metadata;
@@ -749,6 +768,10 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
                            length:sizeof(conversion)
                           atIndex:0];
         if (tile.pixelFormat == AppleDecodedTile::PixelFormat::Vuya) {
+            if (resource.packedTexture == nil) {
+                return retryFrame(QStringLiteral("Missing packed texture for tile %1")
+                                          .arg(tileIndex));
+            }
             [encoder setRenderPipelineState:implementation.vuyaPipeline];
             [encoder setFragmentTexture:resource.packedTexture atIndex:0];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
@@ -762,7 +785,8 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
                 ? reinterpret_cast<CVPixelBufferRef>(hardwareFrame->data[3])
                 : nullptr;
         if (pixelBuffer == nullptr) {
-            continue;
+            return retryFrame(QStringLiteral("Missing pixel buffer for tile %1")
+                                      .arg(tileIndex));
         }
         CVMetalTextureRef lumaImage = nullptr;
         CVMetalTextureRef chromaImage = nullptr;
@@ -776,8 +800,12 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
                 nullptr, MTLPixelFormatRG8Unorm,
                 CVPixelBufferGetWidthOfPlane(pixelBuffer, 1),
                 CVPixelBufferGetHeightOfPlane(pixelBuffer, 1), 1, &chromaImage);
-        if (lumaResult == kCVReturnSuccess && chromaResult == kCVReturnSuccess &&
-                lumaImage != nullptr && chromaImage != nullptr) {
+        const bool mapped = lumaResult == kCVReturnSuccess &&
+                chromaResult == kCVReturnSuccess &&
+                lumaImage != nullptr && chromaImage != nullptr &&
+                CVMetalTextureGetTexture(lumaImage) != nil &&
+                CVMetalTextureGetTexture(chromaImage) != nil;
+        if (mapped) {
             [encoder setRenderPipelineState:implementation.nv24Pipeline];
             [encoder setFragmentTexture:CVMetalTextureGetTexture(lumaImage)
                                 atIndex:0];
@@ -792,6 +820,11 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
         }
         if (chromaImage != nullptr) {
             CFRelease(chromaImage);
+        }
+        if (!mapped) {
+            return retryFrame(QStringLiteral(
+                    "Tile %1 texture mapping failed (luma=%2, chroma=%3)")
+                                      .arg(tileIndex).arg(lumaResult).arg(chromaResult));
         }
     }
 
@@ -827,6 +860,7 @@ AppleVideoRenderer::RenderResult AppleMetalRenderer::render(
         dispatch_semaphore_signal(gate);
     }];
     [commandBuffer commit];
+    implementation.lastFrameRetryError.clear();
     return RenderResult::Presented;
 }}
 
