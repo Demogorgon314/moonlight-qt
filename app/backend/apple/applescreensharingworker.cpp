@@ -521,6 +521,7 @@ public:
             Decoded,
             DecodeFailure,
             DecoderReset,
+            QueueOverload,
         };
 
         Type type = Type::Decoded;
@@ -631,6 +632,14 @@ public:
         if (m_Stopping || m_RecoveryPending) {
             return;
         }
+        quint64 bytes = 0;
+        for (const QByteArray& nal : accessUnit.nalUnits) {
+            bytes += static_cast<quint64>(nal.size());
+        }
+        if (!m_Backlog.admit(bytes, steadyNanoseconds())) {
+            recoverBacklogLocked();
+            return;
+        }
         Work work;
         work.kind = Work::Kind::Submit;
         work.accessUnit = std::move(accessUnit);
@@ -644,11 +653,12 @@ public:
     void resetDecodingOrder(bool discardPending = false)
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        if (m_Stopping) {
+        if (m_Stopping || (m_RecoveryPending && discardPending)) {
             return;
         }
         if (discardPending) {
             m_Work.clear();
+            m_Backlog.clear();
         }
         Work work;
         work.kind = Work::Kind::ResetDecodingOrder;
@@ -665,9 +675,10 @@ public:
             return;
         }
         m_Work.clear();
+        m_Backlog.clear();
         Work work;
         work.kind = Work::Kind::ResetPipeline;
-        work.canvas = canvas;
+        m_Canvas = canvas;
         work.generation = ++m_RequestedGeneration;
         m_Work.push_back(std::move(work));
         m_RecoveryPending = false;
@@ -691,6 +702,7 @@ public:
             }
             m_Stopping = true;
             m_Work.clear();
+            m_Backlog.clear();
             m_Changed.notify_all();
         }
         m_Thread.join();
@@ -710,21 +722,49 @@ private:
         AppleHevcAccessUnit accessUnit;
         AppleHevcParameterSets parameterSets;
         QHash<quint32, int> sourceToTile;
-        AppleCanvas canvas;
         quint64 generation = 0;
     };
 
-    void publishReadyBatches(AppleDecodedFrameBatcher* batcher)
+    bool publishReadyBatches(AppleDecodedFrameBatcher* batcher, quint64 generation)
     {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_Stopping || generation != m_RequestedGeneration) {
+            batcher->reset();
+            return false;
+        }
         QList<QList<AppleDecodedTile>> batches = batcher->takeReadyBatches();
         for (QList<AppleDecodedTile>& batch : batches) {
             m_BatchHandler(std::move(batch));
         }
+        return true;
     }
 
-    void appendEvent(Event event, bool recoveryPending = false)
+    void recoverBacklogLocked()
+    {
+        // Preserve the requested canvas, invalidate the in-flight decode, and flush
+        // on the decoder thread before admitting the next random-access frame.
+        m_Work.clear();
+        m_Backlog.clear();
+        Work reset;
+        reset.kind = Work::Kind::ResetPipeline;
+        reset.generation = ++m_RequestedGeneration;
+        m_Work.push_back(std::move(reset));
+        m_RecoveryPending = true;
+        Event event;
+        event.type = Event::Type::QueueOverload;
+        event.backend = m_Backend;
+        event.hardwareFallback = m_HardwareFallback;
+        event.error = QStringLiteral("compressed input backlog exceeded its latency or capacity budget");
+        m_Events.append(std::move(event));
+        m_Changed.notify_one();
+    }
+
+    void appendEvent(Event event, quint64 generation, bool recoveryPending = false)
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
+        if (generation != m_RequestedGeneration) {
+            return;
+        }
         m_Backend = event.backend;
         m_HardwareFallback = event.hardwareFallback;
         if (recoveryPending) {
@@ -732,6 +772,7 @@ private:
             // the old reference generation. The network worker will resume
             // submission at the next random-access picture.
             m_Work.clear();
+            m_Backlog.clear();
             m_RecoveryPending = true;
         }
         m_Events.append(std::move(event));
@@ -776,8 +817,14 @@ private:
                 if (m_Stopping) {
                     break;
                 }
+                if (m_Backlog.expired(steadyNanoseconds())) {
+                    recoverBacklogLocked();
+                }
                 work = std::move(m_Work.front());
                 m_Work.pop_front();
+                if (work.kind == Work::Kind::Submit) {
+                    m_Backlog.take();
+                }
             }
 
             if (work.kind == Work::Kind::ResetDecodingOrder) {
@@ -793,7 +840,6 @@ private:
                 frameBatcher.reset();
                 decoder->flush();
                 std::lock_guard<std::mutex> lock(m_Mutex);
-                m_Canvas = work.canvas;
                 m_Backend = decoder->backend();
                 m_HardwareFallback = decoder->hardwareFallbackOccurred();
                 continue;
@@ -817,7 +863,9 @@ private:
                 const int tile = work.sourceToTile.value(
                         ready.synchronizationSource);
                 frameBatcher.recordSubmission(ready, tile);
-                publishReadyBatches(&frameBatcher);
+                if (!publishReadyBatches(&frameBatcher, work.generation)) {
+                    break;
+                }
 
                 QString decodeError;
                 QElapsedTimer decodeClock;
@@ -845,7 +893,7 @@ private:
                     decodingOrder.reset();
                     event.type = Event::Type::DecoderReset;
                     event.error = decodeError;
-                    appendEvent(std::move(event), true);
+                    appendEvent(std::move(event), work.generation, true);
                     break;
                 }
 
@@ -859,16 +907,17 @@ private:
                 if (!frames.isEmpty()) {
                     event.type = Event::Type::Decoded;
                     frameBatcher.recordDecodedFrames(std::move(frames));
-                    publishReadyBatches(&frameBatcher);
+                    if (!publishReadyBatches(&frameBatcher, work.generation)) {
+                        break;
+                    }
                     if (!notifiedReady) {
-                        notifiedReady = true;
-                        AppleCanvas canvas;
-                        {
-                            std::lock_guard<std::mutex> lock(m_Mutex);
-                            canvas = m_Canvas;
+                        std::lock_guard<std::mutex> lock(m_Mutex);
+                        if (work.generation != m_RequestedGeneration) {
+                            break;
                         }
+                        notifiedReady = true;
                         m_ReadyHandler(
-                                canvas,
+                                m_Canvas,
                                 decoder->backend(),
                                 decoder->hardwareFallbackOccurred(),
                                 decoder->presentationContext());
@@ -879,9 +928,11 @@ private:
                     event.error = decodeError;
                     frameBatcher.recordDecodeFailure(
                             ready.frameSequenceNumber, tile);
-                    publishReadyBatches(&frameBatcher);
+                    if (!publishReadyBatches(&frameBatcher, work.generation)) {
+                        break;
+                    }
                 }
-                appendEvent(std::move(event));
+                appendEvent(std::move(event), work.generation);
             }
         }
         decoder->close();
@@ -893,6 +944,7 @@ private:
     std::condition_variable m_Changed;
     std::thread m_Thread;
     std::deque<Work> m_Work;
+    AppleVideoDecodeBacklog m_Backlog;
     QList<Event> m_Events;
     AppleCanvas m_Canvas;
     BatchHandler m_BatchHandler;
@@ -1361,7 +1413,9 @@ private:
                 }
 
                 if (event.type ==
-                        ApplePrimaryVideoDecodeQueue::Event::Type::DecoderReset) {
+                        ApplePrimaryVideoDecodeQueue::Event::Type::DecoderReset ||
+                    event.type ==
+                        ApplePrimaryVideoDecodeQueue::Event::Type::QueueOverload) {
                     assembler.discardIncomplete();
                     awaitingRandomAccessPicture = true;
                     hasEnteredDecodeRefreshState = true;

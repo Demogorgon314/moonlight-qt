@@ -6,6 +6,7 @@
 #include <QList>
 #include <QString>
 
+#include <deque>
 #include <memory>
 
 struct AVBufferRef;
@@ -29,6 +30,26 @@ struct AppleVideoBackendContext
 {
     AppleVideoDecoderBackend backend = AppleVideoDecoderBackend::Software;
     std::shared_ptr<void> nativeDevice;
+};
+
+// Tracks compressed input waiting for the decoder. The owner serializes this
+// budget with its work queue and must reset references after admission fails.
+class AppleVideoDecodeBacklog
+{
+public:
+    static constexpr int MaximumSamples = 64;
+    static constexpr quint64 MaximumBytes = 32 * 1024 * 1024;
+    static constexpr quint64 MaximumAgeNanoseconds = 250000000;
+
+    bool admit(quint64 bytes, quint64 now);
+    bool expired(quint64 now) const;
+    void take();
+    void clear();
+
+private:
+    struct Sample { quint64 bytes; quint64 enqueuedAt; };
+    std::deque<Sample> m_Samples;
+    quint64 m_Bytes = 0;
 };
 
 struct AppleDecodedTile

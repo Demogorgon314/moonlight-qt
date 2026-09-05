@@ -102,6 +102,36 @@ AppleDecodedTile::ColorRange decodedColorRange(const AVFrame* frame)
 
 } // namespace
 
+bool AppleVideoDecodeBacklog::admit(quint64 bytes, quint64 now)
+{
+    if (m_Samples.size() >= MaximumSamples ||
+            bytes > MaximumBytes - m_Bytes || expired(now)) {
+        return false;
+    }
+    m_Samples.push_back({bytes, now});
+    m_Bytes += bytes;
+    return true;
+}
+
+bool AppleVideoDecodeBacklog::expired(quint64 now) const
+{
+    return !m_Samples.empty() && now >= m_Samples.front().enqueuedAt &&
+            now - m_Samples.front().enqueuedAt >= MaximumAgeNanoseconds;
+}
+
+void AppleVideoDecodeBacklog::take()
+{
+    Q_ASSERT(!m_Samples.empty());
+    m_Bytes -= m_Samples.front().bytes;
+    m_Samples.pop_front();
+}
+
+void AppleVideoDecodeBacklog::clear()
+{
+    m_Samples.clear();
+    m_Bytes = 0;
+}
+
 bool AppleVideoFrameQueue::setCanvas(const AppleCanvas& canvas)
 {
     if (!canvas.isUsable() || canvas == m_Canvas) {

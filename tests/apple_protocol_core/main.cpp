@@ -1922,6 +1922,38 @@ void testInitialPresentationResetsForNewCanvasAndReconnect()
             "a single-tile reconnect must retain output received before canvas setup");
 }
 
+void testDecodeBacklogBoundsAndRecovery()
+{
+    AppleVideoDecodeBacklog backlog;
+    const quint64 start = 1000000000;
+    const quint64 age = AppleVideoDecodeBacklog::MaximumAgeNanoseconds;
+    require(backlog.admit(1024, start) && backlog.admit(2048, start + age / 2),
+            "normal input must enter the decoder backlog");
+    require(!backlog.expired(start + age - 1) && backlog.expired(start + age),
+            "oldest sample must expire even if no new packet arrives");
+    require(!backlog.admit(1, start + age),
+            "new arrivals must not hide an expired oldest sample");
+    backlog.take();
+    require(!backlog.expired(start + age) && backlog.admit(1, start + age),
+            "consuming the oldest sample must advance the deadline");
+    backlog.clear();
+    const quint64 capacity = AppleVideoDecodeBacklog::MaximumBytes;
+    require(!backlog.admit(capacity + 1, start) && backlog.admit(capacity, start),
+            "oversized input must fail without corrupting the byte budget");
+    require(!backlog.admit(1, start), "compressed data must obey the byte limit");
+    backlog.take();
+    require(backlog.admit(capacity, start), "dequeue must release the byte budget");
+    backlog.clear();
+    for (int i = 0; i < AppleVideoDecodeBacklog::MaximumSamples; ++i) {
+        require(backlog.admit(1, start), "small samples must fit up to the queue limit");
+    }
+    require(!backlog.admit(1, start), "small samples must obey the count limit");
+    backlog.clear();
+    require(!backlog.expired(start + age * 10) &&
+                    backlog.admit(capacity, start + age * 10),
+            "recovery must clear capacity and deadlines before the new keyframe");
+}
+
 void testPresentationSnapshotSurvivesCanvasChanges()
 {
     AppleVideoFrameQueue frames;
@@ -3748,6 +3780,8 @@ void testNativePresentationFactoryUsesLowLatencyAdapter()
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
+    std::fprintf(stderr, "testDecodeBacklogBoundsAndRecovery\n");
+    testDecodeBacklogBoundsAndRecovery();
     std::fprintf(stderr, "testInitialTilesSurviveDeferredCanvasSetup\n");
     testInitialTilesSurviveDeferredCanvasSetup();
     std::fprintf(stderr, "testInitialPresentationWaitsForEveryTile\n");
