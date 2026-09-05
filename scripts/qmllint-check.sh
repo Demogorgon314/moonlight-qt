@@ -41,9 +41,24 @@ echo "检查 ${#QML_FILES[@]} 个 QML 文件"
 # C++ 注册给 QML 的类型 qmllint 看不见，只能豁免。名单连同模块名和主版本号
 # 一起从注册处现推，别硬编码 —— 将来注册了新类型不用回来改这个脚本。
 # 每行形如：<QML 类型名> <模块 URI> <主版本号>
-cpp_types=$(grep -rhoE "qmlRegister(Singleton|Uncreatable)?Type<[A-Za-z_]+>\(\"[A-Za-z_.]+\", *[0-9]+, *[0-9]+" app \
-            | sed -E 's/^qmlRegister(Singleton|Uncreatable)?Type<([A-Za-z_]+)>\("([A-Za-z_.]+)", *([0-9]+).*/\2 \3 \4/' \
-            | sort -u)
+# The QML name is the fourth argument, not the C++ template type. Registrations
+# may span lines (notably singleton factories).
+cpp_types=$(python3 - <<'PY'
+from pathlib import Path
+import re
+
+pattern = re.compile(
+    r'qmlRegister(?:Singleton|Uncreatable)?Type<[^>]+>\(\s*'
+    r'"([A-Za-z_.]+)"\s*,\s*(\d+)\s*,\s*\d+\s*,\s*"([A-Za-z_][A-Za-z_0-9]*)"'
+)
+types = set()
+for path in Path("app").rglob("*"):
+    if path.suffix in {".cpp", ".h", ".mm"}:
+        for uri, major, name in pattern.findall(path.read_text(encoding="utf-8")):
+            types.add(f"{name} {uri} {major}")
+print("\n".join(sorted(types)))
+PY
+)
 if [ -z "$cpp_types" ]; then
     echo "没能从 C++ 里推出注册类型名单，检查一下 grep 模式是不是过时了" >&2
     exit 1
