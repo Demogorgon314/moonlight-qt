@@ -62,12 +62,12 @@ public:
     AppleTrustProbeTask(AppleProtocolAdapter* adapter,
                         QString connectionId,
                         quint64 revision,
-                        quint64 generation,
+                        AppleAuthenticationAttempt attempt,
                         AppleConnectionEndpoint endpoint)
         : m_Adapter(adapter),
           m_ConnectionId(std::move(connectionId)),
           m_Revision(revision),
-          m_Generation(generation),
+          m_Attempt(std::move(attempt)),
           m_Endpoint(std::move(endpoint))
     {
         setAutoDelete(true);
@@ -78,12 +78,13 @@ public:
         AppleTcpTransport transport;
         AppleAuthenticator authenticator;
         AppleHostIdentity identity;
-        std::atomic_bool cancelled{false};
         QString error;
-        if (!authenticator.probe(transport, m_Endpoint, &identity, &cancelled, &error)) {
+        if (m_Attempt.cancelled->load()) return;
+        if (!authenticator.probe(transport, m_Endpoint, &identity, m_Attempt.cancelled.get(), &error)) {
             identity.fingerprint.clear();
         }
         transport.close();
+        if (m_Attempt.cancelled->load()) return;
 
         const QPointer<AppleProtocolAdapter> adapter = m_Adapter;
         if (adapter != nullptr) {
@@ -91,7 +92,7 @@ public:
                                       [adapter,
                                        connectionId = m_ConnectionId,
                                        revision = m_Revision,
-                                       generation = m_Generation,
+                                       generation = m_Attempt.generation,
                                        fingerprint = identity.fingerprint,
                                        error]() {
                                           if (adapter != nullptr) {
@@ -111,7 +112,7 @@ private:
     QPointer<AppleProtocolAdapter> m_Adapter;
     QString m_ConnectionId;
     quint64 m_Revision;
-    quint64 m_Generation;
+    AppleAuthenticationAttempt m_Attempt;
     AppleConnectionEndpoint m_Endpoint;
 };
 
@@ -120,11 +121,11 @@ class AppleCredentialVerificationTask final : public QRunnable
 public:
     AppleCredentialVerificationTask(AppleProtocolAdapter* adapter,
                                     AppleSavedConnection connection,
-                                    quint64 generation,
+                                    AppleAuthenticationAttempt attempt,
                                     AppleCredentials credentials)
         : m_Adapter(adapter),
           m_Connection(std::move(connection)),
-          m_Generation(generation),
+          m_Attempt(std::move(attempt)),
           m_Credentials(std::move(credentials))
     {
         setAutoDelete(true);
@@ -135,8 +136,8 @@ public:
         AppleTcpTransport transport;
         AppleAuthenticator authenticator;
         AppleAuthenticatedControl result;
-        std::atomic_bool cancelled{false};
         QString error;
+        if (m_Attempt.cancelled->load()) return;
         const bool success = authenticator.authenticate(
                 transport,
                 m_Connection.endpoint,
@@ -146,9 +147,10 @@ public:
                     return true;
                 },
                 &result,
-                &cancelled,
+                m_Attempt.cancelled.get(),
                 &error);
         transport.close();
+        if (m_Attempt.cancelled->load()) return;
         if (!success && error.isEmpty()) {
             error = QCoreApplication::translate(
                     "AppleProtocolAdapter",
@@ -161,7 +163,7 @@ public:
                                       [adapter,
                                        connectionId = m_Connection.id,
                                        revision = m_Connection.revision,
-                                       generation = m_Generation,
+                                       generation = m_Attempt.generation,
                                        credentials = m_Credentials,
                                        error]() {
                                           if (adapter != nullptr) {
@@ -180,7 +182,7 @@ public:
 private:
     QPointer<AppleProtocolAdapter> m_Adapter;
     AppleSavedConnection m_Connection;
-    quint64 m_Generation;
+    AppleAuthenticationAttempt m_Attempt;
     AppleCredentials m_Credentials;
 };
 
@@ -323,8 +325,7 @@ void AppleProtocolAdapter::deleteConnection(const ConnectionIdentity& identity)
         QString ignored;
         AppleCredentialStore().remove(removed.credentialReference, &ignored);
     }
-    m_PendingTrust.remove(identity.stableId());
-    m_AuthenticationGenerations.remove(identity.stableId());
+    cancelAuthentication(identity);
     emit connectionChanged(identity.toString());
 }
 
@@ -369,13 +370,16 @@ void AppleProtocolAdapter::requestAuthentication(const ConnectionIdentity& ident
         return;
     }
     connection.endpoint = currentEndpoint(connection);
-    const quint64 generation = m_NextAuthenticationGeneration++;
-    if (m_NextAuthenticationGeneration == 0) {
-        m_NextAuthenticationGeneration = 1;
-    }
-    m_AuthenticationGenerations[connection.id] = generation;
+    m_PendingTrust.remove(connection.id);
+    const auto attempt = m_AuthenticationAttempts.begin(connection.id);
     QThreadPool::globalInstance()->start(new AppleTrustProbeTask(
-            this, connection.id, connection.revision, generation, connection.endpoint));
+            this, connection.id, connection.revision, attempt, connection.endpoint));
+}
+
+void AppleProtocolAdapter::cancelAuthentication(const ConnectionIdentity& identity)
+{
+    m_PendingTrust.remove(identity.stableId());
+    m_AuthenticationAttempts.cancel(identity.stableId());
 }
 
 void AppleProtocolAdapter::confirmHostTrust(const ConnectionIdentity& identity,
@@ -384,14 +388,14 @@ void AppleProtocolAdapter::confirmHostTrust(const ConnectionIdentity& identity,
     const QString pendingFingerprint = m_PendingTrust.take(identity.stableId());
     if (!accepted || pendingFingerprint.isEmpty()) {
         if (!accepted) {
-            m_AuthenticationGenerations.remove(identity.stableId());
+            cancelAuthentication(identity);
         }
         return;
     }
     bool found = false;
     const AppleSavedConnection before = m_Store.connection(identity.stableId(), &found);
     if (!found) {
-        m_AuthenticationGenerations.remove(identity.stableId());
+        cancelAuthentication(identity);
         return;
     }
     if (AppleCredentialStore::isReferenceForConnection(
@@ -401,7 +405,7 @@ void AppleProtocolAdapter::confirmHostTrust(const ConnectionIdentity& identity,
         AppleCredentialStore().remove(before.credentialReference, &ignored);
     }
     if (!m_Store.setTrust(identity.stableId(), pendingFingerprint)) {
-        m_AuthenticationGenerations.remove(identity.stableId());
+        cancelAuthentication(identity);
         return;
     }
     const AppleSavedConnection after = m_Store.connection(identity.stableId());
@@ -416,25 +420,21 @@ void AppleProtocolAdapter::submitCredentials(const ConnectionIdentity& identity,
     bool found = false;
     AppleSavedConnection connection = m_Store.connection(identity.stableId(), &found);
     if (!found || !connection.isTrusted()) {
-        m_AuthenticationGenerations.remove(identity.stableId());
+        cancelAuthentication(identity);
         emit authenticationCompleted(identity.toString(), tr("Trust the Mac’s host identity before entering credentials."));
         return;
     }
     AppleCredentials credentials{username.trimmed(), password};
     QString error;
     if (!credentials.validate(&error)) {
-        m_AuthenticationGenerations.remove(identity.stableId());
+        cancelAuthentication(identity);
         emit authenticationCompleted(identity.toString(), error);
         return;
     }
     connection.endpoint = currentEndpoint(connection);
-    const quint64 generation = m_NextAuthenticationGeneration++;
-    if (m_NextAuthenticationGeneration == 0) {
-        m_NextAuthenticationGeneration = 1;
-    }
-    m_AuthenticationGenerations[connection.id] = generation;
+    const auto attempt = m_AuthenticationAttempts.begin(connection.id);
     QThreadPool::globalInstance()->start(new AppleCredentialVerificationTask(
-            this, std::move(connection), generation, std::move(credentials)));
+            this, std::move(connection), attempt, std::move(credentials)));
 }
 
 QVariantList AppleProtocolAdapter::connectionEndpoints(const ConnectionIdentity& identity) const
@@ -625,11 +625,11 @@ void AppleProtocolAdapter::completeTrustProbe(QString connectionId,
     const QString qualifiedId = ConnectionIdentity(
             ProtocolKind::AppleScreenSharing, connectionId).toString();
     if (!found || connection.revision != revision ||
-            m_AuthenticationGenerations.value(connectionId) != generation) {
+            !m_AuthenticationAttempts.isCurrent(connectionId, generation)) {
         return;
     }
     if (!error.isEmpty() || fingerprint.isEmpty()) {
-        m_AuthenticationGenerations.remove(connectionId);
+        m_AuthenticationAttempts.cancel(connectionId);
         emit authenticationCompleted(qualifiedId, error.isEmpty()
                 ? tr("Couldn’t read the Mac’s host identity.")
                 : error);
@@ -661,11 +661,11 @@ void AppleProtocolAdapter::completeAuthentication(QString connectionId,
     const QString qualifiedId = ConnectionIdentity(
             ProtocolKind::AppleScreenSharing, connectionId).toString();
     if (!found || connection.revision != revision ||
-            m_AuthenticationGenerations.value(connectionId) != generation) {
+            !m_AuthenticationAttempts.isCurrent(connectionId, generation)) {
         return;
     }
     if (!error.isEmpty()) {
-        m_AuthenticationGenerations.remove(connectionId);
+        m_AuthenticationAttempts.cancel(connectionId);
         emit authenticationCompleted(qualifiedId, error);
         return;
     }
@@ -676,11 +676,11 @@ void AppleProtocolAdapter::completeAuthentication(QString connectionId,
         if (error.isEmpty()) {
             error = tr("Couldn’t bind the verified credentials to this connection.");
         }
-        m_AuthenticationGenerations.remove(connectionId);
+        m_AuthenticationAttempts.cancel(connectionId);
         emit authenticationCompleted(qualifiedId, error);
         return;
     }
-    m_AuthenticationGenerations.remove(connectionId);
+    m_AuthenticationAttempts.cancel(connectionId);
     emit connectionChanged(qualifiedId);
     emit authenticationCompleted(qualifiedId, QString());
 }

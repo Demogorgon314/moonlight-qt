@@ -53,6 +53,7 @@ public:
 
     QString saveConnection(const ConnectionIdentity& identity, QString* error) override;
     void requestAuthentication(const ConnectionIdentity& identity) override;
+    void cancelAuthentication(const ConnectionIdentity& identity) override;
     void confirmHostTrust(const ConnectionIdentity& identity, bool accepted) override;
     void submitCredentials(const ConnectionIdentity& identity,
                            const QString& username,
@@ -106,9 +107,8 @@ private:
     QHash<QString, QMdnsEngine::Resolver*> m_Resolvers;
     QHash<QByteArray, QString> m_DeviceInfoQueries;
     QHash<QString, QString> m_PendingTrust;
-    QHash<QString, quint64> m_AuthenticationGenerations;
+    AppleAuthenticationAttempts m_AuthenticationAttempts;
     QSharedPointer<QMdnsEngine::Server> m_Server;
     QMdnsEngine::Browser* m_Browser = nullptr;
     int m_DiscoveryReferences = 0;
-    quint64 m_NextAuthenticationGeneration = 1;
 };

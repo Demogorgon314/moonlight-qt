@@ -208,6 +208,15 @@ void ComputerCatalog::confirmHostTrust(const QString& connectionId, bool accepte
     }
 }
 
+void ComputerCatalog::cancelAuthentication(const QString& connectionId)
+{
+    bool valid = false;
+    const ConnectionIdentity identity = ConnectionIdentity::fromString(connectionId, &valid);
+    if (ProtocolAdapter* adapter = valid ? adapterFor(identity) : nullptr) {
+        adapter->cancelAuthentication(identity);
+    }
+}
+
 void ComputerCatalog::submitCredentials(const QString& connectionId,
                                         const QString& username,
                                         const QString& password)

@@ -7,6 +7,7 @@
 #include <QScopeGuard>
 #include <QTcpSocket>
 #include <QThread>
+#include <utility>
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -149,6 +150,38 @@ QByteArray decryptAesEcb(const QByteArray& ciphertext,
 } // namespace
 
 AppleTcpTransport::AppleTcpTransport() = default;
+
+AppleAuthenticationAttempts::~AppleAuthenticationAttempts()
+{
+    for (const auto& attempt : std::as_const(m_Attempts)) {
+        attempt.cancelled->store(true);
+    }
+}
+
+AppleAuthenticationAttempt AppleAuthenticationAttempts::begin(const QString& connectionId)
+{
+    cancel(connectionId);
+    AppleAuthenticationAttempt attempt{
+        m_NextGeneration++, std::make_shared<std::atomic_bool>(false),
+    };
+    if (m_NextGeneration == 0) m_NextGeneration = 1;
+    m_Attempts.insert(connectionId, attempt);
+    return attempt;
+}
+
+void AppleAuthenticationAttempts::cancel(const QString& connectionId)
+{
+    const auto attempt = m_Attempts.take(connectionId);
+    if (attempt.cancelled) attempt.cancelled->store(true);
+}
+
+bool AppleAuthenticationAttempts::isCurrent(const QString& connectionId,
+                                            quint64 generation) const
+{
+    const auto attempt = m_Attempts.constFind(connectionId);
+    return attempt != m_Attempts.cend() && attempt->generation == generation;
+}
+
 AppleTcpTransport::~AppleTcpTransport() = default;
 
 bool AppleTcpTransport::connectTo(const AppleConnectionEndpoint& endpoint,

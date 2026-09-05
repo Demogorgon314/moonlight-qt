@@ -226,6 +226,13 @@ void ComputerModel::confirmHostTrust(QString connectionId, bool accepted)
     }
 }
 
+void ComputerModel::cancelAuthentication(QString connectionId)
+{
+    if (m_Catalog != nullptr) {
+        m_Catalog->cancelAuthentication(connectionId);
+    }
+}
+
 void ComputerModel::submitCredentials(QString connectionId,
                                       QString username,
                                       QString password)

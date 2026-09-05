@@ -48,6 +48,7 @@ public:
     Q_INVOKABLE StreamSession* createDirectSession(QString connectionId);
     Q_INVOKABLE QString saveConnection(QString connectionId);
     Q_INVOKABLE void requestAuthentication(QString connectionId);
+    Q_INVOKABLE void cancelAuthentication(QString connectionId);
     Q_INVOKABLE void confirmHostTrust(QString connectionId, bool accepted);
     Q_INVOKABLE void submitCredentials(QString connectionId,
                                        QString username,

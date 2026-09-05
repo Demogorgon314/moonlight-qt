@@ -6,6 +6,7 @@
 
 #include <QByteArray>
 #include <QString>
+#include <QHash>
 
 #include <atomic>
 #include <functional>
@@ -13,6 +14,30 @@
 
 class QTcpSocket;
 class QHostAddress;
+
+struct AppleAuthenticationAttempt
+{
+    quint64 generation = 0;
+    std::shared_ptr<std::atomic_bool> cancelled;
+};
+
+// The adapter owns the registry on its thread; workers retain only their
+// cancellation flag. Retiring a generation also interrupts its pending I/O.
+class AppleAuthenticationAttempts
+{
+public:
+    AppleAuthenticationAttempts() = default;
+    AppleAuthenticationAttempts(const AppleAuthenticationAttempts&) = delete;
+    AppleAuthenticationAttempts& operator=(const AppleAuthenticationAttempts&) = delete;
+    ~AppleAuthenticationAttempts();
+    AppleAuthenticationAttempt begin(const QString& connectionId);
+    void cancel(const QString& connectionId);
+    bool isCurrent(const QString& connectionId, quint64 generation) const;
+
+private:
+    QHash<QString, AppleAuthenticationAttempt> m_Attempts;
+    quint64 m_NextGeneration = 1;
+};
 
 class AppleByteTransport
 {

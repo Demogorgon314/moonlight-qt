@@ -47,6 +47,7 @@ public:
     void quitRunningActivity(const QString& connectionId);
     QString saveConnection(const QString& connectionId, QString* error = nullptr);
     void requestAuthentication(const QString& connectionId);
+    void cancelAuthentication(const QString& connectionId);
     void confirmHostTrust(const QString& connectionId, bool accepted);
     void submitCredentials(const QString& connectionId,
                            const QString& username,

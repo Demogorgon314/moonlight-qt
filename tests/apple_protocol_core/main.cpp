@@ -48,6 +48,8 @@ bool testAppleMetalTexturesSurviveUntilCompletion();
 #include <QSet>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QUdpSocket>
 #include <QUrl>
 
@@ -62,6 +64,7 @@ bool testAppleMetalTexturesSurviveUntilCompletion();
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <future>
 #include <thread>
 
 namespace {
@@ -519,6 +522,71 @@ void testTrustPrecedesCredentialRead()
             "fingerprint mismatch must not send an authentication request");
     require(error.contains(QStringLiteral("not read or sent")),
             "trust failure must explicitly report the secret-safety boundary");
+}
+
+void testAuthenticationCancellationInterruptsPendingRead()
+{
+    enum class Retirement { Cancel, Replace, Destroy };
+    for (auto retirement : {Retirement::Cancel, Retirement::Replace, Retirement::Destroy}) {
+        auto attempts = std::make_unique<AppleAuthenticationAttempts>();
+        const auto attempt = attempts->begin(QStringLiteral("mac"));
+        const auto other = attempts->begin(QStringLiteral("other"));
+        QTcpServer server;
+        require(server.listen(QHostAddress::LocalHost), "cancellation test server must listen");
+        AppleConnectionEndpoint endpoint;
+        endpoint.host = QStringLiteral("127.0.0.1");
+        endpoint.port = server.serverPort();
+        std::promise<void> reading;
+        auto ready = reading.get_future();
+        std::promise<bool> result;
+        auto finished = result.get_future();
+        std::thread worker([&] {
+            AppleTcpTransport transport;
+            QString error;
+            if (!transport.connectTo(endpoint, attempt.cancelled.get(), &error)) {
+                reading.set_value();
+                result.set_value(false);
+                return;
+            }
+            bool announced = false;
+            transport.setWaitCallback([&] {
+                if (!announced) {
+                    announced = true;
+                    reading.set_value();
+                }
+            });
+            QByteArray data;
+            const bool succeeded = transport.readExactly(12, &data, attempt.cancelled.get(), &error);
+            transport.close();
+            result.set_value(!succeeded && attempt.cancelled->load() && !error.isEmpty());
+        });
+        require(server.waitForNewConnection(3000), "worker must connect to the silent server");
+        std::unique_ptr<QTcpSocket> peer(server.nextPendingConnection());
+        require(ready.wait_for(std::chrono::seconds(3)) == std::future_status::ready,
+                "worker must enter the pending read before cancellation");
+        AppleAuthenticationAttempt replacement;
+        if (retirement == Retirement::Cancel) attempts->cancel(QStringLiteral("mac"));
+        if (retirement == Retirement::Replace) replacement = attempts->begin(QStringLiteral("mac"));
+        if (retirement == Retirement::Destroy) attempts.reset();
+        const bool timely = finished.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        // Unblock the worker even if cancellation regresses, before joining it.
+        if (!timely) peer->abort();
+        worker.join();
+        require(timely && finished.get(),
+                "retiring authentication must interrupt a silent TCP read before its 8-second timeout");
+        if (attempts) {
+            require(!attempts->isCurrent(QStringLiteral("mac"), attempt.generation),
+                    "a cancelled or replaced result must not be allowed to save credentials");
+            require(!other.cancelled->load() &&
+                            attempts->isCurrent(QStringLiteral("other"), other.generation),
+                    "cancelling one Mac must preserve another Mac's authentication");
+        }
+        if (replacement.cancelled) {
+            require(!replacement.cancelled->load() &&
+                            attempts->isCurrent(QStringLiteral("mac"), replacement.generation),
+                    "replacing authentication must leave the new attempt active");
+        }
+    }
 }
 
 void testFormalAuthenticationTranscript()
@@ -4053,6 +4121,8 @@ int main(int argc, char* argv[])
     testMalformedWireInputs();
     std::fprintf(stderr, "testTrustPrecedesCredentialRead\n");
     testTrustPrecedesCredentialRead();
+    std::fprintf(stderr, "testAuthenticationCancellationInterruptsPendingRead\n");
+    testAuthenticationCancellationInterruptsPendingRead();
     std::fprintf(stderr, "testFormalAuthenticationTranscript\n");
     testFormalAuthenticationTranscript();
     std::fprintf(stderr, "testAuthenticatedRecordRecoveryAndOrdering\n");

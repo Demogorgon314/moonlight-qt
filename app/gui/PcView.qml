@@ -92,7 +92,14 @@ CenteredGridView {
     }
 
     StackView.onDeactivating: {
+        cancelAppleAuthentication()
         ComputerManager.computerAddCompleted.disconnect(addComplete)
+    }
+
+    Component.onDestruction: {
+        if (pendingAppleConnectionId !== "" && computerModel) {
+            computerModel.cancelAuthentication(pendingAppleConnectionId)
+        }
     }
 
     function pairingComplete(error)
@@ -160,6 +167,7 @@ CenteredGridView {
 
     function authenticateApple(connectionId, connectionName, persistent)
     {
+        cancelAppleAuthentication()
         var savedId = connectionId
         if (!persistent) {
             savedId = computerModel.saveConnection(connectionId)
@@ -169,11 +177,27 @@ CenteredGridView {
         }
         pendingAppleConnectionId = savedId
         pendingAppleName = connectionName
+        appleAuthenticationDialog.open()
         computerModel.requestAuthentication(savedId)
+    }
+
+    function cancelAppleAuthentication()
+    {
+        var connectionId = pendingAppleConnectionId
+        pendingAppleConnectionId = ""
+        pendingAppleName = ""
+        if (connectionId !== "") {
+            computerModel.cancelAuthentication(connectionId)
+        }
+        appleAuthenticationDialog.close()
+        hostTrustDialog.close()
+        credentialsDialog.close()
     }
 
     function appleHostTrustRequired(connectionId, displayName, fingerprint, identityChanged)
     {
+        if (connectionId !== pendingAppleConnectionId) return
+        appleAuthenticationDialog.close()
         pendingAppleConnectionId = connectionId
         pendingAppleName = displayName
         hostTrustDialog.connectionId = connectionId
@@ -185,6 +209,8 @@ CenteredGridView {
 
     function appleCredentialsRequired(connectionId, preferredUsername)
     {
+        if (connectionId !== pendingAppleConnectionId) return
+        appleAuthenticationDialog.close()
         credentialsDialog.connectionId = connectionId
         credentialsDialog.preferredUsername = preferredUsername
         credentialsDialog.open()
@@ -192,7 +218,11 @@ CenteredGridView {
 
     function appleAuthenticationCompleted(connectionId, error)
     {
+        if (connectionId !== pendingAppleConnectionId) return
+        appleAuthenticationDialog.close()
         if (error !== "") {
+            pendingAppleConnectionId = ""
+            pendingAppleName = ""
             showOperationError(error)
             return
         }
@@ -688,7 +718,16 @@ CenteredGridView {
               "\n\n" + qsTr("SHA-256 host fingerprint:") + "\n" + fingerprint
         standardButtons: DialogButtonBox.Ok | DialogButtonBox.Cancel
         onAccepted: computerModel.confirmHostTrust(connectionId, true)
-        onRejected: computerModel.confirmHostTrust(connectionId, false)
+        onRejected: cancelAppleAuthentication()
+    }
+
+    NavigableMessageDialog {
+        id: appleAuthenticationDialog
+        closePolicy: Popup.CloseOnEscape
+        showSpinner: true
+        text: qsTr("Authenticating with the Mac…")
+        standardButtons: DialogButtonBox.Cancel
+        onRejected: cancelAppleAuthentication()
     }
 
     NavigableDialog {
@@ -708,10 +747,14 @@ CenteredGridView {
             }
         }
         onAccepted: {
+            var username = usernameText.text
+            var password = passwordText.text
+            appleAuthenticationDialog.open()
             computerModel.submitCredentials(connectionId,
-                                             usernameText.text,
-                                             passwordText.text)
+                                             username,
+                                             password)
         }
+        onRejected: cancelAppleAuthentication()
         onClosed: {
             // The password leaves QML immediately after submission and is never logged
             // or persisted by the UI layer.

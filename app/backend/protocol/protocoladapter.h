@@ -53,6 +53,7 @@ public:
         return {};
     }
     virtual void requestAuthentication(const ConnectionIdentity&) {}
+    virtual void cancelAuthentication(const ConnectionIdentity&) {}
     virtual void confirmHostTrust(const ConnectionIdentity&, bool) {}
     virtual void submitCredentials(const ConnectionIdentity&,
                                    const QString&,
