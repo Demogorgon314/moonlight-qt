@@ -625,6 +625,15 @@ QList<QByteArray> AppleClipboardExchange::requestRemoteClipboard(
     return {request(false, sessionId)};
 }
 
+AppleClipboardResult AppleClipboardExchange::receiveContinuation(
+        const QByteArray& message,
+        QString* error,
+        qint64 nowMilliseconds)
+{
+    return m_Reassembly.isEmpty() ? AppleClipboardResult{}
+                                 : receive(message, error, nowMilliseconds);
+}
+
 AppleClipboardResult AppleClipboardExchange::receive(
         const QByteArray& message,
         QString* error,
@@ -641,6 +650,7 @@ AppleClipboardResult AppleClipboardExchange::receive(
         if (message.size() > MaximumCompressedBytes + 16 ||
                 m_Reassembly.size() >
                         MaximumCompressedBytes + 16 - message.size()) {
+            resetReassembly();
             resetRequest();
             setError(error, QCoreApplication::translate(
                     "AppleClipboardExchange",
@@ -657,6 +667,7 @@ AppleClipboardResult AppleClipboardExchange::receive(
             const quint32 compressedSize = AppleWire::readUInt32(
                     m_Reassembly, 12, &ok);
             if (!ok || compressedSize > MaximumCompressedBytes) {
+                resetReassembly();
                 resetRequest();
                 setError(error, QCoreApplication::translate(
                         "AppleClipboardExchange",
@@ -669,6 +680,7 @@ AppleClipboardResult AppleClipboardExchange::receive(
             return result;
         }
         if (m_Reassembly.size() > m_ExpectedLength) {
+            resetReassembly();
             resetRequest();
             setError(error, QCoreApplication::translate(
                     "AppleClipboardExchange",
@@ -770,6 +782,7 @@ AppleClipboardResult AppleClipboardExchange::receive(
 
 void AppleClipboardExchange::resetForReconnect()
 {
+    resetReassembly();
     resetRequest();
     m_SharingEnabled = false;
     m_SharingStateKnown = false;
@@ -1037,8 +1050,8 @@ void AppleClipboardExchange::beginRequest(
         quint32 sessionId,
         qint64 nowMilliseconds)
 {
-    m_Reassembly.clear();
-    m_ExpectedLength = 0;
+    // Replacing a request cannot change the boundary of an incoming message.
+    // Consume its remaining records and reject the obsolete response ID.
     m_RequestState = state;
     m_RequestSessionId = sessionId;
     m_RequestDeadlineMilliseconds = nowMilliseconds >= 0
@@ -1047,12 +1060,16 @@ void AppleClipboardExchange::beginRequest(
 
 void AppleClipboardExchange::resetRequest()
 {
-    m_Reassembly.clear();
-    m_ExpectedLength = 0;
     m_RequestState = RequestState::Idle;
     m_RequestSessionId = 0;
     m_RequestEligibilityGeneration = 0;
     m_RequestDeadlineMilliseconds = -1;
+}
+
+void AppleClipboardExchange::resetReassembly()
+{
+    m_Reassembly.clear();
+    m_ExpectedLength = 0;
 }
 
 void AppleClipboardExchange::expireRequest(qint64 nowMilliseconds)

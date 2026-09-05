@@ -2522,6 +2522,84 @@ void testStageFourRichClipboardExchange()
             "a failed advertisement must not leave a fulfillable promise behind");
 }
 
+void testClipboardContinuationOwnership()
+{
+    const AppleClipboardArchive archive{{{{{
+        QStringLiteral("public.utf8-plain-text"), {},
+        QByteArrayLiteral("Clipboard payload spanning encrypted records"), 0,
+    }}}}};
+    const QByteArray changed = QByteArray::fromHex("1400000000000002");
+    enum class Scenario { Current, Replaced, Expired, Unfocused, SharingDisabled };
+    for (Scenario scenario : {Scenario::Current, Scenario::Replaced,
+                              Scenario::Expired, Scenario::Unfocused,
+                              Scenario::SharingDisabled}) {
+        AppleClipboardExchange exchange;
+        QString error;
+        exchange.setSharingEnabled(true);
+        exchange.setAutomaticEligible(true);
+        const bool automatic = scenario == Scenario::Unfocused ||
+                scenario == Scenario::SharingDisabled;
+        if (automatic) {
+            exchange.receive(changed, &error, 0);
+            for (const QByteArray& fragment :
+                 AppleClipboardExchange::encodeArchive(archive, true, 1, &error)) {
+                exchange.receive(fragment, &error, 1);
+            }
+        }
+        else {
+            exchange.requestRemoteClipboard(0);
+        }
+        QByteArray message;
+        for (const QByteArray& fragment : AppleClipboardExchange::encodeArchive(
+                     archive, false, automatic ? 0 : 1, &error)) {
+            message.append(fragment);
+        }
+        require(error.isEmpty() && message.size() > 16,
+                "clipboard continuation fixture must contain a complete archive");
+        require(exchange.receive(message.left(16), &error, 2).consumed,
+                "the clipboard header must claim its following payload records");
+
+        qint64 now = 3;
+        if (scenario == Scenario::Replaced) exchange.requestRemoteClipboard(now);
+        if (scenario == Scenario::Expired) now = AppleClipboardExchange::RequestLifetimeMilliseconds;
+        if (scenario == Scenario::Unfocused) exchange.setAutomaticEligible(false);
+        if (scenario == Scenario::SharingDisabled) exchange.setSharingEnabled(false);
+
+        AppleClipboardResult result;
+        // Record boundaries may split compressed data anywhere; none of these
+        // bytes may be dispatched as a fresh file, clipboard, or layout message.
+        for (int offset = 16; offset < message.size(); ++offset) {
+            result = exchange.receiveContinuation(message.mid(offset, 1), &error, now);
+            require(result.consumed && error.isEmpty(),
+                    "request replacement or invalidation must preserve payload ownership");
+            if (offset + 1 < message.size()) {
+                require(!result.receivedArchive.has_value(),
+                        "partial clipboard data must never be installed");
+            }
+        }
+        require(scenario == Scenario::Current
+                        ? result.receivedArchive == std::optional<AppleClipboardArchive>(archive)
+                        : !result.receivedArchive.has_value(),
+                "only the still-current request may install the completed archive");
+        require(!exchange.receiveContinuation(changed, &error, now).consumed,
+                "completed reassembly must release ownership of the next record");
+
+        if (scenario == Scenario::Replaced) {
+            for (const QByteArray& fragment :
+                 AppleClipboardExchange::encodeArchive(archive, false, 2, &error)) {
+                result = exchange.receive(fragment, &error, now);
+            }
+            require(result.receivedArchive == std::optional<AppleClipboardArchive>(archive),
+                    "draining an obsolete response must preserve its replacement request");
+        }
+
+        exchange.receive(message.left(16), &error, now);
+        exchange.resetForReconnect();
+        require(!exchange.receiveContinuation(changed, &error, now).consumed,
+                "a new connection must not inherit unfinished payload ownership");
+    }
+}
+
 void testRichClipboardMimeAdapter()
 {
     QMimeData mime;
@@ -3977,6 +4055,8 @@ int main(int argc, char* argv[])
     testRemoteCursorCacheMatchesSwiftFallbacks();
     std::fprintf(stderr, "testStageFourRichClipboardExchange\n");
     testStageFourRichClipboardExchange();
+    std::fprintf(stderr, "testClipboardContinuationOwnership\n");
+    testClipboardContinuationOwnership();
     std::fprintf(stderr, "testRichClipboardMimeAdapter\n");
     testRichClipboardMimeAdapter();
     std::fprintf(stderr, "testAppleFileTransferNativeWireContract\n");

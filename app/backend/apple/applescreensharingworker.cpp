@@ -1570,17 +1570,26 @@ private:
                 if (!control.receiveEncrypted(tcp, &message, m_Cancelled, error)) {
                     return false;
                 }
+                AppleClipboardResult clipboardResult =
+                        clipboard.receiveContinuation(message, error, clock.elapsed());
                 QString fileDiagnostic;
-                if (m_Session->m_FileTransferService->receive(
-                            message, &fileDiagnostic)) {
+                const bool fileConsumed = !clipboardResult.consumed &&
+                        m_Session->m_FileTransferService->receive(
+                                message, &fileDiagnostic);
+                if (fileConsumed) {
                     if (!fileDiagnostic.isEmpty()) {
                         qWarning().noquote()
                                 << "Apple file transfer:" << fileDiagnostic;
                     }
                     dispatchFileTransferEvents();
                 }
-                const AppleControlEvents events =
-                        AppleControlEventParser::parse(message);
+                if (!clipboardResult.consumed && !fileConsumed) {
+                    clipboardResult = clipboard.receive(message, error, clock.elapsed());
+                }
+                const bool controlMessage = !clipboardResult.consumed && !fileConsumed;
+                const AppleControlEvents events = controlMessage
+                        ? AppleControlEventParser::parse(message)
+                        : AppleControlEvents{};
                 for (const AppleDisplayLayout& layout : events.displayLayouts) {
                     if (!control.sendEncrypted(
                                 tcp,
@@ -1619,10 +1628,10 @@ private:
                     }
                 }
                 AppleCanvas mediaCanvas;
-                const bool hasMediaCanvas =
+                const bool hasMediaCanvas = controlMessage &&
                         AppleMediaWire::parseCanvas(message, &mediaCanvas) &&
                         mediaCanvas.isUsable();
-                if (dynamicResolutionResponsePendingAt >= 0) {
+                if (controlMessage && dynamicResolutionResponsePendingAt >= 0) {
                     qInfo().nospace()
                             << "Apple Screen Sharing dynamic response: type=0x"
                             << QString::number(
@@ -1655,8 +1664,6 @@ private:
                             },
                             Qt::QueuedConnection);
                 }
-                AppleClipboardResult clipboardResult =
-                        clipboard.receive(message, error, clock.elapsed());
                 for (const QByteArray& response :
                      std::as_const(clipboardResult.outboundMessages)) {
                     if (!control.sendEncrypted(

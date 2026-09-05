@@ -199,6 +199,11 @@ public:
     AppleClipboardResult receive(const QByteArray& message,
                                  QString* error = nullptr,
                                  qint64 nowMilliseconds = 0);
+    // Claims pending payload records before their bytes can be read as a new
+    // control message type, even after the associated request has expired.
+    AppleClipboardResult receiveContinuation(const QByteArray& message,
+                                             QString* error = nullptr,
+                                             qint64 nowMilliseconds = 0);
     void resetForReconnect();
 
     static QByteArray request(bool promises, quint32 sessionId);
@@ -231,6 +236,7 @@ private:
                       quint32 sessionId,
                       qint64 nowMilliseconds);
     void resetRequest();
+    void resetReassembly();
     void expireRequest(qint64 nowMilliseconds);
     quint32 nextSessionId();
 
