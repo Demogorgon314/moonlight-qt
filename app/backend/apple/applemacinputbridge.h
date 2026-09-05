@@ -101,6 +101,8 @@ public:
     AppleMacInputBridge& operator=(const AppleMacInputBridge&) = delete;
 
     bool isValid() const;
+    // Native controls must retain ownership of events until tracking finishes.
+    static bool isNativeEventTracking();
     // Releases every modifier still held by AppKit and forgets their state.
     // Safe to call again when a delayed flagsChanged event arrives.
     void releasePressedModifiers();

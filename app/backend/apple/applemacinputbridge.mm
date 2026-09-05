@@ -1052,6 +1052,12 @@ AppleMacInputBridge::~AppleMacInputBridge()
     }
 }
 
+bool AppleMacInputBridge::isNativeEventTracking()
+{
+    return [[NSRunLoop currentRunLoop].currentMode
+            isEqualToString:NSEventTrackingRunLoopMode];
+}
+
 bool AppleMacInputBridge::isValid() const
 {
     return d->valid;

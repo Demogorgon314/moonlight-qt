@@ -459,6 +459,15 @@ std::optional<QPair<quint16, quint16>> AppleScreenSharingSession::remotePoint(
 
 void AppleScreenSharingSession::pollSdlEvents()
 {
+#ifdef Q_OS_DARWIN
+    // Qt timers also run inside AppKit's button/menu tracking loops.
+    // SDL_PollEvent pumps native events and can consume the mouse-up that
+    // the tracking control is waiting for. Leave it to AppKit until tracking
+    // ends; the next timer tick will drain the queued SDL window events.
+    if (AppleMacInputBridge::isNativeEventTracking()) {
+        return;
+    }
+#endif
     const auto displayIndexForWindow = [this](quint32 windowId) {
         return m_SecondaryWindow != nullptr &&
                 SDL_GetWindowID(m_SecondaryWindow) == windowId ? 1 : 0;
